@@ -1,0 +1,100 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Market {
+    #[serde(rename = "clobTokenIds")]
+    pub clob_token_ids: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PolymarketEvent {
+    pub slug: String,
+    pub title: String,
+    pub end_date: String,
+    pub active: bool,
+    pub markets: serde_json::Value, 
+}
+
+#[allow(dead_code)]
+pub struct TargetMarket {
+    pub slug: String,
+    pub title: String,
+    pub up_token: String,
+    pub down_token: String,
+    pub end_date: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OrderSummary {
+    pub price: String,
+    pub size: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone)]
+pub struct BookMessage {
+    pub event_type: String,
+    pub asset_id: String,
+    pub bids: Vec<OrderSummary>,
+    pub asks: Vec<OrderSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SubscribeMessage {
+    pub assets_ids: Vec<String>,
+    #[serde(rename = "type")]
+    pub msg_type: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Side { Up, Down }
+
+#[derive(Debug, Default, Clone)]
+pub struct Portfolio {
+    pub up_shares: f64,
+    pub down_shares: f64,
+    pub up_spent: f64,
+    pub down_spent: f64,
+    // Счётчики типов сделок
+    pub maker_trades: u32,
+    pub taker_trades: u32,
+}
+
+#[allow(dead_code)]
+impl Portfolio {
+    pub fn up_avg(&self) -> f64 { if self.up_shares > 0.0 { self.up_spent / self.up_shares } else { 0.0 } }
+    pub fn down_avg(&self) -> f64 { if self.down_shares > 0.0 { self.down_spent / self.down_shares } else { 0.0 } }
+    pub fn total_avg(&self) -> f64 { self.up_avg() + self.down_avg() }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct MarketPrices {
+    pub up_bid: f64,
+    pub up_bid_size: f64,
+    pub up_ask: f64,
+    pub up_ask_size: f64,
+    pub down_bid: f64,
+    pub down_bid_size: f64,
+    pub down_ask: f64,
+    pub down_ask_size: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TradeRecord {
+    pub time: String,
+    pub side: String,
+    pub trade_type: String,
+    pub price: f64,
+    pub shares: f64,
+    pub cost: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct GlobalSummary {
+    pub total_pnl: f64,
+    pub min_pnl: f64,
+    pub max_pnl: f64,
+    pub total_events: u32,
+    pub wins: u32,
+}
