@@ -15,11 +15,11 @@ pub struct DataStream {
 }
 
 impl DataStream {
-    pub fn new(up: String, down: String, engine: Arc<RealEngine>) -> Self {
+    pub fn new(up: String, down: String, engine: Arc<RealEngine>, ws_url: String) -> Self {
         Self {
             up_token: up,
             down_token: down,
-            ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_string(),
+            ws_url,
             prices: Arc::new(Mutex::new(MarketPrices::default())),
             engine,
         }

@@ -13,7 +13,7 @@ use alloy::signers::local::PrivateKeySigner;
 
 const MAX_BALANCE: f64 = 3000.0;
 const SIZE: f64 = 3.0;
-const HEDGE_SIZE: f64 = 3.0;
+const HEDGE_SIZE: f64 = 6.0;
 
 pub struct RealEngine {
     portfolio: Mutex<Portfolio>,
@@ -157,7 +157,7 @@ impl RealEngine {
                 .token_id(&token_id)
                 .amount(usdc_amount)
                 .side(PolySide::Buy)
-                .order_type(OrderType::FOK)
+                .order_type(OrderType::FAK)
                 .build().await;
 
             match order {

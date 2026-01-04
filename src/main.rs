@@ -27,6 +27,7 @@ async fn main() -> anyhow::Result<()> {
     let funder_addr_str = std::env::var("FUNDER_ADDRESS").expect("Нужен FUNDER_ADDRESS в .env");
     let funder_address: Address = funder_addr_str.parse()
     .expect("Неверный формат адреса в FUNDER_ADDRESS (должен начинаться с 0x...)");
+    let ws_market_url = std::env::var("CLOB_WS_MARKET").expect("Нужен CLOB_WS_MARKET в .env");
 
     let signer = PrivateKeySigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
 
@@ -67,9 +68,9 @@ async fn main() -> anyhow::Result<()> {
                     target.down_token.clone()
                 ));
 
-                
-                
-                let market_stream = DataStream::new(target.up_token.clone(), target.down_token.clone(), engine.clone());
+
+
+                let market_stream = DataStream::new(target.up_token.clone(), target.down_token.clone(), engine.clone(), ws_market_url.clone());
 
                 // ! ИЗМЕНЕНИЕ: Передаем ws_client (который уже аутентифицирован в начале main)
                 let user_stream = UserStream::new(engine.clone(), ws_client.clone());
