@@ -1,22 +1,21 @@
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use crate::models::{BookMessage, SubscribeMessage, MarketPrices};
-use crate::engine::DryRunEngine;
+use crate::engine::RealEngine;
 use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 use tokio::time::{interval, Duration};
-
 
 pub struct DataStream {
     up_token: String,
     down_token: String,
     ws_url: String,
     prices: Arc<Mutex<MarketPrices>>,
-    engine: Arc<DryRunEngine>,
+    engine: Arc<RealEngine>,
 }
 
 impl DataStream {
-    pub fn new(up: String, down: String, engine: Arc<DryRunEngine>) -> Self {
+    pub fn new(up: String, down: String, engine: Arc<RealEngine>) -> Self {
         Self {
             up_token: up,
             down_token: down,
@@ -34,12 +33,9 @@ impl DataStream {
             msg_type: "market".to_string(),
         };
         ws_stream.send(Message::Text(serde_json::to_string(&sub)?.into())).await?;
-        println!("✅ Подписка активна");
 
         let end_date = end_date_str.parse::<DateTime<Utc>>().unwrap_or(Utc::now());
-        let mut check_interval = interval(Duration::from_secs(5));
-
-        let mut last_prices = MarketPrices::default(); // Храним для финализации
+        let mut check_interval = interval(Duration::from_secs(1));
 
         loop {
             tokio::select! {
@@ -47,24 +43,17 @@ impl DataStream {
                     if let Some(Ok(Message::Text(text))) = msg {
                         if let Ok(book) = serde_json::from_str::<BookMessage>(&text) {
                             self.update_prices(book);
-                            // Обновляем локальную копию для финала
-                            last_prices = self.prices.lock().unwrap().clone();
                         }
                     } else if msg.is_none() { break; }
                 }
                 _ = check_interval.tick() => {
-                    if Utc::now() >= end_date {
-                        println!("⏰ DEADLINE REACHED.");
-                        break;
-                    }
+                    if Utc::now() >= end_date { break; }
                 }
             }
         }
         
-        // После выхода из цикла (событие завершено)
-        println!("🏁 Event finished. Calculating results...");
-        self.engine.finalize(&last_prices);
-
+        let last_p = self.prices.lock().unwrap().clone();
+        self.engine.finalize(&last_p);
         Ok(())
     }
 
@@ -84,7 +73,7 @@ impl DataStream {
             if let Some(a) = best_ask { p.down_ask = a.0; p.down_ask_size = a.1; }
         }
         
-        // Передаем обновленные цены в движок
+        // ВАЖНО: Вызываем движок БЕЗ задержки
         self.engine.process_tick(p.clone());
     }
 }

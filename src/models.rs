@@ -56,7 +56,6 @@ pub struct Portfolio {
     pub down_shares: f64,
     pub up_spent: f64,
     pub down_spent: f64,
-    // Счётчики типов сделок
     pub maker_trades: u32,
     pub taker_trades: u32,
 }
