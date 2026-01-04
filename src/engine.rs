@@ -11,7 +11,7 @@ use polymarket_client_sdk::clob::types::{OrderType, Side as PolySide};
 use polymarket_client_sdk::types::Decimal;
 use alloy::signers::local::PrivateKeySigner;
 
-const MAX_BALANCE: f64 = 3000.0;
+const MAX_BALANCE: f64 = 15.0;
 const SIZE: f64 = 3.0;
 const HEDGE_SIZE: f64 = 6.0;
 
@@ -89,6 +89,11 @@ impl RealEngine {
     fn manage_adaptive_maker(&self, port: &Portfolio, prices: &MarketPrices) {
         if (port.up_spent + port.down_spent) >= MAX_BALANCE { return; }
 
+        // Проверяем, что обе стороны имеют валидные bid цены
+        if prices.up_bid < 0.01 || prices.down_bid < 0.01 {
+            return;
+        }
+
         let potential_pair_cost = (prices.up_bid + 0.01) + (prices.down_bid + 0.01);
         if potential_pair_cost >= 0.99 { return; }
 
@@ -103,23 +108,33 @@ impl RealEngine {
             Self::round_price(prices.down_bid)
         };
 
+        // Дополнительная проверка после округления
+        if up_price < 0.01 || down_price < 0.01 {
+            return;
+        }
+
         let up_token = self.up_token.clone();
         let down_token = self.down_token.clone();
         let client = self.client.clone();
         let signer = self.signer.clone();
 
         tokio::spawn(async move {
+            // Конвертируем через строку для точного представления с 2 знаками после запятой
+            let up_price_dec = format!("{:.2}", up_price).parse::<Decimal>().unwrap();
+            let down_price_dec = format!("{:.2}", down_price).parse::<Decimal>().unwrap();
+            let size_dec = Decimal::from_f64_retain(SIZE).unwrap();
+
             let order_up = client.limit_order()
                 .token_id(&up_token)
-                .price(Decimal::from_f64_retain(up_price).unwrap())
-                .size(Decimal::from_f64_retain(SIZE).unwrap())
+                .price(up_price_dec)
+                .size(size_dec)
                 .side(PolySide::Buy)
                 .build().await.unwrap();
 
             let order_down = client.limit_order()
                 .token_id(&down_token)
-                .price(Decimal::from_f64_retain(down_price).unwrap())
-                .size(Decimal::from_f64_retain(SIZE).unwrap())
+                .price(down_price_dec)
+                .size(size_dec)
                 .side(PolySide::Buy)
                 .build().await.unwrap();
 
