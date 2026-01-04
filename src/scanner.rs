@@ -39,34 +39,65 @@ impl AutoScanner {
 
     // Выносим логику одного запроса в отдельный метод
     async fn perform_scan(&self, prefix: &str, min_m: f64, max_m: f64) -> Result<Option<TargetMarket>, Box<dyn Error>> {
-        let start_request = std::time::Instant::now();
-        
-        let response = self.client.get(&self.api_url)
-            .query(&[
-                ("active", "true"), 
-                ("closed", "false"), 
-                ("limit", "500"), 
-                ("offset", "500"),
-                ("order", "endDate"), 
-                ("ascending", "true")
-                ]
-            )
-            .send().await?;
+        let mut offset = 0;
+        let limit = 500;
 
-        let bytes = response.bytes().await?;
-        let download_time = start_request.elapsed();
-        
-        let start_parse = std::time::Instant::now();
-        let events: Vec<PolymarketEvent> = serde_json::from_slice(&bytes)?;
-        println!("⏱️ Сеть: {:?} | Процессор (JSON): {:?}", download_time, start_parse.elapsed());
+        loop {
+            let start_request = std::time::Instant::now();
+            
+            // Формируем запрос с учетом текущего offset
+            let response = self.client.get(&self.api_url)
+                .query(&[
+                    ("active", "true"), 
+                    ("closed", "false"), 
+                    ("limit", &limit.to_string()), // Лимит за раз
+                    ("offset", &offset.to_string()), // Наше смещение
+                    ("order", "endDate"), 
+                    ("ascending", "true")
+                ])
+                .send()
+                .await?;
 
-        // Используем итераторы вместо вложенных циклов
-        let target = events.into_iter()
-            .filter(|e| e.active && e.slug.starts_with(prefix))
-            .filter_map(|e| self.process_event(e, min_m, max_m))
-            .next();
+            // Проверяем статус ответа (важно для отладки)
+            if !response.status().is_success() {
+                return Err(format!("API вернул ошибку: {}", response.status()).into());
+            }
 
-        Ok(target)
+            let bytes = response.bytes().await?;
+            let download_time = start_request.elapsed();
+            
+            let start_parse = std::time::Instant::now();
+            let events: Vec<PolymarketEvent> = serde_json::from_slice(&bytes)?;
+            
+            // Если API вернул пустой список, значит мы просмотрели всё и ничего не нашли
+            if events.is_empty() {
+                println!("📍 Достигнут конец списка событий. Ничего не найдено.");
+                return Ok(None);
+            }
+
+            println!(
+                "📡 Загружено {} событий (offset: {}). Сеть: {:?} | Парсинг: {:?}", 
+                events.len(), offset, download_time, start_parse.elapsed()
+            );
+
+            // Ищем цель в текущей пачке
+            let target = events.into_iter()
+                .filter(|e| e.active && e.slug.starts_with(prefix))
+                .filter_map(|e| self.process_event(e, min_m, max_m))
+                .next();
+
+            // Если нашли — возвращаем результат немедленно
+            if target.is_some() {
+                return Ok(target);
+            }
+
+            // Если не нашли в этой пачке — увеличиваем offset и идем на следующий круг
+            offset += limit;
+            
+            // Небольшая пауза между запросами пагинации, чтобы API не забанил за спам
+            // (Rate limiting — важная штука в арбитраже)
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     // Логика проверки конкретного события
