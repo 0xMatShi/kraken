@@ -26,10 +26,10 @@ pub struct RealEngine {
 
 impl RealEngine {
     pub fn new(
-        slug: &str, 
-        client: Client<Authenticated<Normal>>, 
-        signer: PrivateKeySigner, 
-        up_token: String, 
+        slug: &str,
+        client: Client<Authenticated<Normal>>,
+        signer: PrivateKeySigner,
+        up_token: String,
         down_token: String
     ) -> Self {
         Self {
@@ -40,6 +40,11 @@ impl RealEngine {
             up_token,
             down_token,
         }
+    }
+
+    // Округление до 2 знаков (минимальный тик-размер 0.01)
+    fn round_price(price: f64) -> f64 {
+        (price * 100.0).round() / 100.0
     }
 
     pub fn process_tick(&self, prices: MarketPrices) {
@@ -87,8 +92,16 @@ impl RealEngine {
         let potential_pair_cost = (prices.up_bid + 0.01) + (prices.down_bid + 0.01);
         if potential_pair_cost >= 0.99 { return; }
 
-        let up_price = if prices.up_bid_size > 100.0 { prices.up_bid + 0.01 } else { prices.up_bid };
-        let down_price = if prices.down_bid_size > 100.0 { prices.down_bid + 0.01 } else { prices.down_bid };
+        let up_price = if prices.up_bid_size > 100.0 {
+            Self::round_price(prices.up_bid + 0.01)
+        } else {
+            Self::round_price(prices.up_bid)
+        };
+        let down_price = if prices.down_bid_size > 100.0 {
+            Self::round_price(prices.down_bid + 0.01)
+        } else {
+            Self::round_price(prices.down_bid)
+        };
 
         let up_token = self.up_token.clone();
         let down_token = self.down_token.clone();
@@ -150,7 +163,9 @@ impl RealEngine {
         let t_type_str = t_type.to_string();
 
         tokio::spawn(async move {
-            let amount_dec = Decimal::from_f64_retain(price * shares).unwrap();
+            // Округляем сумму до 2 знаков перед конвертацией в Decimal
+            let total_amount = ((price * shares) * 100.0).round() / 100.0;
+            let amount_dec = Decimal::from_f64_retain(total_amount).unwrap();
             let usdc_amount = polymarket_client_sdk::clob::types::Amount::usdc(amount_dec).unwrap();
             
             let order = client.market_order()

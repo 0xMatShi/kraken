@@ -99,7 +99,7 @@ RealEngine initialized with up_token & down_token
 DataStream (WebSocket) → price updates → engine.process_tick()
     ↓
 Engine logic:
-  - If |skew| >= HEDGE_SIZE: execute taker order (FOK market order)
+  - If |skew| >= HEDGE_SIZE: execute taker order (FAK market order)
   - If cost basis risky: emergency cover
   - Otherwise: spawn maker order pairs (5 sec TTL)
     ↓
@@ -127,7 +127,7 @@ On market end: engine.finalize() calculates PnL & updates reports
 - Skipped if potential pair cost >= 0.99 (no profit margin)
 
 **Taker Orders** (src/engine.rs:146-174):
-- Market orders with FOK (Fill or Kill) execution
+- Market orders with FAK (Fill and Kill) execution
 - Used for hedging when skew exceeds threshold
 - Emergency exits when position becomes unprofitable
 
