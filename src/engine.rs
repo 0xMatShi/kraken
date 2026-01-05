@@ -23,9 +23,9 @@ pub struct RealEngine {
     signer: PrivateKeySigner,
     up_token: Arc<str>,
     down_token: Arc<str>,
-    // Дедупликация WebSocket событий
     seen_trades: Mutex<HashSet<String>>,
     seen_orders: Mutex<HashSet<String>>,
+    active_order_ids: Mutex<HashSet<String>>,
 }
 
 impl RealEngine {
@@ -45,12 +45,24 @@ impl RealEngine {
             down_token: Arc::from(down_token.as_str()),
             seen_trades: Mutex::new(HashSet::new()),
             seen_orders: Mutex::new(HashSet::new()),
+            active_order_ids: Mutex::new(HashSet::new()),
         }
     }
 
     // Округление до 2 знаков (минимальный тик-размер 0.01)
     fn round_price(price: f64) -> f64 {
         (price * 100.0).round() / 100.0
+    }
+
+    // Методы для работы с активными ордерами
+    pub fn add_order_id(&self, order_id: String) {
+        let mut orders = self.active_order_ids.lock().unwrap();
+        orders.insert(order_id);
+    }
+
+    pub fn remove_order_id(&self, order_id: &str) {
+        let mut orders = self.active_order_ids.lock().unwrap();
+        orders.remove(order_id);
     }
 
     pub fn process_tick(&self, prices: MarketPrices) {
@@ -66,18 +78,10 @@ impl RealEngine {
         let skew = up_shares - down_shares;
 
         if skew >= HEDGE_SIZE {
-            {
-                let mut port = self.portfolio.lock().unwrap();
-                port.taker_trades += 1;
-            }
-            self.execute_real_trade(Side::Down, prices.down_ask, skew.abs(), "Taker-Hedge");
+            self.execute_real_trade(Side::Down, prices.down_ask, skew.abs(), "Hedge");
             return;
         } else if skew <= -HEDGE_SIZE {
-            {
-                let mut port = self.portfolio.lock().unwrap();
-                port.taker_trades += 1;
-            }
-            self.execute_real_trade(Side::Up, prices.up_ask, skew.abs(), "Taker-Hedge");
+            self.execute_real_trade(Side::Up, prices.up_ask, skew.abs(), "Hedge");
             return;
         }
 
@@ -160,40 +164,18 @@ impl RealEngine {
 
             match client.post_orders(vec![signed_up, signed_down]).await {
                 Ok(responses) => {
-                    println!("📥 Maker: размещены ордера UP@{:.2}, DOWN@{:.2}", up_price, down_price);
-
                     let mut order_ids = Vec::new();
-                    for (idx, resp) in responses.iter().enumerate() {
-                        // ИСПРАВЛЕНИЕ: В SDK order_id часто просто String, а не Option.
-                        // Если компилятор ругался на if let Some(id), значит там уже String.
+                    for resp in responses.iter() {
                         if !resp.order_id.is_empty() {
-                            println!("   ✓ Ордер #{} ID: {} | Success: {}", idx + 1, resp.order_id, resp.success);
                             order_ids.push(resp.order_id.clone());
-                        } else {
-                            println!("   ⚠️ Ордер #{} не вернул ID! Success: {} | Error: {:?}", idx + 1, resp.success, resp.error_msg);
                         }
                     }
 
-                    if order_ids.is_empty() {
-                        println!("   ⚠️ Ни один ордер не вернул валидный ID - возможно, они не были размещены!");
-                    } else {
-                        println!("   📝 Активных ордеров: {} (будут отменены через 10 сек)", order_ids.len());
-                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
 
-                    tokio::time::sleep(Duration::from_secs(10)).await;
-
-                    if !order_ids.is_empty() {
-                        for id in order_ids {
-                            // ИСПРАВЛЕНИЕ: передаем &str
-                            match client.cancel_order(&id).await {
-                                Ok(_) => {
-                                    println!("   ❌ Отменен ордер ID: {}", id);
-                                },
-                                Err(e) => {
-                                    println!("   ℹ️ Не удалось отменить {} (возможно исполнен): {}", id, e);
-                                }
-                            }
-                        }
+                    // Отменяем ордера
+                    for id in order_ids {
+                        let _ = client.cancel_order(&id).await;
                     }
                 },
                 Err(e) => eprintln!("❌ Ошибка размещения Maker ордеров: {}", e),
@@ -212,7 +194,7 @@ impl RealEngine {
             let total_amount = ((price * shares) * 100.0).round() / 100.0;
             let amount_dec: Decimal = format!("{:.2}", total_amount).parse().unwrap();
             let usdc_amount = polymarket_client_sdk::clob::types::Amount::usdc(amount_dec).unwrap();
-            
+
             let order = client.market_order()
                 .token_id(&*token_id)
                 .amount(usdc_amount)
@@ -224,22 +206,22 @@ impl RealEngine {
                 Ok(ord) => {
                     let signed = client.sign(&signer, ord).await.unwrap();
                     match client.post_order(signed).await {
-                        Ok(_) => println!("🚀 Taker {} {} отправлен по {:.2}", t_type_str, format!("{:?}", side), price),
-                        Err(e) => eprintln!("❌ Ошибка отправки Taker ордера: {}", e),
+                        Ok(_) => {}, // Успех - подтверждение придет через WsMessage::Trade
+                        Err(e) => eprintln!("❌ Ошибка отправки Taker {}: {}", t_type_str, e),
                     }
                 },
-                Err(e) => eprintln!("❌ Ошибка создания Taker ордера: {}", e),
+                Err(e) => eprintln!("❌ Ошибка создания Taker {}: {}", t_type_str, e),
             }
         });
     }
 
-    // ИСПРАВЛЕНИЕ: Принимаем примитивы + trade_id для дедупликации
+    // Trade события = TAKER сделки (market orders FAK)
+    // Это подтверждение исполнения taker-hedge и taker-emergency ордеров
     pub fn handle_ws_trade(&self, trade_id: String, price: f64, size: f64, side: PolySide, asset_id: &str) {
         // Проверяем дубликаты
         {
             let mut seen = self.seen_trades.lock().unwrap();
             if seen.contains(&trade_id) {
-                println!("🔁 Дублирующийся трейд (игнорируем): {}", trade_id);
                 return;
             }
             seen.insert(trade_id.clone());
@@ -247,17 +229,9 @@ impl RealEngine {
 
         let mut port = self.portfolio.lock().unwrap();
 
-        port.maker_trades += 1;
+        port.taker_trades += 1;
 
-        let is_buy = match side {
-            PolySide::Buy => true,
-            PolySide::Sell => false,
-            _ => {
-                // Если придет что-то странное (чего быть не должно), считаем за Sell или игнорируем
-                eprintln!("⚠️ Получен неизвестный тип стороны сделки!");
-                false
-            }
-        };
+        let is_buy = matches!(side, PolySide::Buy);
 
         if asset_id == &*self.up_token {
             if is_buy {
@@ -280,15 +254,15 @@ impl RealEngine {
         let side_str = if is_buy { "BUY" } else { "SELL" };
         let token_str = if asset_id == &*self.up_token { "UP" } else { "DOWN" };
 
-        println!("✅ MAKER FILL: {} {} | Price: {:.3} | Size: {:.2} | Cost: ${:.2}",
+        println!("✅ TAKER FILLED: {} {} @ {:.3} | Size: {:.2} | Cost: ${:.2}",
             side_str, token_str, price, size, price * size);
-        println!("💰 Balance Update: UP {:.1} | DOWN {:.1} | Skew {:.1}",
+        println!("💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
             port.up_shares, port.down_shares, port.up_shares - port.down_shares);
-        
+
         let record = TradeRecord {
             time: Utc::now().format("%H:%M:%S").to_string(),
             side: if asset_id == &*self.up_token { "UP".to_string() } else { "DOWN".to_string() },
-            trade_type: "WS-Fill".to_string(),
+            trade_type: "Taker".to_string(),
             price,
             shares: size,
             cost: price * size,
@@ -296,7 +270,7 @@ impl RealEngine {
         self.reporter.log_trade(&record);
     }
 
-    // Обработка событий ордеров
+    // Обработка событий ордеров (MAKER orders - limit orders)
     // PLACEMENT - ордер размещён
     // UPDATE - ордер частично/полностью исполнен (some of it is matched)
     // CANCELLATION - ордер отменён
@@ -323,25 +297,61 @@ impl RealEngine {
 
         match msg_type.as_deref() {
             Some("PLACEMENT") => {
-                let msg = format!("📝 ORDER PLACED: {} {} @ {:.3} | ID: {}\n",
+                // Сохраняем ID нашего ордера
+                self.add_order_id(order_id.clone());
+
+                let msg = format!("📝 MAKER PLACED: {} {} @ {:.3} | ID: {}\n",
                     side_str, token_str, price, &order_id[..20]);
                 println!("{}", msg.trim());
                 self.reporter.log_raw(&msg);
             }
             Some("UPDATE") => {
-                // UPDATE = частичное или полное исполнение ордера
-                let matched_info = if let Some(matched) = size_matched {
-                    format!(" | Matched: {:.2}", matched)
-                } else {
-                    String::new()
-                };
-                let msg = format!("⚡ ORDER FILLED: {} {} @ {:.3}{} | ID: {}\n",
-                    side_str, token_str, price, matched_info, &order_id[..20]);
-                println!("{}", msg.trim());
-                self.reporter.log_raw(&msg);
+                // UPDATE = частичное или полное исполнение MAKER ордера
+                if let Some(size) = size_matched {
+                    let mut port = self.portfolio.lock().unwrap();
+                    port.maker_trades += 1;
+
+                    let is_buy = matches!(side, PolySide::Buy);
+
+                    if asset_id == &*self.up_token {
+                        if is_buy {
+                            port.up_shares += size;
+                            port.up_spent += price * size;
+                        } else {
+                            port.up_shares -= size;
+                            port.up_spent -= price * size;
+                        }
+                    } else if asset_id == &*self.down_token {
+                        if is_buy {
+                            port.down_shares += size;
+                            port.down_spent += price * size;
+                        } else {
+                            port.down_shares -= size;
+                            port.down_spent -= price * size;
+                        }
+                    }
+
+                    println!("✅ MAKER FILLED: {} {} @ {:.3} | Size: {:.2} | Cost: ${:.2}",
+                        side_str, token_str, price, size, price * size);
+                    println!("💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
+                        port.up_shares, port.down_shares, port.up_shares - port.down_shares);
+
+                    let record = TradeRecord {
+                        time: Utc::now().format("%H:%M:%S").to_string(),
+                        side: if asset_id == &*self.up_token { "UP".to_string() } else { "DOWN".to_string() },
+                        trade_type: "Maker".to_string(),
+                        price,
+                        shares: size,
+                        cost: price * size,
+                    };
+                    self.reporter.log_trade(&record);
+                }
             }
             Some("CANCELLATION") => {
-                let msg = format!("❌ ORDER CANCELLED: {} {} @ {:.3} | ID: {}\n",
+                // Удаляем из активных
+                self.remove_order_id(&order_id);
+
+                let msg = format!("❌ MAKER CANCELLED: {} {} @ {:.3} | ID: {}\n",
                     side_str, token_str, price, &order_id[..20]);
                 println!("{}", msg.trim());
                 self.reporter.log_raw(&msg);

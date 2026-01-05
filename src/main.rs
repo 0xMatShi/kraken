@@ -61,8 +61,8 @@ async fn main() -> anyhow::Result<()> {
             if let Some(target) = scanner.find_next_target("btc-updown-15m", 0.0, 15.0).await {
                 // Создаем реальный движок, передавая клиента и подписанта
                 let engine = Arc::new(RealEngine::new(
-                    &target.slug, 
-                    client.clone(), 
+                    &target.slug,
+                    client.clone(),
                     signer.clone(),
                     target.up_token.clone(),
                     target.down_token.clone()

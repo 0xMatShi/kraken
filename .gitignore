@@ -3,5 +3,7 @@
 /old1.results
 /old2.results
 .env
+.mcp.json
 .claude
 /examples
+/analyze
