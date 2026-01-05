@@ -89,22 +89,3 @@ pub struct MarketPrices {
     pub down_ask: f64,
     pub down_ask_size: f64,
 }
-
-#[derive(Debug, Serialize, Clone)]
-pub struct TradeRecord {
-    pub time: String,
-    pub side: String,
-    pub trade_type: String,
-    pub price: f64,
-    pub shares: f64,
-    pub cost: f64,
-}
-
-#[derive(Debug, Serialize, Deserialize, Default)]
-pub struct GlobalSummary {
-    pub total_pnl: f64,
-    pub min_pnl: f64,
-    pub max_pnl: f64,
-    pub total_events: u32,
-    pub wins: u32,
-}

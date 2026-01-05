@@ -5,6 +5,7 @@ use crate::engine::RealEngine;
 use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 use tokio::time::{interval, Duration};
+use tracing::{info, warn};
 
 pub struct DataStream {
     up_token: String,
@@ -44,7 +45,7 @@ impl DataStream {
                     return Ok(());
                 }
                 Err(e) => {
-                    eprintln!("📉 Market WS отключен: {}. Переподключение через {:?}...", e, reconnect_delay);
+                    warn!("📉 Market WS отключен: {}. Переподключение через {:?}...", e, reconnect_delay);
                     tokio::time::sleep(reconnect_delay).await;
 
                     reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY);
@@ -62,7 +63,7 @@ impl DataStream {
         };
         ws_stream.send(Message::Text(serde_json::to_string(&sub)?.into())).await?;
 
-        println!("✅ Market WS подключен");
+        info!("✅ Market WS подключен");
 
         let mut check_interval = interval(Duration::from_secs(1));
 

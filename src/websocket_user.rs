@@ -5,6 +5,7 @@ use polymarket_client_sdk::clob::ws::{Client, WsMessage};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::Normal;
 use crate::engine::RealEngine;
+use tracing::{info, warn};
 
 pub struct UserStream {
     engine: Arc<RealEngine>,
@@ -24,11 +25,11 @@ impl UserStream {
         loop {
             match self.run_stream_once().await {
                 Ok(_) => {
-                    println!("👤 User Stream завершен нормально");
+                    info!("👤 User Stream завершен нормально");
                     return Ok(());
                 }
                 Err(e) => {
-                    eprintln!("👤 User WS отключен: {}. Переподключение через {:?}...", e, reconnect_delay);
+                    warn!("👤 User WS отключен: {}. Переподключение через {:?}...", e, reconnect_delay);
                     tokio::time::sleep(reconnect_delay).await;
 
                     reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY);
@@ -38,13 +39,13 @@ impl UserStream {
     }
 
     async fn run_stream_once(&self) -> anyhow::Result<()> {
-        println!("👂 Подписываемся на User Events...");
+        info!("👂 Подписываемся на User Events...");
 
         let markets: Vec<String> = Vec::new();
 
         let mut stream = std::pin::pin!(self.client.subscribe_user_events(markets)?);
 
-        println!("✅ User Stream подключен");
+        info!("✅ User Stream подключен");
 
         while let Some(event) = stream.next().await {
             match event {

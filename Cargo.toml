@@ -17,7 +17,11 @@ rust_decimal = "1.39.0"
 rust_decimal_macros = "1.39.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.147"
+time = { version = "0.3.44", features = ["formatting", "local-offset", "macros"] }
 tokio = { version = "1.48.0", features = ["full"] }
 tokio-tungstenite = { version = "0.28.0", features = ["native-tls"] }
+tracing = "0.1.44"
+tracing-appender = "0.2.4"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt", "ansi", "time"] }
 url = "2.5.7"
 uuid = { version = "1.19.0", features = ["v4"] }

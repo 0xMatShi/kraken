@@ -1,9 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::collections::HashSet;
-use chrono::Utc;
-use crate::models::{Portfolio, Side, TradeRecord, MarketPrices};
-use crate::report::Reporter;
+use crate::models::{Portfolio, Side, MarketPrices};
 
 use polymarket_client_sdk::clob::Client;
 use polymarket_client_sdk::auth::Normal;
@@ -11,6 +9,7 @@ use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::clob::types::{OrderType, Side as PolySide};
 use polymarket_client_sdk::types::Decimal;
 use alloy::signers::local::PrivateKeySigner;
+use tracing::{info, warn, error};
 
 const MAX_BALANCE: f64 = 15.0;
 const SIZE: f64 = 3.0;
@@ -18,7 +17,6 @@ const HEDGE_SIZE: f64 = 6.0;
 
 pub struct RealEngine {
     portfolio: Mutex<Portfolio>,
-    reporter: Reporter,
     client: Client<Authenticated<Normal>>,
     signer: PrivateKeySigner,
     up_token: Arc<str>,
@@ -30,7 +28,6 @@ pub struct RealEngine {
 
 impl RealEngine {
     pub fn new(
-        slug: &str,
         client: Client<Authenticated<Normal>>,
         signer: PrivateKeySigner,
         up_token: String,
@@ -38,7 +35,6 @@ impl RealEngine {
     ) -> Self {
         Self {
             portfolio: Mutex::new(Portfolio::default()),
-            reporter: Reporter::new(slug),
             client,
             signer,
             up_token: Arc::from(up_token.as_str()),
@@ -178,7 +174,7 @@ impl RealEngine {
                         let _ = client.cancel_order(&id).await;
                     }
                 },
-                Err(e) => eprintln!("❌ Ошибка размещения Maker ордеров: {}", e),
+                Err(e) => error!("❌ Ошибка размещения Maker ордеров: {}", e),
             }
         });
     }
@@ -207,10 +203,10 @@ impl RealEngine {
                     let signed = client.sign(&signer, ord).await.unwrap();
                     match client.post_order(signed).await {
                         Ok(_) => {}, // Успех - подтверждение придет через WsMessage::Trade
-                        Err(e) => eprintln!("❌ Ошибка отправки Taker {}: {}", t_type_str, e),
+                        Err(e) => error!("❌ Ошибка отправки Taker {}: {}", t_type_str, e),
                     }
                 },
-                Err(e) => eprintln!("❌ Ошибка создания Taker {}: {}", t_type_str, e),
+                Err(e) => error!("❌ Ошибка создания Taker {}: {}", t_type_str, e),
             }
         });
     }
@@ -254,20 +250,10 @@ impl RealEngine {
         let side_str = if is_buy { "BUY" } else { "SELL" };
         let token_str = if asset_id == &*self.up_token { "UP" } else { "DOWN" };
 
-        println!("✅ TAKER FILLED: {} {} @ {:.3} | Size: {:.2} | Cost: ${:.2}",
+        info!("✅ TAKER FILLED: {} {} @ {:.3} | Size: {:.2} | Cost: ${:.2}",
             side_str, token_str, price, size, price * size);
-        println!("💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
+        info!("💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
             port.up_shares, port.down_shares, port.up_shares - port.down_shares);
-
-        let record = TradeRecord {
-            time: Utc::now().format("%H:%M:%S").to_string(),
-            side: if asset_id == &*self.up_token { "UP".to_string() } else { "DOWN".to_string() },
-            trade_type: "Taker".to_string(),
-            price,
-            shares: size,
-            cost: price * size,
-        };
-        self.reporter.log_trade(&record);
     }
 
     // Обработка событий ордеров (MAKER orders - limit orders)
@@ -300,10 +286,8 @@ impl RealEngine {
                 // Сохраняем ID нашего ордера
                 self.add_order_id(order_id.clone());
 
-                let msg = format!("📝 MAKER PLACED: {} {} @ {:.3} | ID: {}\n",
+                info!("📝 MAKER PLACED: {} {} @ {:.3} | ID: {}",
                     side_str, token_str, price, &order_id[..20]);
-                println!("{}", msg.trim());
-                self.reporter.log_raw(&msg);
             }
             Some("UPDATE") => {
                 // UPDATE = частичное или полное исполнение MAKER ордера
@@ -331,30 +315,18 @@ impl RealEngine {
                         }
                     }
 
-                    println!("✅ MAKER FILLED: {} {} @ {:.3} | Size: {:.2} | Cost: ${:.2}",
+                    info!("✅ MAKER FILLED: {} {} @ {:.3} | Size: {:.2} | Cost: ${:.2}",
                         side_str, token_str, price, size, price * size);
-                    println!("💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
+                    info!("💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
                         port.up_shares, port.down_shares, port.up_shares - port.down_shares);
-
-                    let record = TradeRecord {
-                        time: Utc::now().format("%H:%M:%S").to_string(),
-                        side: if asset_id == &*self.up_token { "UP".to_string() } else { "DOWN".to_string() },
-                        trade_type: "Maker".to_string(),
-                        price,
-                        shares: size,
-                        cost: price * size,
-                    };
-                    self.reporter.log_trade(&record);
                 }
             }
             Some("CANCELLATION") => {
                 // Удаляем из активных
                 self.remove_order_id(&order_id);
 
-                let msg = format!("❌ MAKER CANCELLED: {} {} @ {:.3} | ID: {}\n",
+                warn!("❌ MAKER CANCELLED: {} {} @ {:.3} | ID: {}",
                     side_str, token_str, price, &order_id[..20]);
-                println!("{}", msg.trim());
-                self.reporter.log_raw(&msg);
             }
             _ => {
                 // Другие типы событий
@@ -369,16 +341,12 @@ impl RealEngine {
         let total_spent = port.up_spent + port.down_spent;
         let pnl = winning_shares - total_spent;
 
-        let summary = format!(
-            "\n=== FINAL REPORT ===\nWinner: {:?}\n\
-            Shares Held: {:.2}\nCost Basis: ${:.2}\nPnL: ${:.2}\n\
-            Maker Trades: {}\nTaker Trades: {}\n\
-            ",
-            winner, winning_shares, total_spent, pnl, port.maker_trades, port.taker_trades
-        );
-        self.reporter.log_raw(&summary);
-
-        self.reporter.update_global_stats(pnl, total_spent, MAX_BALANCE);
-
+        info!("=== FINAL REPORT ===");
+        info!("Winner: {:?}", winner);
+        info!("Shares Held: {:.2}", winning_shares);
+        info!("Cost Basis: ${:.2}", total_spent);
+        info!("PnL: ${:.2}", pnl);
+        info!("Maker Trades: {}", port.maker_trades);
+        info!("Taker Trades: {}", port.taker_trades);
     }
 }

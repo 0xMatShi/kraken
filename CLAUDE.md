@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-MMDNCA is a Rust-based automated market-making bot for Polymarket binary prediction markets. It implements a hedging strategy that combines passive maker orders with active hedging to maintain neutral positions while capturing spread.
+MMDNA is a Rust-based automated market-making bot for Polymarket binary prediction markets. It implements a hedging strategy that combines passive maker orders with active hedging to maintain neutral positions while capturing spread.
 
 **Language**: Rust (Edition 2024)
 **Runtime**: Tokio async

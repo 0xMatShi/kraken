@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use tokio::time::{sleep, Duration};
 use crate::models::{PolymarketEvent, TargetMarket, Market};
 use std::error::Error;
+use tracing::{info, warn};
 
 pub struct AutoScanner {
     client: Client,
@@ -23,14 +24,14 @@ impl AutoScanner {
         min_m: f64, 
         max_m: f64
     ) -> Option<TargetMarket> {
-        println!("🤖 Авто-поиск {} (окно: {}-{} мин)", target_prefix, min_m, max_m);
+        info!("🤖 Авто-поиск {} (окно: {}-{} мин)", target_prefix, min_m, max_m);
 
         loop {
             // Пытаемся выполнить одну итерацию поиска
             match self.perform_scan(target_prefix, min_m, max_m).await {
                 Ok(Some(target)) => return Some(target),
                 Ok(None) => (), // Ничего не нашли, продолжаем цикл
-                Err(e) => eprintln!("⚠️ Ошибка при сканировании: {}", e),
+                Err(e) => warn!("⚠️ Ошибка при сканировании: {}", e),
             }
 
             sleep(Duration::from_secs(5)).await;
@@ -71,12 +72,12 @@ impl AutoScanner {
             
             // Если API вернул пустой список, значит мы просмотрели всё и ничего не нашли
             if events.is_empty() {
-                println!("📍 Достигнут конец списка событий. Ничего не найдено.");
+                info!("📍 Достигнут конец списка событий. Ничего не найдено.");
                 return Ok(None);
             }
 
-            println!(
-                "📡 Загружено {} событий (offset: {}). Сеть: {:?} | Парсинг: {:?}", 
+            info!(
+                "📡 Загружено {} событий (offset: {}). Сеть: {:?} | Парсинг: {:?}",
                 events.len(), offset, download_time, start_parse.elapsed()
             );
 
@@ -116,7 +117,7 @@ impl AutoScanner {
         for market in markets {
             let tokens: Vec<String> = serde_json::from_str(&market.clob_token_ids).ok()?;
             if tokens.len() >= 2 {
-                println!("🔎 НАЙДЕНО: {} ({:.1} мин)", event.slug, minutes_left);
+                info!("🔎 НАЙДЕНО: {} ({:.1} мин)", event.slug, minutes_left);
                 return Some(TargetMarket {
                     slug: event.slug,
                     title: event.title,
