@@ -1,5 +1,6 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::collections::HashSet;
 use chrono::Utc;
 use crate::models::{Portfolio, Side, TradeRecord, MarketPrices};
 use crate::report::Reporter;
@@ -18,10 +19,13 @@ const HEDGE_SIZE: f64 = 6.0;
 pub struct RealEngine {
     portfolio: Mutex<Portfolio>,
     reporter: Reporter,
-    client: Client<Authenticated<Normal>>, 
+    client: Client<Authenticated<Normal>>,
     signer: PrivateKeySigner,
-    up_token: String,
-    down_token: String,
+    up_token: Arc<str>,
+    down_token: Arc<str>,
+    // Дедупликация WebSocket событий
+    seen_trades: Mutex<HashSet<String>>,
+    seen_orders: Mutex<HashSet<String>>,
 }
 
 impl RealEngine {
@@ -37,8 +41,10 @@ impl RealEngine {
             reporter: Reporter::new(slug),
             client,
             signer,
-            up_token,
-            down_token,
+            up_token: Arc::from(up_token.as_str()),
+            down_token: Arc::from(down_token.as_str()),
+            seen_trades: Mutex::new(HashSet::new()),
+            seen_orders: Mutex::new(HashSet::new()),
         }
     }
 
@@ -52,42 +58,53 @@ impl RealEngine {
     }
 
     fn run_logic(&self, prices: MarketPrices) {
-        let mut port = self.portfolio.lock().unwrap();
-        let skew = port.up_shares - port.down_shares;
+        let (up_shares, down_shares, up_spent, down_spent) = {
+            let port = self.portfolio.lock().unwrap();
+            (port.up_shares, port.down_shares, port.up_spent, port.down_spent)
+        };
+
+        let skew = up_shares - down_shares;
 
         if skew >= HEDGE_SIZE {
-            port.taker_trades += 1;
-            drop(port); 
+            {
+                let mut port = self.portfolio.lock().unwrap();
+                port.taker_trades += 1;
+            }
             self.execute_real_trade(Side::Down, prices.down_ask, skew.abs(), "Taker-Hedge");
             return;
         } else if skew <= -HEDGE_SIZE {
-            port.taker_trades += 1;
-            drop(port);
+            {
+                let mut port = self.portfolio.lock().unwrap();
+                port.taker_trades += 1;
+            }
             self.execute_real_trade(Side::Up, prices.up_ask, skew.abs(), "Taker-Hedge");
             return;
         }
 
-        self.check_emergency_cover(&mut port, &prices);
-        self.manage_adaptive_maker(&port, &prices);
+        self.check_emergency_cover(up_shares, down_shares, up_spent, down_spent, &prices);
+        self.manage_adaptive_maker(up_spent, down_spent, &prices);
     }
 
-    fn check_emergency_cover(&self, port: &mut Portfolio, prices: &MarketPrices) {
-        let skew = port.up_shares - port.down_shares;
+    fn check_emergency_cover(&self, up_shares: f64, down_shares: f64, up_spent: f64, down_spent: f64, prices: &MarketPrices) {
+        let skew = up_shares - down_shares;
         if skew.abs() < 1.0 { return; }
 
+        let up_avg = if up_shares > 0.0 { up_spent / up_shares } else { 0.0 };
+        let down_avg = if down_shares > 0.0 { down_spent / down_shares } else { 0.0 };
+
         if skew > 0.0 {
-            if port.up_avg() + prices.down_ask > 1.05 {
+            if up_avg + prices.down_ask > 1.05 {
                 self.execute_real_trade(Side::Down, prices.down_ask, skew, "Taker-Emergency");
             }
         } else {
-            if port.down_avg() + prices.up_ask > 1.05 {
+            if down_avg + prices.up_ask > 1.05 {
                 self.execute_real_trade(Side::Up, prices.up_ask, skew.abs(), "Taker-Emergency");
             }
         }
     }
 
-    fn manage_adaptive_maker(&self, port: &Portfolio, prices: &MarketPrices) {
-        if (port.up_spent + port.down_spent) >= MAX_BALANCE { return; }
+    fn manage_adaptive_maker(&self, up_spent: f64, down_spent: f64, prices: &MarketPrices) {
+        if (up_spent + down_spent) >= MAX_BALANCE { return; }
 
         // Проверяем, что обе стороны имеют валидные bid цены
         if prices.up_bid < 0.01 || prices.down_bid < 0.01 {
@@ -113,26 +130,26 @@ impl RealEngine {
             return;
         }
 
-        let up_token = self.up_token.clone();
-        let down_token = self.down_token.clone();
+        let up_token = Arc::clone(&self.up_token);
+        let down_token = Arc::clone(&self.down_token);
         let client = self.client.clone();
         let signer = self.signer.clone();
 
         tokio::spawn(async move {
-            // Конвертируем через строку для точного представления с 2 знаками после запятой
-            let up_price_dec = format!("{:.2}", up_price).parse::<Decimal>().unwrap();
-            let down_price_dec = format!("{:.2}", down_price).parse::<Decimal>().unwrap();
-            let size_dec = Decimal::from_f64_retain(SIZE).unwrap();
+            // Конвертируем через строку с точным форматированием до 2 знаков
+            let up_price_dec: Decimal = format!("{:.2}", up_price).parse().unwrap();
+            let down_price_dec: Decimal = format!("{:.2}", down_price).parse().unwrap();
+            let size_dec: Decimal = format!("{:.2}", SIZE).parse().unwrap();
 
             let order_up = client.limit_order()
-                .token_id(&up_token)
+                .token_id(&*up_token)
                 .price(up_price_dec)
                 .size(size_dec)
                 .side(PolySide::Buy)
                 .build().await.unwrap();
 
             let order_down = client.limit_order()
-                .token_id(&down_token)
+                .token_id(&*down_token)
                 .price(down_price_dec)
                 .size(size_dec)
                 .side(PolySide::Buy)
@@ -144,24 +161,37 @@ impl RealEngine {
             match client.post_orders(vec![signed_up, signed_down]).await {
                 Ok(responses) => {
                     println!("📥 Maker: размещены ордера UP@{:.2}, DOWN@{:.2}", up_price, down_price);
-                    
+
                     let mut order_ids = Vec::new();
-                    for resp in responses {
+                    for (idx, resp) in responses.iter().enumerate() {
                         // ИСПРАВЛЕНИЕ: В SDK order_id часто просто String, а не Option.
                         // Если компилятор ругался на if let Some(id), значит там уже String.
                         if !resp.order_id.is_empty() {
-                            order_ids.push(resp.order_id);
+                            println!("   ✓ Ордер #{} ID: {} | Success: {}", idx + 1, resp.order_id, resp.success);
+                            order_ids.push(resp.order_id.clone());
+                        } else {
+                            println!("   ⚠️ Ордер #{} не вернул ID! Success: {} | Error: {:?}", idx + 1, resp.success, resp.error_msg);
                         }
                     }
 
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    if order_ids.is_empty() {
+                        println!("   ⚠️ Ни один ордер не вернул валидный ID - возможно, они не были размещены!");
+                    } else {
+                        println!("   📝 Активных ордеров: {} (будут отменены через 10 сек)", order_ids.len());
+                    }
+
+                    tokio::time::sleep(Duration::from_secs(10)).await;
 
                     if !order_ids.is_empty() {
                         for id in order_ids {
                             // ИСПРАВЛЕНИЕ: передаем &str
                             match client.cancel_order(&id).await {
-                                Ok(_) => { },
-                                Err(_) => { } // Игнорируем ошибки отмены (например, уже исполнен)
+                                Ok(_) => {
+                                    println!("   ❌ Отменен ордер ID: {}", id);
+                                },
+                                Err(e) => {
+                                    println!("   ℹ️ Не удалось отменить {} (возможно исполнен): {}", id, e);
+                                }
                             }
                         }
                     }
@@ -174,17 +204,17 @@ impl RealEngine {
     fn execute_real_trade(&self, side: Side, price: f64, shares: f64, t_type: &str) {
         let client = self.client.clone();
         let signer = self.signer.clone();
-        let token_id = if side == Side::Up { self.up_token.clone() } else { self.down_token.clone() };
+        let token_id = if side == Side::Up { Arc::clone(&self.up_token) } else { Arc::clone(&self.down_token) };
         let t_type_str = t_type.to_string();
 
         tokio::spawn(async move {
-            // Округляем сумму до 2 знаков перед конвертацией в Decimal
+            // Округляем сумму до 2 знаков и конвертируем через строку
             let total_amount = ((price * shares) * 100.0).round() / 100.0;
-            let amount_dec = Decimal::from_f64_retain(total_amount).unwrap();
+            let amount_dec: Decimal = format!("{:.2}", total_amount).parse().unwrap();
             let usdc_amount = polymarket_client_sdk::clob::types::Amount::usdc(amount_dec).unwrap();
             
             let order = client.market_order()
-                .token_id(&token_id)
+                .token_id(&*token_id)
                 .amount(usdc_amount)
                 .side(PolySide::Buy)
                 .order_type(OrderType::FAK)
@@ -203,10 +233,20 @@ impl RealEngine {
         });
     }
 
-    // ИСПРАВЛЕНИЕ: Принимаем примитивы, а не SDK структуры
-    pub fn handle_ws_trade(&self, price: f64, size: f64, side: PolySide, asset_id: &str) {
+    // ИСПРАВЛЕНИЕ: Принимаем примитивы + trade_id для дедупликации
+    pub fn handle_ws_trade(&self, trade_id: String, price: f64, size: f64, side: PolySide, asset_id: &str) {
+        // Проверяем дубликаты
+        {
+            let mut seen = self.seen_trades.lock().unwrap();
+            if seen.contains(&trade_id) {
+                println!("🔁 Дублирующийся трейд (игнорируем): {}", trade_id);
+                return;
+            }
+            seen.insert(trade_id.clone());
+        }
+
         let mut port = self.portfolio.lock().unwrap();
-        
+
         port.maker_trades += 1;
 
         let is_buy = match side {
@@ -219,7 +259,7 @@ impl RealEngine {
             }
         };
 
-        if asset_id == self.up_token {
+        if asset_id == &*self.up_token {
             if is_buy {
                 port.up_shares += size;
                 port.up_spent += price * size;
@@ -227,7 +267,7 @@ impl RealEngine {
                 port.up_shares -= size;
                 port.up_spent -= price * size;
             }
-        } else if asset_id == self.down_token {
+        } else if asset_id == &*self.down_token {
             if is_buy {
                 port.down_shares += size;
                 port.down_spent += price * size;
@@ -237,18 +277,79 @@ impl RealEngine {
             }
         }
 
-        println!("💰 Balance Update: UP {:.1} | DOWN {:.1} | Skew {:.1}", 
+        let side_str = if is_buy { "BUY" } else { "SELL" };
+        let token_str = if asset_id == &*self.up_token { "UP" } else { "DOWN" };
+
+        println!("✅ MAKER FILL: {} {} | Price: {:.3} | Size: {:.2} | Cost: ${:.2}",
+            side_str, token_str, price, size, price * size);
+        println!("💰 Balance Update: UP {:.1} | DOWN {:.1} | Skew {:.1}",
             port.up_shares, port.down_shares, port.up_shares - port.down_shares);
         
         let record = TradeRecord {
             time: Utc::now().format("%H:%M:%S").to_string(),
-            side: if asset_id == self.up_token { "UP".to_string() } else { "DOWN".to_string() },
+            side: if asset_id == &*self.up_token { "UP".to_string() } else { "DOWN".to_string() },
             trade_type: "WS-Fill".to_string(),
             price,
             shares: size,
             cost: price * size,
         };
         self.reporter.log_trade(&record);
+    }
+
+    // Обработка событий ордеров
+    // PLACEMENT - ордер размещён
+    // UPDATE - ордер частично/полностью исполнен (some of it is matched)
+    // CANCELLATION - ордер отменён
+    pub fn handle_ws_order(&self, order_id: String, msg_type: Option<String>, price: f64, side: PolySide, asset_id: &str, size_matched: Option<f64>) {
+        // Создаем уникальный ключ: order_id + status
+        let order_key = format!("{}:{:?}", order_id, msg_type);
+
+        // Проверяем дубликаты
+        {
+            let mut seen = self.seen_orders.lock().unwrap();
+            if seen.contains(&order_key) {
+                return; // Молча игнорируем дубликаты
+            }
+            seen.insert(order_key);
+        }
+
+        let side_str = match side {
+            PolySide::Buy => "BUY",
+            PolySide::Sell => "SELL",
+            _ => "UNKNOWN",
+        };
+
+        let token_str = if asset_id == &*self.up_token { "UP" } else { "DOWN" };
+
+        match msg_type.as_deref() {
+            Some("PLACEMENT") => {
+                let msg = format!("📝 ORDER PLACED: {} {} @ {:.3} | ID: {}\n",
+                    side_str, token_str, price, &order_id[..20]);
+                println!("{}", msg.trim());
+                self.reporter.log_raw(&msg);
+            }
+            Some("UPDATE") => {
+                // UPDATE = частичное или полное исполнение ордера
+                let matched_info = if let Some(matched) = size_matched {
+                    format!(" | Matched: {:.2}", matched)
+                } else {
+                    String::new()
+                };
+                let msg = format!("⚡ ORDER FILLED: {} {} @ {:.3}{} | ID: {}\n",
+                    side_str, token_str, price, matched_info, &order_id[..20]);
+                println!("{}", msg.trim());
+                self.reporter.log_raw(&msg);
+            }
+            Some("CANCELLATION") => {
+                let msg = format!("❌ ORDER CANCELLED: {} {} @ {:.3} | ID: {}\n",
+                    side_str, token_str, price, &order_id[..20]);
+                println!("{}", msg.trim());
+                self.reporter.log_raw(&msg);
+            }
+            _ => {
+                // Другие типы событий
+            }
+        }
     }
 
     pub fn finalize(&self, final_prices: &MarketPrices) {

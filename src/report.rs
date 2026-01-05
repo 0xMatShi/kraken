@@ -1,10 +1,20 @@
-use std::fs::{self, OpenOptions};
-use std::io::{Write, Read};
+use std::fs;
+use std::io::Read;
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc;
 use crate::models::{TradeRecord, GlobalSummary};
 
+enum LogMessage {
+    Trade(TradeRecord),
+    Raw(String),
+}
+
 pub struct Reporter {
+    #[allow(dead_code)]
     file_path: String,
     global_path: String,
+    log_tx: mpsc::UnboundedSender<LogMessage>,
 }
 
 impl Reporter {
@@ -13,41 +23,69 @@ impl Reporter {
         let file_path = format!("results/{}.txt", slug);
         let global_path = "results/global_summary.json".to_string();
 
-        let reporter = Self {
+        let (log_tx, mut log_rx) = mpsc::unbounded_channel::<LogMessage>();
+
+        let file_path_clone = file_path.clone();
+        let slug_owned = slug.to_string();
+
+        tokio::spawn(async move {
+            Self::async_init_event_log(&file_path_clone, &slug_owned).await;
+
+            while let Some(msg) = log_rx.recv().await {
+                match msg {
+                    LogMessage::Trade(trade) => {
+                        Self::async_log_trade(&file_path_clone, &trade).await;
+                    }
+                    LogMessage::Raw(text) => {
+                        Self::async_log_raw(&file_path_clone, &text).await;
+                    }
+                }
+            }
+        });
+
+        Self {
             file_path,
             global_path,
-        };
-
-        // ВЫЗЫВАЕМ ИНИЦИАЛИЗАЦИЮ СРАЗУ ПРИ СОЗДАНИИ
-        reporter.init_event_log(slug);
-
-        reporter
+            log_tx,
+        }
     }
 
-    // Инициализация файла события (без изменений, просто добавил flush)
-    fn init_event_log(&self, slug: &str) {
-        if !std::path::Path::new(&self.file_path).exists() {
-            let mut file = fs::File::create(&self.file_path).unwrap();
+    async fn async_init_event_log(file_path: &str, slug: &str) {
+        if !tokio::fs::try_exists(file_path).await.unwrap_or(false) {
+            let mut file = tokio::fs::File::create(file_path).await.unwrap();
             let header = format!("=== Trade Log for {} ===\n\n", slug);
-            let table_head = format!("{:<20} | {:<5} | {:<15} | {:<8} | {:<10} | {:<8}\n", 
+            let table_head = format!("{:<20} | {:<5} | {:<15} | {:<8} | {:<10} | {:<8}\n",
                 "Timestamp", "Side", "Type", "Price", "Shares", "Cost");
-            file.write_all(header.as_bytes()).unwrap();
-            file.write_all(table_head.as_bytes()).unwrap();
-            file.write_all("-".repeat(75).as_bytes()).unwrap();
-            file.write_all(b"\n").unwrap();
+            file.write_all(header.as_bytes()).await.unwrap();
+            file.write_all(table_head.as_bytes()).await.unwrap();
+            file.write_all("-".repeat(75).as_bytes()).await.unwrap();
+            file.write_all(b"\n").await.unwrap();
+            file.flush().await.unwrap();
         }
     }
 
     pub fn log_trade(&self, trade: &TradeRecord) {
-        let mut file = OpenOptions::new().append(true).open(&self.file_path).unwrap();
-        let line = format!("{:<20} | {:<5} | {:<15} | {:.2}     | {:<10.2} | ${:<8.2}\n",
-            trade.time, trade.side, trade.trade_type, trade.price, trade.shares, trade.cost);
-        file.write_all(line.as_bytes()).unwrap();
+        let _ = self.log_tx.send(LogMessage::Trade(trade.clone()));
+    }
+
+    async fn async_log_trade(file_path: &str, trade: &TradeRecord) {
+        if let Ok(mut file) = OpenOptions::new().append(true).open(file_path).await {
+            let line = format!("{:<20} | {:<5} | {:<15} | {:.2}     | {:<10.2} | ${:<8.2}\n",
+                trade.time, trade.side, trade.trade_type, trade.price, trade.shares, trade.cost);
+            let _ = file.write_all(line.as_bytes()).await;
+            let _ = file.flush().await;
+        }
     }
 
     pub fn log_raw(&self, text: &str) {
-        let mut file = OpenOptions::new().append(true).open(&self.file_path).unwrap();
-        file.write_all(text.as_bytes()).unwrap();
+        let _ = self.log_tx.send(LogMessage::Raw(text.to_string()));
+    }
+
+    async fn async_log_raw(file_path: &str, text: &str) {
+        if let Ok(mut file) = OpenOptions::new().append(true).open(file_path).await {
+            let _ = file.write_all(text.as_bytes()).await;
+            let _ = file.flush().await;
+        }
     }
 
     // --- НОВАЯ ЛОГИКА ГЛОБАЛЬНОЙ СТАТИСТИКИ ---

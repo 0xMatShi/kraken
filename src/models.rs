@@ -27,8 +27,19 @@ pub struct TargetMarket {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct OrderSummary {
-    pub price: String,
-    pub size: String,
+    #[serde(deserialize_with = "deserialize_f64_from_string")]
+    pub price: f64,
+    #[serde(deserialize_with = "deserialize_f64_from_string")]
+    pub size: f64,
+}
+
+fn deserialize_f64_from_string<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let s = String::deserialize(deserializer)?;
+    s.parse::<f64>().map_err(D::Error::custom)
 }
 
 #[allow(dead_code)]
@@ -67,7 +78,7 @@ impl Portfolio {
     pub fn total_avg(&self) -> f64 { self.up_avg() + self.down_avg() }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct MarketPrices {
     pub up_bid: f64,
     pub up_bid_size: f64,
@@ -79,7 +90,7 @@ pub struct MarketPrices {
     pub down_ask_size: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct TradeRecord {
     pub time: String,
     pub side: String,

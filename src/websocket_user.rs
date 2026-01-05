@@ -1,6 +1,6 @@
 use futures::StreamExt;
 use std::sync::Arc;
-// Импортируем правильные типы для клиента
+use std::time::Duration;
 use polymarket_client_sdk::clob::ws::{Client, WsMessage};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::Normal;
@@ -18,39 +18,67 @@ impl UserStream {
     }
 
     pub async fn start_stream(&self) -> anyhow::Result<()> {
+        let mut reconnect_delay = Duration::from_secs(1);
+        const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
+
+        loop {
+            match self.run_stream_once().await {
+                Ok(_) => {
+                    println!("👤 User Stream завершен нормально");
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("👤 User WS отключен: {}. Переподключение через {:?}...", e, reconnect_delay);
+                    tokio::time::sleep(reconnect_delay).await;
+
+                    reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY);
+                }
+            }
+        }
+    }
+
+    async fn run_stream_once(&self) -> anyhow::Result<()> {
         println!("👂 Подписываемся на User Events...");
 
-        let markets: Vec<String> = Vec::new(); 
-        
-        // Метод subscribe_user_events доступен только у Authenticated клиента
+        let markets: Vec<String> = Vec::new();
+
         let mut stream = std::pin::pin!(self.client.subscribe_user_events(markets)?);
 
-        println!("✅ User Stream запущен. Ждем обновлений...");
+        println!("✅ User Stream подключен");
 
         while let Some(event) = stream.next().await {
             match event {
                 Ok(WsMessage::Trade(trade)) => {
-                    // ИСПРАВЛЕНИЕ: Преобразуем данные здесь, чтобы не тащить типы в engine
-                    let price: f64 = trade.price.to_string().parse().unwrap_or(0.0);
-                    let size: f64 = trade.size.to_string().parse().unwrap_or(0.0);
-                    let asset_id = trade.asset_id.to_string(); // Возможно trade.asset_id уже String, тогда .clone()
+                    use rust_decimal::prelude::ToPrimitive;
 
-                    println!("⚡ WS TRADE: ID {} | Size {} | Price {}", trade.id, size, price);
-                    
-                    self.engine.handle_ws_trade(price, size, trade.side, &asset_id);
+                    let trade_id = trade.id.clone();
+                    let price: f64 = trade.price.to_f64().unwrap_or(0.0);
+                    let size: f64 = trade.size.to_f64().unwrap_or(0.0);
+                    let asset_id = trade.asset_id.to_string();
+
+                    self.engine.handle_ws_trade(trade_id, price, size, trade.side, &asset_id);
                 }
-                Ok(WsMessage::Order(_order)) => {
-                    // Можно раскомментировать для отладки
-                    // println!("📋 WS ORDER: ID {} Status: {:?}", _order.id, _order.msg_type);
+                Ok(WsMessage::Order(order)) => {
+                    use rust_decimal::prelude::ToPrimitive;
+
+                    let order_id = order.id.clone();
+                    let msg_type = order.msg_type.clone();
+                    let price: f64 = order.price.to_f64().unwrap_or(0.0);
+                    let asset_id = order.asset_id.to_string();
+
+                    // size_matched показывает сколько было исполнено (для UPDATE событий)
+                    let size_matched: Option<f64> = order.size_matched
+                        .and_then(|d| d.to_f64());
+
+                    self.engine.handle_ws_order(order_id, msg_type, price, order.side, &asset_id, size_matched);
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    eprintln!("❌ Ошибка в User Stream: {}", e);
-                    break;
+                    return Err(anyhow::anyhow!("Ошибка в User Stream: {}", e));
                 }
             }
         }
-        
+
         Ok(())
     }
 }

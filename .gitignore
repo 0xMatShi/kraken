@@ -3,3 +3,5 @@
 /old1.results
 /old2.results
 .env
+.claude
+/examples

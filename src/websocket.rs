@@ -26,43 +26,84 @@ impl DataStream {
     }
 
     pub async fn start_stream(&self, end_date_str: String) -> Result<(), Box<dyn std::error::Error>> {
+        let end_date = end_date_str.parse::<DateTime<Utc>>().unwrap_or(Utc::now());
+        let mut reconnect_delay = Duration::from_secs(1);
+        const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
+
+        loop {
+            if Utc::now() >= end_date {
+                let last_p = *self.prices.lock().unwrap();
+                self.engine.finalize(&last_p);
+                return Ok(());
+            }
+
+            match self.run_stream_once(end_date).await {
+                Ok(_) => {
+                    let last_p = *self.prices.lock().unwrap();
+                    self.engine.finalize(&last_p);
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("📉 Market WS отключен: {}. Переподключение через {:?}...", e, reconnect_delay);
+                    tokio::time::sleep(reconnect_delay).await;
+
+                    reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY);
+                }
+            }
+        }
+    }
+
+    async fn run_stream_once(&self, end_date: DateTime<Utc>) -> Result<(), Box<dyn std::error::Error>> {
         let (mut ws_stream, _) = connect_async(&self.ws_url).await?;
-        
+
         let sub = SubscribeMessage {
             assets_ids: vec![self.up_token.clone(), self.down_token.clone()],
             msg_type: "market".to_string(),
         };
         ws_stream.send(Message::Text(serde_json::to_string(&sub)?.into())).await?;
 
-        let end_date = end_date_str.parse::<DateTime<Utc>>().unwrap_or(Utc::now());
+        println!("✅ Market WS подключен");
+
         let mut check_interval = interval(Duration::from_secs(1));
 
         loop {
             tokio::select! {
                 msg = ws_stream.next() => {
-                    if let Some(Ok(Message::Text(text))) = msg {
-                        if let Ok(book) = serde_json::from_str::<BookMessage>(&text) {
-                            self.update_prices(book);
+                    match msg {
+                        Some(Ok(Message::Text(text))) => {
+                            if let Ok(book) = serde_json::from_str::<BookMessage>(&text) {
+                                self.update_prices(book);
+                            }
                         }
-                    } else if msg.is_none() { break; }
+                        Some(Ok(Message::Close(_))) => {
+                            return Err("WebSocket закрыт сервером".into());
+                        }
+                        Some(Err(e)) => {
+                            return Err(Box::new(e));
+                        }
+                        None => {
+                            return Err("Соединение потеряно".into());
+                        }
+                        _ => {}
+                    }
                 }
                 _ = check_interval.tick() => {
-                    if Utc::now() >= end_date { break; }
+                    if Utc::now() >= end_date {
+                        return Ok(());
+                    }
                 }
             }
         }
-        
-        let last_p = self.prices.lock().unwrap().clone();
-        self.engine.finalize(&last_p);
-        Ok(())
     }
 
     fn update_prices(&self, book: BookMessage) {
         let mut p = self.prices.lock().unwrap();
-        
-        let best_bid = book.bids.iter().filter_map(|o| Some((o.price.parse::<f64>().ok()?, o.size.parse::<f64>().ok()?)))
+
+        let best_bid = book.bids.iter()
+            .map(|o| (o.price, o.size))
             .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        let best_ask = book.asks.iter().filter_map(|o| Some((o.price.parse::<f64>().ok()?, o.size.parse::<f64>().ok()?)))
+        let best_ask = book.asks.iter()
+            .map(|o| (o.price, o.size))
             .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
         if book.asset_id == self.up_token {
@@ -72,8 +113,8 @@ impl DataStream {
             if let Some(b) = best_bid { p.down_bid = b.0; p.down_bid_size = b.1; }
             if let Some(a) = best_ask { p.down_ask = a.0; p.down_ask_size = a.1; }
         }
-        
-        // ВАЖНО: Вызываем движок БЕЗ задержки
-        self.engine.process_tick(p.clone());
+
+        // ВАЖНО: Копируем без аллокации (MarketPrices теперь Copy)
+        self.engine.process_tick(*p);
     }
 }

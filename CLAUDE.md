@@ -56,7 +56,7 @@ The codebase is organized into 7 modules with clear separation of concerns:
   1. **Hedging**: Executes taker orders when position skew exceeds `HEDGE_SIZE` (3.0 shares)
   2. **Emergency cover**: Closes positions if cost basis + opposite ask > 1.05
   3. **Maker orders**: Places paired limit orders on both sides with 5-second TTL
-- Constants: `MAX_BALANCE` (3000 USDC), `SIZE` (3.0 shares per order)
+- Constants: `MAX_BALANCE`, `SIZE`
 
 **`scanner.rs`** (src/scanner.rs:1)
 - `AutoScanner` polls Polymarket API for trading opportunities

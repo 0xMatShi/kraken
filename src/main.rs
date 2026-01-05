@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
     let client = Client::new("https://clob.polymarket.com", Config::default())?
         .authentication_builder(&signer)
         .funder(funder_address)
-        .signature_type(polymarket_client_sdk::clob::types::SignatureType::Proxy) // Твой тип 2
+        .signature_type(polymarket_client_sdk::clob::types::SignatureType::GnosisSafe) // EOA - обычная подпись кошелька
         .authenticate()
         .await?;
 
