@@ -117,12 +117,13 @@ async fn main() -> anyhow::Result<()> {
         if input.trim() == "1" {
             // Ищем подходящий рынок
             if let Some(target) = scanner.find_next_target("btc-updown-15m", 0.0, 15.0).await {
-                // Создаем реальный движок, передавая клиента и подписанта
+                // Создаем реальный движок, передавая клиента, подписанта и наш API key для валидации
                 let engine = Arc::new(RealEngine::new(
                     client.clone(),
                     signer.clone(),
                     target.up_token.clone(),
-                    target.down_token.clone()
+                    target.down_token.clone(),
+                    api_key
                 ));
 
                 let market_stream = DataStream::new(target.up_token.clone(), target.down_token.clone(), engine.clone(), ws_market_url.clone());

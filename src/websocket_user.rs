@@ -51,13 +51,31 @@ impl UserStream {
             match event {
                 Ok(WsMessage::Trade(trade)) => {
                     use rust_decimal::prelude::ToPrimitive;
+                    use polymarket_client_sdk::clob::types::Side as PolySide;
 
+                    // ФИЛЬТР: Игнорируем SELL трейды (чужие taker'ы в наши maker ордера)
+                    // Наши maker fills обрабатываются через Order UPDATE события
+                    if matches!(trade.side, PolySide::Sell) {
+                        continue;
+                    }
+
+                    // Обрабатываем BUY трейды с комбинированной валидацией (trade_owner + order_id)
                     let trade_id = trade.id.clone();
                     let price: f64 = trade.price.to_f64().unwrap_or(0.0);
                     let size: f64 = trade.size.to_f64().unwrap_or(0.0);
                     let asset_id = trade.asset_id.to_string();
+                    let trade_owner = trade.trade_owner;
+                    let taker_order_id = trade.taker_order_id;
 
-                    self.engine.handle_ws_trade(trade_id, price, size, trade.side, &asset_id);
+                    self.engine.handle_ws_trade(
+                        trade_id,
+                        price,
+                        size,
+                        trade.side,
+                        &asset_id,
+                        trade_owner,
+                        taker_order_id
+                    );
                 }
                 Ok(WsMessage::Order(order)) => {
                     use rust_decimal::prelude::ToPrimitive;

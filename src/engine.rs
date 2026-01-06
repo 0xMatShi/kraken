@@ -10,6 +10,7 @@ use polymarket_client_sdk::clob::types::{OrderType, Side as PolySide};
 use polymarket_client_sdk::types::Decimal;
 use alloy::signers::local::PrivateKeySigner;
 use tracing::{info, warn, error};
+use uuid::Uuid;
 
 const MAX_BALANCE: f64 = 15.0;
 const SIZE: f64 = 3.0;
@@ -24,6 +25,11 @@ pub struct RealEngine {
     seen_trades: Mutex<HashSet<String>>,
     seen_orders: Mutex<HashSet<String>>,
     active_order_ids: Mutex<HashSet<String>>,
+    // Трекинг НАШИХ taker ордеров по order_id (из PostOrderResponse)
+    // Arc<Mutex<>> для безопасного шаринга между async tasks
+    expected_order_ids: Arc<Mutex<HashSet<String>>>,
+    // Наш API key для валидации trade_owner
+    our_api_key: Uuid,
 }
 
 impl RealEngine {
@@ -31,7 +37,8 @@ impl RealEngine {
         client: Client<Authenticated<Normal>>,
         signer: PrivateKeySigner,
         up_token: String,
-        down_token: String
+        down_token: String,
+        our_api_key: Uuid
     ) -> Self {
         Self {
             portfolio: Mutex::new(Portfolio::default()),
@@ -42,6 +49,8 @@ impl RealEngine {
             seen_trades: Mutex::new(HashSet::new()),
             seen_orders: Mutex::new(HashSet::new()),
             active_order_ids: Mutex::new(HashSet::new()),
+            expected_order_ids: Arc::new(Mutex::new(HashSet::new())),
+            our_api_key,
         }
     }
 
@@ -184,6 +193,7 @@ impl RealEngine {
         let signer = self.signer.clone();
         let token_id = if side == Side::Up { Arc::clone(&self.up_token) } else { Arc::clone(&self.down_token) };
         let t_type_str = t_type.to_string();
+        let expected_order_ids = Arc::clone(&self.expected_order_ids);
 
         tokio::spawn(async move {
             // Округляем сумму до 2 знаков и конвертируем через строку
@@ -202,7 +212,16 @@ impl RealEngine {
                 Ok(ord) => {
                     let signed = client.sign(&signer, ord).await.unwrap();
                     match client.post_order(signed).await {
-                        Ok(_) => {}, // Успех - подтверждение придет через WsMessage::Trade
+                        Ok(response) => {
+                            // Сохраняем order_id для валидации в WebSocket
+                            if !response.order_id.is_empty() {
+                                let mut expected = expected_order_ids.lock().unwrap();
+                                expected.insert(response.order_id.clone());
+                                info!("🎯 Taker {} отправлен | Order ID: {}", t_type_str, &response.order_id[..20.min(response.order_id.len())]);
+                            } else {
+                                info!("🎯 Taker {} отправлен (без order_id)", t_type_str);
+                            }
+                        },
                         Err(e) => error!("❌ Ошибка отправки Taker {}: {}", t_type_str, e),
                     }
                 },
@@ -213,11 +232,48 @@ impl RealEngine {
 
     // Trade события = TAKER сделки (market orders FAK)
     // Это подтверждение исполнения taker-hedge и taker-emergency ордеров
-    pub fn handle_ws_trade(&self, trade_id: String, price: f64, size: f64, side: PolySide, asset_id: &str) {
-        // Проверяем дубликаты
+    // КОМБИНИРОВАННАЯ ВАЛИДАЦИЯ: Проверяем по trade_owner И по taker_order_id
+    pub fn handle_ws_trade(
+        &self,
+        trade_id: String,
+        price: f64,
+        size: f64,
+        side: PolySide,
+        asset_id: &str,
+        trade_owner: Option<Uuid>,
+        taker_order_id: Option<String>
+    ) {
+        // ПРОВЕРКА 1: trade_owner должен совпадать с нашим API key
+        let owner_matches = trade_owner.map_or(false, |owner| owner == self.our_api_key);
+
+        // ПРОВЕРКА 2: taker_order_id должен быть в expected_order_ids
+        let order_matches = if let Some(ref order_id) = taker_order_id {
+            let mut expected = self.expected_order_ids.lock().unwrap();
+            let found = expected.contains(order_id);
+
+            if found {
+                // Удаляем из ожидаемых (подтверждаем исполнение)
+                expected.remove(order_id);
+            }
+
+            found
+        } else {
+            false
+        };
+
+        // КОМБИНИРОВАННАЯ ПРОВЕРКА: И owner должен совпадать, И order_id должен быть наш
+        let is_our_trade = owner_matches && order_matches;
+
+        if !is_our_trade {
+            warn!("⚠️  IGNORED TRADE: Не наш taker/order_id");
+            return;
+        }
+
+        // Проверяем дубликаты (дополнительная защита)
         {
             let mut seen = self.seen_trades.lock().unwrap();
             if seen.contains(&trade_id) {
+                warn!("⚠️  DUPLICATE TRADE (уже обработан): {}", &trade_id[..20.min(trade_id.len())]);
                 return;
             }
             seen.insert(trade_id.clone());
