@@ -26,7 +26,7 @@ pub struct RealEngine {
     seen_orders: Mutex<HashSet<String>>,
     active_order_ids: Mutex<HashSet<String>>,
     our_api_key: Uuid,
-    hedging_in_progress: Mutex<bool>,
+    hedging_in_progress: Arc<Mutex<bool>>,
 }
 
 impl RealEngine {
@@ -47,7 +47,7 @@ impl RealEngine {
             seen_orders: Mutex::new(HashSet::new()),
             active_order_ids: Mutex::new(HashSet::new()),
             our_api_key,
-            hedging_in_progress: Mutex::new(false),
+            hedging_in_progress: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -63,6 +63,16 @@ impl RealEngine {
 
     fn set_hedging(&self, value: bool) {
         *self.hedging_in_progress.lock().unwrap() = value;
+    }
+
+    // Запускает таймер на 3 секунды для автоматического сброса флага хеджирования
+    fn start_hedging_timer(&self) {
+        let hedging_flag = Arc::clone(&self.hedging_in_progress);
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+            *hedging_flag.lock().unwrap() = false;
+            info!("⏰ Таймер хеджирования истек. Снимаем блокировку");
+        });
     }
 
     // Методы для работы с активными ордерами
@@ -97,8 +107,10 @@ impl RealEngine {
         if skew >= HEDGE_SIZE {
             // Устанавливаем флаг хеджирования
             self.set_hedging(true);
+            // Запускаем таймер для автоматического сброса флага через 3 секунды
+            self.start_hedging_timer();
             // Вычисляем сколько ордеров нужно для закрытия перекоса
-            let num_orders = (skew / SIZE).ceil() as i32;
+            let num_orders = ((skew - HEDGE_SIZE) / SIZE).ceil() as i32;
             info!("🔄 Обнаружен перекос {:.1}. Отправляем {} хедж-ордеров DOWN по {:.1} каждый", skew, num_orders, SIZE);
             // Отправляем все нужные ордера
             for _ in 0..num_orders {
@@ -108,8 +120,10 @@ impl RealEngine {
         } else if skew <= -HEDGE_SIZE {
             // Устанавливаем флаг хеджирования
             self.set_hedging(true);
+            // Запускаем таймер для автоматического сброса флага через 3 секунды
+            self.start_hedging_timer();
             // Вычисляем сколько ордеров нужно для закрытия перекоса
-            let num_orders = (skew.abs() / SIZE).ceil() as i32;
+            let num_orders = ((skew.abs() - HEDGE_SIZE) / SIZE).ceil() as i32;
             info!("🔄 Обнаружен перекос {:.1}. Отправляем {} хедж-ордеров UP по {:.1} каждый", skew, num_orders, SIZE);
             // Отправляем все нужные ордера
             for _ in 0..num_orders {
