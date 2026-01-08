@@ -1,5 +1,4 @@
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use std::collections::HashSet;
 use crate::models::{Portfolio, Side, MarketPrices};
 
@@ -11,6 +10,7 @@ use polymarket_client_sdk::types::Decimal;
 use alloy::signers::local::PrivateKeySigner;
 use tracing::{info, warn, error};
 use uuid::Uuid;
+use chrono::{TimeDelta, Utc};
 
 const MAX_BALANCE: f64 = 15.0;
 const SIZE: f64 = 3.0;
@@ -25,11 +25,8 @@ pub struct RealEngine {
     seen_trades: Mutex<HashSet<String>>,
     seen_orders: Mutex<HashSet<String>>,
     active_order_ids: Mutex<HashSet<String>>,
-    // Трекинг НАШИХ taker ордеров по order_id (из PostOrderResponse)
-    // Arc<Mutex<>> для безопасного шаринга между async tasks
-    expected_order_ids: Arc<Mutex<HashSet<String>>>,
-    // Наш API key для валидации trade_owner
     our_api_key: Uuid,
+    hedging_in_progress: Mutex<bool>,
 }
 
 impl RealEngine {
@@ -49,14 +46,23 @@ impl RealEngine {
             seen_trades: Mutex::new(HashSet::new()),
             seen_orders: Mutex::new(HashSet::new()),
             active_order_ids: Mutex::new(HashSet::new()),
-            expected_order_ids: Arc::new(Mutex::new(HashSet::new())),
             our_api_key,
+            hedging_in_progress: Mutex::new(false),
         }
     }
 
     // Округление до 2 знаков (минимальный тик-размер 0.01)
     fn round_price(price: f64) -> f64 {
         (price * 100.0).round() / 100.0
+    }
+
+    // Методы для работы с флагом хеджирования
+    fn is_hedging(&self) -> bool {
+        *self.hedging_in_progress.lock().unwrap()
+    }
+
+    fn set_hedging(&self, value: bool) {
+        *self.hedging_in_progress.lock().unwrap() = value;
     }
 
     // Методы для работы с активными ордерами
@@ -71,6 +77,10 @@ impl RealEngine {
     }
 
     pub fn process_tick(&self, prices: MarketPrices) {
+        // Если идет хеджирование, пропускаем обработку тика
+        if self.is_hedging() {
+            return;
+        }
         self.run_logic(prices);
     }
 
@@ -80,41 +90,38 @@ impl RealEngine {
             (port.up_shares, port.down_shares, port.up_spent, port.down_spent)
         };
 
+        if (up_spent + down_spent) >= MAX_BALANCE { return; }
+
         let skew = up_shares - down_shares;
 
         if skew >= HEDGE_SIZE {
-            self.execute_real_trade(Side::Down, prices.down_ask, skew.abs(), "Hedge");
+            // Устанавливаем флаг хеджирования
+            self.set_hedging(true);
+            // Вычисляем сколько ордеров нужно для закрытия перекоса
+            let num_orders = (skew / SIZE).ceil() as i32;
+            info!("🔄 Обнаружен перекос {:.1}. Отправляем {} хедж-ордеров DOWN по {:.1} каждый", skew, num_orders, SIZE);
+            // Отправляем все нужные ордера
+            for _ in 0..num_orders {
+                self.execute_hedge_trade(Side::Down);
+            }
             return;
         } else if skew <= -HEDGE_SIZE {
-            self.execute_real_trade(Side::Up, prices.up_ask, skew.abs(), "Hedge");
+            // Устанавливаем флаг хеджирования
+            self.set_hedging(true);
+            // Вычисляем сколько ордеров нужно для закрытия перекоса
+            let num_orders = (skew.abs() / SIZE).ceil() as i32;
+            info!("🔄 Обнаружен перекос {:.1}. Отправляем {} хедж-ордеров UP по {:.1} каждый", skew, num_orders, SIZE);
+            // Отправляем все нужные ордера
+            for _ in 0..num_orders {
+                self.execute_hedge_trade(Side::Up);
+            }
             return;
         }
 
-        self.check_emergency_cover(up_shares, down_shares, up_spent, down_spent, &prices);
-        self.manage_adaptive_maker(up_spent, down_spent, &prices);
+        self.manage_adaptive_maker(&prices);
     }
 
-    fn check_emergency_cover(&self, up_shares: f64, down_shares: f64, up_spent: f64, down_spent: f64, prices: &MarketPrices) {
-        let skew = up_shares - down_shares;
-        if skew.abs() < 1.0 { return; }
-
-        let up_avg = if up_shares > 0.0 { up_spent / up_shares } else { 0.0 };
-        let down_avg = if down_shares > 0.0 { down_spent / down_shares } else { 0.0 };
-
-        if skew > 0.0 {
-            if up_avg + prices.down_ask > 1.05 {
-                self.execute_real_trade(Side::Down, prices.down_ask, skew, "Taker-Emergency");
-            }
-        } else {
-            if down_avg + prices.up_ask > 1.05 {
-                self.execute_real_trade(Side::Up, prices.up_ask, skew.abs(), "Taker-Emergency");
-            }
-        }
-    }
-
-    fn manage_adaptive_maker(&self, up_spent: f64, down_spent: f64, prices: &MarketPrices) {
-        if (up_spent + down_spent) >= MAX_BALANCE { return; }
-
+    fn manage_adaptive_maker(&self, prices: &MarketPrices) {
         // Проверяем, что обе стороны имеют валидные bid цены
         if prices.up_bid < 0.01 || prices.down_bid < 0.01 {
             return;
@@ -150,11 +157,16 @@ impl RealEngine {
             let down_price_dec: Decimal = format!("{:.2}", down_price).parse().unwrap();
             let size_dec: Decimal = format!("{:.2}", SIZE).parse().unwrap();
 
+            // Устанавливаем время экспирации через 10 секунд
+            let expiration = Utc::now() + TimeDelta::seconds(10);
+
             let order_up = client.limit_order()
                 .token_id(&*up_token)
                 .price(up_price_dec)
                 .size(size_dec)
                 .side(PolySide::Buy)
+                .order_type(OrderType::GTD)
+                .expiration(expiration)
                 .build().await.unwrap();
 
             let order_down = client.limit_order()
@@ -162,77 +174,53 @@ impl RealEngine {
                 .price(down_price_dec)
                 .size(size_dec)
                 .side(PolySide::Buy)
+                .order_type(OrderType::GTD)
+                .expiration(expiration)
                 .build().await.unwrap();
 
             let signed_up = client.sign(&signer, order_up).await.unwrap();
             let signed_down = client.sign(&signer, order_down).await.unwrap();
 
             match client.post_orders(vec![signed_up, signed_down]).await {
-                Ok(responses) => {
-                    let mut order_ids = Vec::new();
-                    for resp in responses.iter() {
-                        if !resp.order_id.is_empty() {
-                            order_ids.push(resp.order_id.clone());
-                        }
-                    }
-
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-
-                    // Отменяем ордера
-                    for id in order_ids {
-                        let _ = client.cancel_order(&id).await;
-                    }
-                },
+                Ok(_responses) => {},
                 Err(e) => error!("❌ Ошибка размещения Maker ордеров: {}", e),
             }
         });
     }
 
-    fn execute_real_trade(&self, side: Side, price: f64, shares: f64, t_type: &str) {
-        let client = self.client.clone();
+    fn execute_hedge_trade(&self, side: Side) {
+        let client: Client<Authenticated<Normal>> = self.client.clone();
         let signer = self.signer.clone();
         let token_id = if side == Side::Up { Arc::clone(&self.up_token) } else { Arc::clone(&self.down_token) };
-        let t_type_str = t_type.to_string();
-        let expected_order_ids = Arc::clone(&self.expected_order_ids);
 
         tokio::spawn(async move {
-            // Округляем сумму до 2 знаков и конвертируем через строку
-            let total_amount = ((price * shares) * 100.0).round() / 100.0;
-            let amount_dec: Decimal = format!("{:.2}", total_amount).parse().unwrap();
-            let usdc_amount = polymarket_client_sdk::clob::types::Amount::usdc(amount_dec).unwrap();
+            // Конвертируем через строку с точным форматированием до 2 знаков
+            let price_dec: Decimal = format!("{:.2}", 0.99).parse().unwrap();
+            let size_dec: Decimal = format!("{:.2}", SIZE).parse().unwrap();
 
-            let order = client.market_order()
+            let order = client.limit_order()
                 .token_id(&*token_id)
-                .amount(usdc_amount)
+                .price(price_dec)
+                .size(size_dec)
                 .side(PolySide::Buy)
-                .order_type(OrderType::FAK)
-                .build().await;
+                .build().await.unwrap();
 
-            match order {
-                Ok(ord) => {
-                    let signed = client.sign(&signer, ord).await.unwrap();
-                    match client.post_order(signed).await {
-                        Ok(response) => {
-                            // Сохраняем order_id для валидации в WebSocket
-                            if !response.order_id.is_empty() {
-                                let mut expected = expected_order_ids.lock().unwrap();
-                                expected.insert(response.order_id.clone());
-                                info!("🎯 Taker {} отправлен | Order ID: {}", t_type_str, &response.order_id[..20.min(response.order_id.len())]);
-                            } else {
-                                info!("🎯 Taker {} отправлен (без order_id)", t_type_str);
-                            }
-                        },
-                        Err(e) => error!("❌ Ошибка отправки Taker {}: {}", t_type_str, e),
+            let signed = client.sign(&signer, order).await.unwrap();
+
+            match client.post_order(signed).await {
+                Ok(response) => {
+                    if !response.order_id.is_empty() {
+                        info!("🎯 Taker Hedge отправлен");
                     }
                 },
-                Err(e) => error!("❌ Ошибка создания Taker {}: {}", t_type_str, e),
+                Err(e) => error!("❌ Ошибка отправки Taker Hedge: {}", e),
             }
         });
     }
 
     // Trade события = TAKER сделки (market orders FAK)
     // Это подтверждение исполнения taker-hedge и taker-emergency ордеров
-    // КОМБИНИРОВАННАЯ ВАЛИДАЦИЯ: Проверяем по trade_owner И по taker_order_id
+    // ВАЛИДАЦИЯ: Проверяем по trade_owner
     pub fn handle_ws_trade(
         &self,
         trade_id: String,
@@ -241,39 +229,16 @@ impl RealEngine {
         side: PolySide,
         asset_id: &str,
         trade_owner: Option<Uuid>,
-        taker_order_id: Option<String>
     ) {
         // ПРОВЕРКА 1: trade_owner должен совпадать с нашим API key
         let owner_matches = trade_owner.map_or(false, |owner| owner == self.our_api_key);
 
-        // ПРОВЕРКА 2: taker_order_id должен быть в expected_order_ids
-        let order_matches = if let Some(ref order_id) = taker_order_id {
-            let mut expected = self.expected_order_ids.lock().unwrap();
-            let found = expected.contains(order_id);
-
-            if found {
-                // Удаляем из ожидаемых (подтверждаем исполнение)
-                expected.remove(order_id);
-            }
-
-            found
-        } else {
-            false
-        };
-
-        // КОМБИНИРОВАННАЯ ПРОВЕРКА: И owner должен совпадать, И order_id должен быть наш
-        let is_our_trade = owner_matches && order_matches;
-
-        if !is_our_trade {
-            warn!("⚠️  IGNORED TRADE: Не наш taker/order_id");
-            return;
-        }
+        if !owner_matches { return; }
 
         // Проверяем дубликаты (дополнительная защита)
         {
             let mut seen = self.seen_trades.lock().unwrap();
             if seen.contains(&trade_id) {
-                warn!("⚠️  DUPLICATE TRADE (уже обработан): {}", &trade_id[..20.min(trade_id.len())]);
                 return;
             }
             seen.insert(trade_id.clone());
@@ -310,6 +275,18 @@ impl RealEngine {
             side_str, token_str, price, size, price * size);
         info!("💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
             port.up_shares, port.down_shares, port.up_shares - port.down_shares);
+
+        // Проверяем перекос после обновления портфеля
+        let current_skew = port.up_shares - port.down_shares;
+
+        // Освобождаем мьютекс портфеля перед работой с флагом
+        drop(port);
+
+        // Если перекос выровнялся (меньше HEDGE_SIZE), снимаем флаг хеджирования
+        if current_skew.abs() < HEDGE_SIZE && self.is_hedging() {
+            self.set_hedging(false);
+            info!("✅ Перекос выровнен. Возобновляем нормальную торговлю");
+        }
     }
 
     // Обработка событий ордеров (MAKER orders - limit orders)
@@ -342,8 +319,8 @@ impl RealEngine {
                 // Сохраняем ID нашего ордера
                 self.add_order_id(order_id.clone());
 
-                info!("📝 MAKER PLACED: {} {} @ {:.3} | ID: {}",
-                    side_str, token_str, price, &order_id[..20]);
+                info!("📝 MAKER PLACED: {} {} @ {:.3}",
+                    side_str, token_str, price);
             }
             Some("UPDATE") => {
                 // UPDATE = частичное или полное исполнение MAKER ордера
@@ -381,8 +358,8 @@ impl RealEngine {
                 // Удаляем из активных
                 self.remove_order_id(&order_id);
 
-                warn!("❌ MAKER CANCELLED: {} {} @ {:.3} | ID: {}",
-                    side_str, token_str, price, &order_id[..20]);
+                warn!("❌ MAKER CANCELLED: {} {} @ {:.3}",
+                    side_str, token_str, price);
             }
             _ => {
                 // Другие типы событий
