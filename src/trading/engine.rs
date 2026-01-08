@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::collections::HashSet;
 use crate::models::{Portfolio, Side, MarketPrices};
+use crate::config::TradingConfig;
 
 use polymarket_client_sdk::clob::Client;
 use polymarket_client_sdk::auth::Normal;
@@ -11,10 +12,6 @@ use alloy::signers::local::PrivateKeySigner;
 use tracing::{info, warn, error};
 use uuid::Uuid;
 use chrono::{TimeDelta, Utc};
-
-const MAX_BALANCE: f64 = 15.0;
-const SIZE: f64 = 3.0;
-const HEDGE_SIZE: f64 = 6.0;
 
 pub struct RealEngine {
     portfolio: Mutex<Portfolio>,
@@ -27,6 +24,7 @@ pub struct RealEngine {
     active_order_ids: Mutex<HashSet<String>>,
     our_api_key: Uuid,
     hedging_in_progress: Arc<Mutex<bool>>,
+    config: TradingConfig,
 }
 
 impl RealEngine {
@@ -35,7 +33,8 @@ impl RealEngine {
         signer: PrivateKeySigner,
         up_token: String,
         down_token: String,
-        our_api_key: Uuid
+        our_api_key: Uuid,
+        config: TradingConfig
     ) -> Self {
         Self {
             portfolio: Mutex::new(Portfolio::default()),
@@ -48,6 +47,7 @@ impl RealEngine {
             active_order_ids: Mutex::new(HashSet::new()),
             our_api_key,
             hedging_in_progress: Arc::new(Mutex::new(false)),
+            config,
         }
     }
 
@@ -100,31 +100,31 @@ impl RealEngine {
             (port.up_shares, port.down_shares, port.up_spent, port.down_spent)
         };
 
-        if (up_spent + down_spent) >= MAX_BALANCE { return; }
+        if (up_spent + down_spent) >= self.config.max_balance { return; }
 
         let skew = up_shares - down_shares;
 
-        if skew >= HEDGE_SIZE {
+        if skew >= self.config.hedge_size {
             // Устанавливаем флаг хеджирования
             self.set_hedging(true);
             // Запускаем таймер для автоматического сброса флага через 3 секунды
             self.start_hedging_timer();
             // Вычисляем сколько ордеров нужно для закрытия перекоса
-            let num_orders = ((skew - HEDGE_SIZE) / SIZE).ceil() as i32;
-            info!("🔄 Обнаружен перекос {:.1}. Отправляем {} хедж-ордеров DOWN по {:.1} каждый", skew, num_orders, SIZE);
+            let num_orders = ((skew - self.config.hedge_size) / self.config.size).ceil() as i32;
+            info!("🔄 Обнаружен перекос {:.1}. Отправляем {} хедж-ордеров DOWN по {:.1} каждый", skew, num_orders, self.config.size);
             // Отправляем все нужные ордера
             for _ in 0..num_orders {
                 self.execute_hedge_trade(Side::Down);
             }
             return;
-        } else if skew <= -HEDGE_SIZE {
+        } else if skew <= -self.config.hedge_size {
             // Устанавливаем флаг хеджирования
             self.set_hedging(true);
             // Запускаем таймер для автоматического сброса флага через 3 секунды
             self.start_hedging_timer();
             // Вычисляем сколько ордеров нужно для закрытия перекоса
-            let num_orders = ((skew.abs() - HEDGE_SIZE) / SIZE).ceil() as i32;
-            info!("🔄 Обнаружен перекос {:.1}. Отправляем {} хедж-ордеров UP по {:.1} каждый", skew, num_orders, SIZE);
+            let num_orders = ((skew.abs() - self.config.hedge_size) / self.config.size).ceil() as i32;
+            info!("🔄 Обнаружен перекос {:.1}. Отправляем {} хедж-ордеров UP по {:.1} каждый", skew, num_orders, self.config.size);
             // Отправляем все нужные ордера
             for _ in 0..num_orders {
                 self.execute_hedge_trade(Side::Up);
@@ -164,12 +164,13 @@ impl RealEngine {
         let down_token = Arc::clone(&self.down_token);
         let client = self.client.clone();
         let signer = self.signer.clone();
+        let size = self.config.size;
 
         tokio::spawn(async move {
             // Конвертируем через строку с точным форматированием до 2 знаков
             let up_price_dec: Decimal = format!("{:.2}", up_price).parse().unwrap();
             let down_price_dec: Decimal = format!("{:.2}", down_price).parse().unwrap();
-            let size_dec: Decimal = format!("{:.2}", SIZE).parse().unwrap();
+            let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
             // Устанавливаем время экспирации через 10 секунд
             let expiration = Utc::now() + TimeDelta::seconds(10);
@@ -206,11 +207,12 @@ impl RealEngine {
         let client: Client<Authenticated<Normal>> = self.client.clone();
         let signer = self.signer.clone();
         let token_id = if side == Side::Up { Arc::clone(&self.up_token) } else { Arc::clone(&self.down_token) };
+        let size = self.config.size;
 
         tokio::spawn(async move {
             // Конвертируем через строку с точным форматированием до 2 знаков
             let price_dec: Decimal = format!("{:.2}", 0.99).parse().unwrap();
-            let size_dec: Decimal = format!("{:.2}", SIZE).parse().unwrap();
+            let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
             let order = client.limit_order()
                 .token_id(&*token_id)
@@ -297,7 +299,7 @@ impl RealEngine {
         drop(port);
 
         // Если перекос выровнялся (меньше HEDGE_SIZE), снимаем флаг хеджирования
-        if current_skew.abs() < HEDGE_SIZE && self.is_hedging() {
+        if current_skew.abs() < self.config.hedge_size && self.is_hedging() {
             self.set_hedging(false);
             info!("✅ Перекос выровнен. Возобновляем нормальную торговлю");
         }

@@ -4,7 +4,7 @@ use std::time::Duration;
 use polymarket_client_sdk::clob::ws::{Client, WsMessage};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::Normal;
-use crate::engine::RealEngine;
+use crate::trading::engine::RealEngine;
 use tracing::{info, warn};
 
 pub struct UserStream {

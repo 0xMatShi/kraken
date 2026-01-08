@@ -1,11 +1,11 @@
-mod models; mod scanner; mod websocket; mod engine; mod websocket_user;
+mod models; mod trading; mod websocket; mod config;
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::str::FromStr as _;
-use scanner::AutoScanner;
-use websocket::DataStream;
-use websocket_user::UserStream;
-use engine::RealEngine;
+use trading::scanner::AutoScanner;
+use websocket::market::DataStream;
+use websocket::user::UserStream;
+use trading::engine::RealEngine;
 
 use alloy::signers::Signer as _;
 use alloy::signers::local::PrivateKeySigner;
@@ -76,7 +76,15 @@ async fn main() -> anyhow::Result<()> {
         .with(console_layer)
         .with(file_layer)
         .init();
-    
+
+    // Загружаем торговую конфигурацию
+    let app_config = config::Config::load()?;
+    tracing::info!("📝 Конфигурация загружена: MAX_BALANCE={:.1}, SIZE={:.1}, HEDGE_SIZE={:.1}",
+        app_config.trading.max_balance,
+        app_config.trading.size,
+        app_config.trading.hedge_size
+    );
+
     // 1. Инициализация аутентификации
     let api_key = Uuid::parse_str(&std::env::var("POLYMARKET_API_KEY")?)?;
     let api_secret = std::env::var("POLYMARKET_API_SECRET")?;
@@ -95,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
     let client = Client::new("https://clob.polymarket.com", Config::default())?
         .authentication_builder(&signer)
         .funder(funder_address)
-        .signature_type(polymarket_client_sdk::clob::types::SignatureType::GnosisSafe) // EOA - обычная подпись кошелька
+        .signature_type(polymarket_client_sdk::clob::types::SignatureType::GnosisSafe)
         .authenticate()
         .await?;
 
@@ -123,7 +131,8 @@ async fn main() -> anyhow::Result<()> {
                     signer.clone(),
                     target.up_token.clone(),
                     target.down_token.clone(),
-                    api_key
+                    api_key,
+                    app_config.trading.clone()
                 ));
 
                 let market_stream = DataStream::new(target.up_token.clone(), target.down_token.clone(), engine.clone(), ws_market_url.clone());
