@@ -25,6 +25,9 @@ pub struct RealEngine {
     our_api_key: Uuid,
     hedging_in_progress: Arc<Mutex<bool>>,
     config: TradingConfig,
+    // Защита от чрезмерного размещения лимиток
+    last_maker_prices: Mutex<Option<(f64, f64)>>,  // (up_price, down_price)
+    maker_placement_count: Mutex<u32>,              // Счетчик размещений с текущими ценами
 }
 
 impl RealEngine {
@@ -48,6 +51,8 @@ impl RealEngine {
             our_api_key,
             hedging_in_progress: Arc::new(Mutex::new(false)),
             config,
+            last_maker_prices: Mutex::new(None),
+            maker_placement_count: Mutex::new(0),
         }
     }
 
@@ -100,7 +105,9 @@ impl RealEngine {
             (port.up_shares, port.down_shares, port.up_spent, port.down_spent)
         };
 
-        if (up_spent + down_spent) >= self.config.max_balance { return; }
+        if (up_spent + down_spent) >= self.config.max_balance {
+            return;
+        }
 
         let skew = up_shares - down_shares;
 
@@ -111,7 +118,6 @@ impl RealEngine {
             self.start_hedging_timer();
             // Вычисляем сколько ордеров нужно для закрытия перекоса
             let num_orders = ((skew - self.config.hedge_size) / self.config.size).ceil() as i32;
-            info!("🔄 Обнаружен перекос {:.1}. Отправляем {} хедж-ордеров DOWN по {:.1} каждый", skew, num_orders, self.config.size);
             // Отправляем все нужные ордера
             for _ in 0..num_orders {
                 self.execute_hedge_trade(Side::Down);
@@ -124,7 +130,6 @@ impl RealEngine {
             self.start_hedging_timer();
             // Вычисляем сколько ордеров нужно для закрытия перекоса
             let num_orders = ((skew.abs() - self.config.hedge_size) / self.config.size).ceil() as i32;
-            info!("🔄 Обнаружен перекос {:.1}. Отправляем {} хедж-ордеров UP по {:.1} каждый", skew, num_orders, self.config.size);
             // Отправляем все нужные ордера
             for _ in 0..num_orders {
                 self.execute_hedge_trade(Side::Up);
@@ -141,6 +146,44 @@ impl RealEngine {
             return;
         }
 
+        // let potential_pair_cost = prices.up_bid + prices.down_bid;
+        // if potential_pair_cost >= 1.00 { return; }
+
+        // // Стратегия размещения в зависимости от спреда
+        // let (up_price, down_price) = if potential_pair_cost >= 0.99 {
+        //     // Спред 1с: встаем в очередь с обеих сторон, только если сайз <= 100
+        //     if prices.up_bid_size > 100.0 || prices.down_bid_size > 100.0 {
+        //         return; // Не размещаем, если хотя бы в одной очереди > 100 акций
+        //     }
+        //     (Self::round_price(prices.up_bid), Self::round_price(prices.down_bid))
+        // } else if potential_pair_cost >= 0.98 {
+        //     // Спред 2с: старая логика - где конкуренция больше, там новый best_bid
+        //     if prices.up_bid_size > prices.down_bid_size {
+        //         // UP конкуренция больше → встаем новым best_bid
+        //         // DOWN конкуренция меньше → встаем в очередь, но проверяем лимит
+        //         if prices.down_bid_size > 100.0 {
+        //             return; // Не размещаем, если в очереди DOWN > 100 акций
+        //         }
+        //         (Self::round_price(prices.up_bid + 0.01), Self::round_price(prices.down_bid))
+        //     } else if prices.down_bid_size > prices.up_bid_size {
+        //         // DOWN конкуренция больше → встаем новым best_bid
+        //         // UP конкуренция меньше → встаем в очередь, но проверяем лимит
+        //         if prices.up_bid_size > 100.0 {
+        //             return; // Не размещаем, если в очереди UP > 100 акций
+        //         }
+        //         (Self::round_price(prices.up_bid), Self::round_price(prices.down_bid + 0.01))
+        //     } else {
+        //         // Конкуренция равна - встаем в очередь с обеих сторон
+        //         if prices.up_bid_size > 100.0 || prices.down_bid_size > 100.0 {
+        //             return; // Не размещаем, если хотя бы в одной очереди > 100 акций
+        //         }
+        //         (Self::round_price(prices.up_bid), Self::round_price(prices.down_bid))
+        //     }
+        // } else {
+        //     // Спред 3с и больше: встаем новым best_bid с обеих сторон
+        //     (Self::round_price(prices.up_bid + 0.01), Self::round_price(prices.down_bid + 0.01))
+        // };
+
         let potential_pair_cost = (prices.up_bid + 0.01) + (prices.down_bid + 0.01);
         if potential_pair_cost >= 0.99 { return; }
 
@@ -156,8 +199,31 @@ impl RealEngine {
         };
 
         // Дополнительная проверка после округления
-        if up_price < 0.01 || down_price < 0.01 {
-            return;
+        if up_price < 0.01 || down_price < 0.01 { return; }
+
+        // Защита от чрезмерного размещения лимиток
+        {
+            let mut last_prices = self.last_maker_prices.lock().unwrap();
+            let mut count = self.maker_placement_count.lock().unwrap();
+
+            if let Some((last_up, last_down)) = *last_prices {
+                // Проверяем, совпадают ли цены с предыдущими
+                if (last_up - up_price).abs() < 0.001 && (last_down - down_price).abs() < 0.001 {
+                    // Цены не изменились, увеличиваем счетчик
+                    *count += 1;
+
+                    // Если уже было 3 или больше размещений с такими же ценами, скипаем
+                    if *count > 3 { return; }
+                } else {
+                    // Цены изменились, сбрасываем счетчик
+                    *count = 1;
+                    *last_prices = Some((up_price, down_price));
+                }
+            } else {
+                // Первое размещение
+                *count = 1;
+                *last_prices = Some((up_price, down_price));
+            }
         }
 
         let up_token = Arc::clone(&self.up_token);
@@ -171,9 +237,8 @@ impl RealEngine {
             let up_price_dec: Decimal = format!("{:.2}", up_price).parse().unwrap();
             let down_price_dec: Decimal = format!("{:.2}", down_price).parse().unwrap();
             let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
-
-            // Устанавливаем время экспирации через 10 секунд
-            let expiration = Utc::now() + TimeDelta::seconds(10);
+            
+            let expiration = Utc::now() + TimeDelta::seconds(65);
 
             let order_up = client.limit_order()
                 .token_id(&*up_token)
