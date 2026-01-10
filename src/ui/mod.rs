@@ -21,7 +21,7 @@ use crate::models::Portfolio;
 pub use log_capture::UiLogLayer;
 
 // Количество уровней стакана для отображения
-pub const ORDER_BOOK_DEPTH: usize = 20;
+pub const ORDER_BOOK_DEPTH: usize = 5;
 // Максимум логов в буфере
 const MAX_LOG_LINES: usize = 100;
 
