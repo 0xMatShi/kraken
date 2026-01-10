@@ -2,6 +2,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use crate::models::{BookMessage, SubscribeMessage, MarketPrices};
 use crate::trading::engine::RealEngine;
+use crate::ui::{self, UiState, OrderLevel, ORDER_BOOK_DEPTH};
 use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 use tokio::time::{interval, Duration};
@@ -14,16 +15,18 @@ pub struct DataStream {
     ws_url: String,
     prices: Arc<Mutex<MarketPrices>>,
     engine: Arc<RealEngine>,
+    ui_state: UiState,
 }
 
 impl DataStream {
-    pub fn new(up: String, down: String, engine: Arc<RealEngine>, ws_url: String) -> Self {
+    pub fn new(up: String, down: String, engine: Arc<RealEngine>, ws_url: String, ui_state: UiState) -> Self {
         Self {
             up_token: up,
             down_token: down,
             ws_url,
             prices: Arc::new(Mutex::new(MarketPrices::default())),
             engine,
+            ui_state,
         }
     }
 
@@ -101,19 +104,42 @@ impl DataStream {
     fn update_prices(&self, book: BookMessage) {
         let mut p = self.prices.lock().unwrap();
 
-        let best_bid = book.bids.iter()
+        // Сортируем bids по убыванию цены, asks по возрастанию
+        let mut sorted_bids: Vec<_> = book.bids.iter()
             .map(|o| (o.price, o.size))
-            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        let best_ask = book.asks.iter()
+            .collect();
+        sorted_bids.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut sorted_asks: Vec<_> = book.asks.iter()
             .map(|o| (o.price, o.size))
-            .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            .collect();
+        sorted_asks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Извлекаем 4 уровня для UI
+        let mut ui_bids = [OrderLevel::default(); ORDER_BOOK_DEPTH];
+        let mut ui_asks = [OrderLevel::default(); ORDER_BOOK_DEPTH];
+
+        for (i, (price, size)) in sorted_bids.iter().take(ORDER_BOOK_DEPTH).enumerate() {
+            ui_bids[i] = OrderLevel { price: *price, size: *size };
+        }
+        for (i, (price, size)) in sorted_asks.iter().take(ORDER_BOOK_DEPTH).enumerate() {
+            ui_asks[i] = OrderLevel { price: *price, size: *size };
+        }
+
+        // Обновляем MarketPrices (лучший bid/ask)
+        let best_bid = sorted_bids.first().copied();
+        let best_ask = sorted_asks.first().copied();
 
         if book.asset_id == self.up_token {
             if let Some(b) = best_bid { p.up_bid = b.0; p.up_bid_size = b.1; }
             if let Some(a) = best_ask { p.up_ask = a.0; p.up_ask_size = a.1; }
+            // Обновляем UI state для UP стакана
+            ui::update_up_book(&self.ui_state, ui_bids, ui_asks);
         } else {
             if let Some(b) = best_bid { p.down_bid = b.0; p.down_bid_size = b.1; }
             if let Some(a) = best_ask { p.down_ask = a.0; p.down_ask_size = a.1; }
+            // Обновляем UI state для DOWN стакана
+            ui::update_down_book(&self.ui_state, ui_bids, ui_asks);
         }
 
         // ВАЖНО: Копируем без аллокации (MarketPrices теперь Copy)

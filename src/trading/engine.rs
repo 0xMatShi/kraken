@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::collections::HashSet;
 use crate::models::{Portfolio, Side, MarketPrices};
 use crate::config::TradingConfig;
+use crate::ui::{self, UiState};
 
 use polymarket_client_sdk::clob::Client;
 use polymarket_client_sdk::auth::Normal;
@@ -29,6 +30,10 @@ pub struct RealEngine {
     // Защита от чрезмерного размещения лимиток
     last_maker_prices: Mutex<Option<(f64, f64)>>,  // (up_price, down_price)
     maker_placement_count: Mutex<u32>,              // Счетчик размещений с текущими ценами
+    // UI state для отображения портфолио
+    ui_state: UiState,
+    // Dry run режим - только наблюдение без торговли
+    dry_run: bool,
 }
 
 impl RealEngine {
@@ -38,7 +43,9 @@ impl RealEngine {
         up_token: String,
         down_token: String,
         our_api_key: Uuid,
-        config: TradingConfig
+        config: TradingConfig,
+        ui_state: UiState,
+        dry_run: bool,
     ) -> Self {
         Self {
             portfolio: Mutex::new(Portfolio::default()),
@@ -54,7 +61,15 @@ impl RealEngine {
             config,
             last_maker_prices: Mutex::new(None),
             maker_placement_count: Mutex::new(0),
+            ui_state,
+            dry_run,
         }
+    }
+
+    // Обновить UI с текущим состоянием портфолио
+    fn update_ui_portfolio(&self) {
+        let port = self.portfolio.lock().unwrap();
+        ui::update_portfolio(&self.ui_state, port.clone());
     }
 
     // Округление до 2 знаков (минимальный тик-размер 0.01)
@@ -93,6 +108,10 @@ impl RealEngine {
     }
 
     pub fn process_tick(&self, prices: MarketPrices) {
+        // В режиме dry run не размещаем ордера
+        if self.dry_run {
+            return;
+        }
         // ВРЕМЕННО ОТКЛЮЧЕНО: Проверка флага хеджирования
         // if self.is_hedging() {
         //     return;
@@ -143,6 +162,7 @@ impl RealEngine {
     }
 
     fn manage_adaptive_maker(&self, prices: &MarketPrices) {
+
         // Проверяем, что обе стороны имеют валидные bid цены
         if prices.up_bid < 0.01 || prices.down_bid < 0.01 {
             return;
@@ -368,6 +388,9 @@ impl RealEngine {
         // Освобождаем мьютекс портфеля перед работой с флагом
         drop(port);
 
+        // Обновляем UI
+        self.update_ui_portfolio();
+
         // // Если перекос выровнялся (меньше HEDGE_SIZE), снимаем флаг хеджирования
         // if current_skew.abs() < self.config.hedge_size && self.is_hedging() {
         //     self.set_hedging(false);
@@ -438,6 +461,10 @@ impl RealEngine {
                         side_str, token_str, price, size, price * size);
                     info!("💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
                         port.up_shares, port.down_shares, port.up_shares - port.down_shares);
+
+                    drop(port);
+                    // Обновляем UI
+                    self.update_ui_portfolio();
                 }
             }
             Some("CANCELLATION") => {
