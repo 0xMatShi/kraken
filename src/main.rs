@@ -132,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
         if let Some(target) = scanner.find_next_target("btc-updown-15m", 0.0, 15.0).await {
             // Парсим дату окончания
             let end_date = target.end_date.parse::<DateTime<Utc>>().unwrap_or(Utc::now());
-            let total_seconds = (end_date - Utc::now()).num_seconds().max(0);
+            let total_seconds = 900; // Фиксированная длительность события: 15 минут
 
             // Устанавливаем информацию о событии в UI
             ui::set_event_info(&ui_state, target.title.clone(), end_date, total_seconds);

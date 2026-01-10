@@ -21,7 +21,7 @@ use crate::models::Portfolio;
 pub use log_capture::UiLogLayer;
 
 // Количество уровней стакана для отображения
-pub const ORDER_BOOK_DEPTH: usize = 5;
+pub const ORDER_BOOK_DEPTH: usize = 20;
 // Максимум логов в буфере
 const MAX_LOG_LINES: usize = 100;
 
@@ -233,8 +233,12 @@ fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, dry_run: b
         .style(Style::default().fg(Color::White));
     frame.render_widget(event_title, title_area);
 
-    // Время
-    let time_text = format!("Time: {}s / {}s", remaining, total);
+    // Время в формате MM:SS
+    let remaining_mins = remaining / 60;
+    let remaining_secs = remaining % 60;
+    let total_mins = total / 60;
+    let total_secs = total % 60;
+    let time_text = format!("Time: {:02}:{:02} / {:02}:{:02}", remaining_mins, remaining_secs, total_mins, total_secs);
     let time = Paragraph::new(time_text)
         .style(Style::default().fg(Color::Yellow));
     frame.render_widget(time, time_area);
