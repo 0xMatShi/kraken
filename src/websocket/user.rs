@@ -7,6 +7,7 @@ use polymarket_client_sdk::auth::Normal;
 use crate::trading::engine::RealEngine;
 use tracing::{info, warn};
 
+
 pub struct UserStream {
     engine: Arc<RealEngine>,
     // ИСПРАВЛЕНИЕ: Указываем точный тип аутентифицированного клиента

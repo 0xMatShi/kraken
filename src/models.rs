@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Market {
     #[serde(rename = "clobTokenIds")]

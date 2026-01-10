@@ -5,6 +5,7 @@ use crate::models::{PolymarketEvent, TargetMarket, Market};
 use std::error::Error;
 use tracing::{info, warn};
 
+
 pub struct AutoScanner {
     client: Client,
     api_url: String,

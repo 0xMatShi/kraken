@@ -11,7 +11,8 @@ use polymarket_client_sdk::types::Decimal;
 use alloy::signers::local::PrivateKeySigner;
 use tracing::{info, warn, error};
 use uuid::Uuid;
-use chrono::{TimeDelta, Utc};
+// use chrono::{TimeDelta, Utc};
+
 
 pub struct RealEngine {
     portfolio: Mutex<Portfolio>,
@@ -23,7 +24,7 @@ pub struct RealEngine {
     seen_orders: Mutex<HashSet<String>>,
     active_order_ids: Mutex<HashSet<String>>,
     our_api_key: Uuid,
-    hedging_in_progress: Arc<Mutex<bool>>,
+    // hedging_in_progress: Arc<Mutex<bool>>,
     config: TradingConfig,
     // Защита от чрезмерного размещения лимиток
     last_maker_prices: Mutex<Option<(f64, f64)>>,  // (up_price, down_price)
@@ -49,7 +50,7 @@ impl RealEngine {
             seen_orders: Mutex::new(HashSet::new()),
             active_order_ids: Mutex::new(HashSet::new()),
             our_api_key,
-            hedging_in_progress: Arc::new(Mutex::new(false)),
+            // hedging_in_progress: Arc::new(Mutex::new(false)),
             config,
             last_maker_prices: Mutex::new(None),
             maker_placement_count: Mutex::new(0),
@@ -61,24 +62,24 @@ impl RealEngine {
         (price * 100.0).round() / 100.0
     }
 
-    // Методы для работы с флагом хеджирования
-    fn is_hedging(&self) -> bool {
-        *self.hedging_in_progress.lock().unwrap()
-    }
+    // ВРЕМЕННО ОТКЛЮЧЕНО: Методы для работы с флагом хеджирования
+    // fn is_hedging(&self) -> bool {
+    //     *self.hedging_in_progress.lock().unwrap()
+    // }
 
-    fn set_hedging(&self, value: bool) {
-        *self.hedging_in_progress.lock().unwrap() = value;
-    }
+    // fn set_hedging(&self, value: bool) {
+    //     *self.hedging_in_progress.lock().unwrap() = value;
+    // }
 
-    // Запускает таймер на 3 секунды для автоматического сброса флага хеджирования
-    fn start_hedging_timer(&self) {
-        let hedging_flag = Arc::clone(&self.hedging_in_progress);
-        tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-            *hedging_flag.lock().unwrap() = false;
-            info!("⏰ Таймер хеджирования истек. Снимаем блокировку");
-        });
-    }
+    // ВРЕМЕННО ОТКЛЮЧЕНО: Таймер для автоматического сброса флага хеджирования
+    // fn start_hedging_timer(&self) {
+    //     let hedging_flag = Arc::clone(&self.hedging_in_progress);
+    //     tokio::spawn(async move {
+    //         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    //         *hedging_flag.lock().unwrap() = false;
+    //         info!("⏰ Таймер хеджирования истек. Снимаем блокировку");
+    //     });
+    // }
 
     // Методы для работы с активными ордерами
     pub fn add_order_id(&self, order_id: String) {
@@ -92,10 +93,10 @@ impl RealEngine {
     }
 
     pub fn process_tick(&self, prices: MarketPrices) {
-        // Если идет хеджирование, пропускаем обработку тика
-        if self.is_hedging() {
-            return;
-        }
+        // ВРЕМЕННО ОТКЛЮЧЕНО: Проверка флага хеджирования
+        // if self.is_hedging() {
+        //     return;
+        // }
         self.run_logic(prices);
     }
 
@@ -109,33 +110,34 @@ impl RealEngine {
             return;
         }
 
-        let skew = up_shares - down_shares;
+        let _skew = up_shares - down_shares;
 
-        if skew >= self.config.hedge_size {
-            // Устанавливаем флаг хеджирования
-            self.set_hedging(true);
-            // Запускаем таймер для автоматического сброса флага через 3 секунды
-            self.start_hedging_timer();
-            // Вычисляем сколько ордеров нужно для закрытия перекоса
-            let num_orders = ((skew - self.config.hedge_size) / self.config.size).ceil() as i32;
-            // Отправляем все нужные ордера
-            for _ in 0..num_orders {
-                self.execute_hedge_trade(Side::Down);
-            }
-            return;
-        } else if skew <= -self.config.hedge_size {
-            // Устанавливаем флаг хеджирования
-            self.set_hedging(true);
-            // Запускаем таймер для автоматического сброса флага через 3 секунды
-            self.start_hedging_timer();
-            // Вычисляем сколько ордеров нужно для закрытия перекоса
-            let num_orders = ((skew.abs() - self.config.hedge_size) / self.config.size).ceil() as i32;
-            // Отправляем все нужные ордера
-            for _ in 0..num_orders {
-                self.execute_hedge_trade(Side::Up);
-            }
-            return;
-        }
+        // ВРЕМЕННО ОТКЛЮЧЕНО: Логика хеджирования
+        // if skew >= self.config.hedge_size {
+        //     // Устанавливаем флаг хеджирования
+        //     self.set_hedging(true);
+        //     // Запускаем таймер для автоматического сброса флага через 3 секунды
+        //     self.start_hedging_timer();
+        //     // Вычисляем сколько ордеров нужно для закрытия перекоса
+        //     let num_orders = ((skew - self.config.hedge_size) / self.config.size).ceil() as i32;
+        //     // Отправляем все нужные ордера
+        //     for _ in 0..num_orders {
+        //         self.execute_hedge_trade(Side::Down);
+        //     }
+        //     return;
+        // } else if skew <= -self.config.hedge_size {
+        //     // Устанавливаем флаг хеджирования
+        //     self.set_hedging(true);
+        //     // Запускаем таймер для автоматического сброса флага через 3 секунды
+        //     self.start_hedging_timer();
+        //     // Вычисляем сколько ордеров нужно для закрытия перекоса
+        //     let num_orders = ((skew.abs() - self.config.hedge_size) / self.config.size).ceil() as i32;
+        //     // Отправляем все нужные ордера
+        //     for _ in 0..num_orders {
+        //         self.execute_hedge_trade(Side::Up);
+        //     }
+        //     return;
+        // }
 
         self.manage_adaptive_maker(&prices);
     }
@@ -146,6 +148,7 @@ impl RealEngine {
             return;
         }
 
+        // СТРАТЕГИЯ 1
         // let potential_pair_cost = prices.up_bid + prices.down_bid;
         // if potential_pair_cost >= 1.00 { return; }
 
@@ -184,8 +187,9 @@ impl RealEngine {
         //     (Self::round_price(prices.up_bid + 0.01), Self::round_price(prices.down_bid + 0.01))
         // };
 
+        // СТРАТЕГИЯ 2
         let potential_pair_cost = (prices.up_bid + 0.01) + (prices.down_bid + 0.01);
-        if potential_pair_cost >= 0.99 { return; }
+        if potential_pair_cost >= 1.00 { return; }
 
         let up_price = if prices.up_bid_size > 100.0 {
             Self::round_price(prices.up_bid + 0.01)
@@ -238,15 +242,15 @@ impl RealEngine {
             let down_price_dec: Decimal = format!("{:.2}", down_price).parse().unwrap();
             let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
             
-            let expiration = Utc::now() + TimeDelta::seconds(65);
+            // let expiration = Utc::now() + TimeDelta::seconds(65);
 
             let order_up = client.limit_order()
                 .token_id(&*up_token)
                 .price(up_price_dec)
                 .size(size_dec)
                 .side(PolySide::Buy)
-                .order_type(OrderType::GTD)
-                .expiration(expiration)
+                .order_type(OrderType::GTC)
+                // .expiration(expiration)
                 .build().await.unwrap();
 
             let order_down = client.limit_order()
@@ -254,8 +258,8 @@ impl RealEngine {
                 .price(down_price_dec)
                 .size(size_dec)
                 .side(PolySide::Buy)
-                .order_type(OrderType::GTD)
-                .expiration(expiration)
+                .order_type(OrderType::GTC)
+                // .expiration(expiration)
                 .build().await.unwrap();
 
             let signed_up = client.sign(&signer, order_up).await.unwrap();
@@ -268,36 +272,37 @@ impl RealEngine {
         });
     }
 
-    fn execute_hedge_trade(&self, side: Side) {
-        let client: Client<Authenticated<Normal>> = self.client.clone();
-        let signer = self.signer.clone();
-        let token_id = if side == Side::Up { Arc::clone(&self.up_token) } else { Arc::clone(&self.down_token) };
-        let size = self.config.size;
+    // ВРЕМЕННО ОТКЛЮЧЕНО: Функция хеджирования
+    // fn execute_hedge_trade(&self, side: Side) {
+    //     let client: Client<Authenticated<Normal>> = self.client.clone();
+    //     let signer = self.signer.clone();
+    //     let token_id = if side == Side::Up { Arc::clone(&self.up_token) } else { Arc::clone(&self.down_token) };
+    //     let size = self.config.size;
 
-        tokio::spawn(async move {
-            // Конвертируем через строку с точным форматированием до 2 знаков
-            let price_dec: Decimal = format!("{:.2}", 0.99).parse().unwrap();
-            let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
+    //     tokio::spawn(async move {
+    //         // Конвертируем через строку с точным форматированием до 2 знаков
+    //         let price_dec: Decimal = format!("{:.2}", 0.99).parse().unwrap();
+    //         let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
-            let order = client.limit_order()
-                .token_id(&*token_id)
-                .price(price_dec)
-                .size(size_dec)
-                .side(PolySide::Buy)
-                .build().await.unwrap();
+    //         let order = client.limit_order()
+    //             .token_id(&*token_id)
+    //             .price(price_dec)
+    //             .size(size_dec)
+    //             .side(PolySide::Buy)
+    //             .build().await.unwrap();
 
-            let signed = client.sign(&signer, order).await.unwrap();
+    //         let signed = client.sign(&signer, order).await.unwrap();
 
-            match client.post_order(signed).await {
-                Ok(response) => {
-                    if !response.order_id.is_empty() {
-                        info!("🎯 Taker Hedge отправлен");
-                    }
-                },
-                Err(e) => error!("❌ Ошибка отправки Taker Hedge: {}", e),
-            }
-        });
-    }
+    //         match client.post_order(signed).await {
+    //             Ok(response) => {
+    //                 if !response.order_id.is_empty() {
+    //                     info!("🎯 Taker Hedge отправлен");
+    //                 }
+    //             },
+    //             Err(e) => error!("❌ Ошибка отправки Taker Hedge: {}", e),
+    //         }
+    //     });
+    // }
 
     // Trade события = TAKER сделки (market orders FAK)
     // Это подтверждение исполнения taker-hedge и taker-emergency ордеров
@@ -357,17 +362,17 @@ impl RealEngine {
         info!("💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
             port.up_shares, port.down_shares, port.up_shares - port.down_shares);
 
-        // Проверяем перекос после обновления портфеля
-        let current_skew = port.up_shares - port.down_shares;
+        // ВРЕМЕННО ОТКЛЮЧЕНО: Проверка перекоса и снятие флага хеджирования
+        // let current_skew = port.up_shares - port.down_shares;
 
         // Освобождаем мьютекс портфеля перед работой с флагом
         drop(port);
 
-        // Если перекос выровнялся (меньше HEDGE_SIZE), снимаем флаг хеджирования
-        if current_skew.abs() < self.config.hedge_size && self.is_hedging() {
-            self.set_hedging(false);
-            info!("✅ Перекос выровнен. Возобновляем нормальную торговлю");
-        }
+        // // Если перекос выровнялся (меньше HEDGE_SIZE), снимаем флаг хеджирования
+        // if current_skew.abs() < self.config.hedge_size && self.is_hedging() {
+        //     self.set_hedging(false);
+        //     info!("✅ Перекос выровнен. Возобновляем нормальную торговлю");
+        // }
     }
 
     // Обработка событий ордеров (MAKER orders - limit orders)
