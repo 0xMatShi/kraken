@@ -63,8 +63,8 @@ async fn main() -> anyhow::Result<()> {
         .with_timer(timer)
         .with_writer(non_blocking_file);
 
-    // UI лог слой для отправки логов в TUI
-    let ui_log_layer = ui::UiLogLayer::new(ui_state.clone());
+    // UI лог слой (логи записываются только в файл, не в UI)
+    let ui_log_layer = ui::UiLogLayer::new();
 
     // Объединяем слои и инициализируем
     tracing_subscriber::registry()
@@ -173,6 +173,7 @@ async fn main() -> anyhow::Result<()> {
                 ui::set_event_info(&ui_state, target.title.clone(), end_date, total_seconds);
                 ui::set_price_to_beat(&ui_state, price_to_beat);
                 ui::clear_our_bid_prices(&ui_state);
+                ui::clear_open_orders(&ui_state);
 
                 // Создаем реальный движок
                 let engine = Arc::new(RealEngine::new(
@@ -245,6 +246,12 @@ async fn main() -> anyhow::Result<()> {
                                 } else {
                                     tracing::info!("🔴 ТОРГОВЛЯ ВЫКЛЮЧЕНА - режим наблюдения (DRY RUN)");
                                 }
+                            }
+                            ui::KeyAction::ScrollHistoryUp => {
+                                ui::scroll_history_up(&ui_state_clone);
+                            }
+                            ui::KeyAction::ScrollHistoryDown => {
+                                ui::scroll_history_down(&ui_state_clone);
                             }
                             ui::KeyAction::None => {}
                         }

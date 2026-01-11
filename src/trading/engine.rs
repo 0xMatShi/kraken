@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::collections::{HashSet, HashMap};
 use crate::models::{Portfolio, Side, MarketPrices};
 use crate::config::TradingConfig;
-use crate::ui::{self, UiState};
+use crate::ui::{self, UiState, TradeHistoryEntry, TradeType, OpenOrder};
 
 use polymarket_client_sdk::clob::Client;
 use polymarket_client_sdk::auth::Normal;
@@ -12,7 +12,7 @@ use polymarket_client_sdk::types::Decimal;
 use alloy::signers::local::PrivateKeySigner;
 use tracing::{info, warn, error};
 use uuid::Uuid;
-// use chrono::{TimeDelta, Utc};
+use chrono::Utc;
 
 
 pub struct RealEngine {
@@ -375,6 +375,7 @@ impl RealEngine {
 
         let side_str = if is_buy { "BUY" } else { "SELL" };
         let token_str = if asset_id == &*self.up_token { "UP" } else { "DOWN" };
+        let is_up = asset_id == &*self.up_token;
 
         info!("✅ TAKER FILLED: {} {} @ {:.3} | Size: {:.2} | Cost: ${:.2}",
             side_str, token_str, price, size, price * size);
@@ -386,6 +387,19 @@ impl RealEngine {
 
         // Освобождаем мьютекс портфеля перед работой с флагом
         drop(port);
+
+        // Добавляем запись в историю торговли
+        if is_buy {
+            let history_entry = TradeHistoryEntry {
+                is_up,
+                shares: size,
+                price,
+                cost: price * size,
+                trade_type: TradeType::Taker,
+                timestamp: Utc::now(),
+            };
+            ui::add_trade_history(&self.ui_state, history_entry);
+        }
 
         // Обновляем UI
         self.update_ui_portfolio();
@@ -433,6 +447,16 @@ impl RealEngine {
                 if let Some(size) = original_size {
                     let mut orders_info = self.active_orders_info.lock().unwrap();
                     orders_info.insert(order_id.clone(), (price, is_up, size, 0.0));
+
+                    // Добавляем открытый ордер в UI
+                    let open_order = OpenOrder {
+                        order_id: order_id.clone(),
+                        is_up,
+                        price,
+                        filled: 0.0,
+                        total: size,
+                    };
+                    ui::add_open_order(&self.ui_state, open_order);
                 }
 
                 // Обновляем UI - добавляем цену в список наших bid prices
@@ -472,8 +496,15 @@ impl RealEngine {
                             size
                         };
 
+                        // Сохраняем is_up для использования после освобождения мьютекса
+                        let current_is_up = *is_up;
+                        let current_accumulated = *accumulated_filled;
+
                         info!("📊 MAKER PARTIAL FILL: {} {} @ {:.3} | Filled: {:.2}/{:.2}",
                             side_str, token_str, price, *accumulated_filled, *original_size);
+
+                        // Обновляем filled в открытом ордере UI
+                        ui::update_open_order_filled(&self.ui_state, &order_id, current_accumulated);
 
                         // Проверяем, полностью ли исполнен ордер (с погрешностью 0.01)
                         if (*accumulated_filled - *original_size).abs() < 0.01 || *accumulated_filled >= *original_size {
@@ -487,6 +518,8 @@ impl RealEngine {
 
                             // Удаляем часики из UI
                             ui::remove_our_bid_price(&self.ui_state, final_is_up, final_price);
+                            // Удаляем открытый ордер из UI
+                            ui::remove_open_order(&self.ui_state, &order_id);
                             info!("🔔 ОРДЕР ПОЛНОСТЬЮ ИСПОЛНЕН: {} {} @ {:.3}", side_str, token_str, price);
                         } else {
                             drop(orders_info); // Освобождаем мьютекс если ордер еще не полностью исполнен
@@ -523,6 +556,20 @@ impl RealEngine {
                                 port.up_shares, port.down_shares, port.up_shares - port.down_shares);
 
                             drop(port);
+
+                            // Добавляем запись в историю торговли (Maker fill)
+                            if is_buy {
+                                let history_entry = TradeHistoryEntry {
+                                    is_up: current_is_up,
+                                    shares: size_for_portfolio,
+                                    price,
+                                    cost: price * size_for_portfolio,
+                                    trade_type: TradeType::Maker,
+                                    timestamp: Utc::now(),
+                                };
+                                ui::add_trade_history(&self.ui_state, history_entry);
+                            }
+
                             // Обновляем UI
                             self.update_ui_portfolio();
                         }
@@ -545,6 +592,9 @@ impl RealEngine {
                 if let Some((order_price, is_up, _original_size, _accumulated)) = order_info {
                     ui::remove_our_bid_price(&self.ui_state, is_up, order_price);
                 }
+
+                // Удаляем открытый ордер из UI
+                ui::remove_open_order(&self.ui_state, &order_id);
 
                 warn!("❌ MAKER CANCELLED: {} {} @ {:.3}",
                     side_str, token_str, price);

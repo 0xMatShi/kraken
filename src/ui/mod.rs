@@ -22,8 +22,42 @@ pub use log_capture::UiLogLayer;
 
 // Количество уровней стакана для отображения
 pub const ORDER_BOOK_DEPTH: usize = 11;
-// Максимум логов в буфере
-const MAX_LOG_LINES: usize = 100;
+// Максимум записей в истории
+const MAX_HISTORY_ENTRIES: usize = 100;
+
+/// Тип торговли
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TradeType {
+    Maker,
+    Taker,
+}
+
+/// Запись в истории торговли
+#[derive(Debug, Clone)]
+pub struct TradeHistoryEntry {
+    pub is_up: bool,           // true = Up, false = Down
+    pub shares: f64,           // количество акций
+    pub price: f64,            // цена в центах (0.36 = 36¢)
+    pub cost: f64,             // стоимость в долларах
+    pub trade_type: TradeType, // Maker или Taker
+    pub timestamp: DateTime<Utc>, // время покупки
+}
+
+/// Открытый ордер
+#[derive(Debug, Clone)]
+pub struct OpenOrder {
+    pub order_id: String,
+    pub is_up: bool,           // true = Up, false = Down
+    pub price: f64,            // цена
+    pub filled: f64,           // заполнено
+    pub total: f64,            // всего
+}
+
+impl OpenOrder {
+    pub fn total_cost(&self) -> f64 {
+        self.price * self.total
+    }
+}
 
 /// Один уровень стакана: цена и размер
 #[derive(Debug, Clone, Copy, Default)]
@@ -75,13 +109,17 @@ pub struct UiStateInner {
     pub portfolio: Portfolio,
     pub up_book: SideOrderBook,
     pub down_book: SideOrderBook,
-    pub logs: VecDeque<String>,
     pub is_running: bool,
     pub trading_enabled: bool,  // false = dryrun, true = real trading
     pub price_to_beat: Option<f64>,
     pub current_price: Option<f64>,
     pub our_up_bid_prices: HashSet<u32>,   // Цены в центах, где размещены наши UP ордера
     pub our_down_bid_prices: HashSet<u32>, // Цены в центах, где размещены наши DOWN ордера
+    // История торговли
+    pub trade_history: VecDeque<TradeHistoryEntry>,
+    pub history_scroll_offset: usize,  // Для скролла истории
+    // Открытые ордера
+    pub open_orders: Vec<OpenOrder>,
 }
 
 pub type UiState = Arc<Mutex<UiStateInner>>;
@@ -90,13 +128,59 @@ pub fn new_ui_state() -> UiState {
     Arc::new(Mutex::new(UiStateInner::default()))
 }
 
-/// Добавить лог-сообщение в буфер
-pub fn add_log(state: &UiState, msg: String) {
+/// Добавить запись в историю торговли
+pub fn add_trade_history(state: &UiState, entry: TradeHistoryEntry) {
     if let Ok(mut s) = state.lock() {
-        s.logs.push_back(msg);
-        while s.logs.len() > MAX_LOG_LINES {
-            s.logs.pop_front();
+        s.trade_history.push_front(entry); // Новые записи в начало
+        while s.trade_history.len() > MAX_HISTORY_ENTRIES {
+            s.trade_history.pop_back();
         }
+    }
+}
+
+/// Добавить открытый ордер
+pub fn add_open_order(state: &UiState, order: OpenOrder) {
+    if let Ok(mut s) = state.lock() {
+        s.open_orders.push(order);
+    }
+}
+
+/// Обновить заполнение открытого ордера
+pub fn update_open_order_filled(state: &UiState, order_id: &str, filled: f64) {
+    if let Ok(mut s) = state.lock() {
+        if let Some(order) = s.open_orders.iter_mut().find(|o| o.order_id == order_id) {
+            order.filled = filled;
+        }
+    }
+}
+
+/// Удалить открытый ордер
+pub fn remove_open_order(state: &UiState, order_id: &str) {
+    if let Ok(mut s) = state.lock() {
+        s.open_orders.retain(|o| o.order_id != order_id);
+    }
+}
+
+/// Очистить все открытые ордера (при старте нового события)
+pub fn clear_open_orders(state: &UiState) {
+    if let Ok(mut s) = state.lock() {
+        s.open_orders.clear();
+    }
+}
+
+/// Прокрутка истории вверх
+pub fn scroll_history_up(state: &UiState) {
+    if let Ok(mut s) = state.lock() {
+        if s.history_scroll_offset < s.trade_history.len().saturating_sub(1) {
+            s.history_scroll_offset += 1;
+        }
+    }
+}
+
+/// Прокрутка истории вниз
+pub fn scroll_history_down(state: &UiState) {
+    if let Ok(mut s) = state.lock() {
+        s.history_scroll_offset = s.history_scroll_offset.saturating_sub(1);
     }
 }
 
@@ -234,11 +318,12 @@ pub fn render(frame: &mut Frame, state: &UiState) {
         Constraint::Percentage(40),
     ]).areas(area);
 
-    // Левая часть: event info, portfolio, logs
-    let [event_area, portfolio_area, logs_area] = Layout::vertical([
-        Constraint::Length(8),   // Event info (увеличено для price info с заголовками)
-        Constraint::Length(9),   // Portfolio
-        Constraint::Fill(1),     // Logs
+    // Левая часть: event info, portfolio, open orders, history
+    let [event_area, portfolio_area, open_orders_area, history_area] = Layout::vertical([
+        Constraint::Length(8),    // Event info
+        Constraint::Length(9),    // Portfolio
+        Constraint::Length(8),    // Open Orders (минимум для заголовка + несколько ордеров)
+        Constraint::Fill(1),      // History
     ]).areas(left_area);
 
     render_event_info(frame, event_area, &state.event_info, state.trading_enabled, state.price_to_beat, state.current_price);
@@ -247,7 +332,8 @@ pub fn render(frame: &mut Frame, state: &UiState) {
     let up_best_bid = state.up_book.bids.first().map(|l| l.price).unwrap_or(0.0);
     let down_best_bid = state.down_book.bids.first().map(|l| l.price).unwrap_or(0.0);
     render_portfolio(frame, portfolio_area, &state.portfolio, state.trading_enabled, up_best_bid, down_best_bid);
-    render_logs(frame, logs_area, &state.logs);
+    render_open_orders(frame, open_orders_area, &state.open_orders);
+    render_history(frame, history_area, &state.trade_history, state.history_scroll_offset);
 
     // Правая часть: стаканы UP и DOWN
     let [up_book_area, down_book_area] = Layout::vertical([
@@ -578,10 +664,10 @@ fn render_order_book(frame: &mut Frame, area: Rect, title: &str, book: &SideOrde
     frame.render_widget(bid_table, bids_area);
 }
 
-/// Рендер логов
-fn render_logs(frame: &mut Frame, area: Rect, logs: &VecDeque<String>) {
+/// Рендер открытых ордеров
+fn render_open_orders(frame: &mut Frame, area: Rect, orders: &[OpenOrder]) {
     let block = Block::default()
-        .title(" Activity Log ")
+        .title(" OPEN ORDERS ")
         .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
@@ -589,41 +675,107 @@ fn render_logs(frame: &mut Frame, area: Rect, logs: &VecDeque<String>) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Берём последние логи, которые поместятся
-    let height = inner.height as usize;
-    let width = inner.width as usize;
+    let header_style = Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD);
 
-    let visible_logs: Vec<Line> = logs.iter()
-        .rev()
-        .take(height)
-        .rev()
-        .map(|s| {
-            // Обрезаем длинные строки чтобы избежать проблем с wrap
-            let truncated = if s.chars().count() > width {
-                let truncate_at = s.char_indices()
-                    .nth(width.saturating_sub(1))
-                    .map(|(idx, _)| idx)
-                    .unwrap_or(s.len());
-                format!("{}…", &s[..truncate_at])
-            } else {
-                s.clone()
-            };
+    let rows: Vec<Row> = orders.iter()
+        .map(|order| {
+            let outcome_color = if order.is_up { Color::Green } else { Color::Red };
+            let outcome_text = if order.is_up { "Up" } else { "Down" };
 
-            // Подсветка по типу сообщения
-            let style = if truncated.contains("ERROR") || truncated.contains("❌") {
-                Style::default().fg(Color::Red)
-            } else if truncated.contains("WARN") || truncated.contains("⚠️") {
-                Style::default().fg(Color::Yellow)
-            } else if truncated.contains("✅") || truncated.contains("FOUND") || truncated.contains("НАЙДЕНО") {
-                Style::default().fg(Color::Green)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            Line::styled(truncated, style)
+            Row::new(vec![
+                Cell::from("Buy").style(Style::default().fg(Color::White)),
+                Cell::from(outcome_text).style(Style::default().fg(outcome_color)),
+                Cell::from(format!("{:.0}¢", order.price * 100.0)).style(Style::default().fg(Color::White)),
+                Cell::from(format!("{:.0} / {:.0}", order.filled, order.total)).style(Style::default().fg(Color::White)),
+                Cell::from(format!("${:.2}", order.total_cost())).style(Style::default().fg(Color::White)),
+            ])
         })
         .collect();
 
-    let paragraph = Paragraph::new(visible_logs);
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(6),   // Side
+            Constraint::Length(8),   // Outcome
+            Constraint::Length(8),   // Price
+            Constraint::Length(10),  // Filled
+            Constraint::Length(8),   // Total
+        ],
+    )
+    .header(
+        Row::new(vec!["Side", "Outcome", "Price", "Filled", "Total"])
+            .style(header_style)
+    );
+    frame.render_widget(table, inner);
+}
+
+/// Форматирование времени с момента покупки
+fn format_time_ago(timestamp: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(timestamp);
+    let total_secs = duration.num_seconds().max(0);
+
+    let mins = total_secs / 60;
+    let secs = total_secs % 60;
+
+    if mins > 0 {
+        format!("{}m {:02}s", mins, secs)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
+/// Рендер истории торговли
+fn render_history(frame: &mut Frame, area: Rect, history: &VecDeque<TradeHistoryEntry>, scroll_offset: usize) {
+    let block = Block::default()
+        .title(" HISTORY ")
+        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let height = inner.height as usize;
+
+    if history.is_empty() {
+        let empty_msg = Paragraph::new("No trades yet...")
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(empty_msg, inner);
+        return;
+    }
+
+    // Применяем скролл и берем записи для отображения
+    let visible_entries: Vec<Line> = history.iter()
+        .skip(scroll_offset)
+        .take(height)
+        .enumerate()
+        .map(|(idx, entry)| {
+            let number = scroll_offset + idx + 1;
+            let outcome_color = if entry.is_up { Color::Green } else { Color::Red };
+            let outcome_text = if entry.is_up { "Up" } else { "Down" };
+            let trade_type_str = match entry.trade_type {
+                TradeType::Maker => "Maker",
+                TradeType::Taker => "Taker",
+            };
+            let time_ago = format_time_ago(entry.timestamp);
+
+            // Формат: "1. Bought 5.00 Up at 36¢($1.8)      Maker      14m 00s"
+            Line::from(vec![
+                Span::styled(format!("{:>2}. ", number), Style::default().fg(Color::White)),
+                Span::styled("Bought ", Style::default().fg(Color::White)),
+                Span::styled(format!("{:.2} ", entry.shares), Style::default().fg(outcome_color)),
+                Span::styled(format!("{} ", outcome_text), Style::default().fg(outcome_color)),
+                Span::styled("at ", Style::default().fg(Color::White)),
+                Span::styled(format!("{:.0}¢", entry.price * 100.0), Style::default().fg(Color::White)),
+                Span::styled(format!("(${:.2})", entry.cost), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("      {:<6}", trade_type_str), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("      {}", time_ago), Style::default().fg(Color::DarkGray)),
+            ])
+        })
+        .collect();
+
+    let paragraph = Paragraph::new(visible_entries);
     frame.render_widget(paragraph, inner);
 }
 
@@ -632,9 +784,11 @@ pub enum KeyAction {
     None,
     Exit,
     ToggleTrading,
+    ScrollHistoryUp,
+    ScrollHistoryDown,
 }
 
-/// Проверка нажатия клавиш: 'q' для выхода, 'r' для переключения торговли
+/// Проверка нажатия клавиш: 'q' для выхода, 'r' для переключения торговли, 'c'/'x' для скролла истории
 pub fn check_key_action() -> KeyAction {
     if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
         if let Ok(Event::Key(key)) = event::read() {
@@ -642,6 +796,8 @@ pub fn check_key_action() -> KeyAction {
                 match key.code {
                     KeyCode::Char('q') => return KeyAction::Exit,
                     KeyCode::Char('r') => return KeyAction::ToggleTrading,
+                    KeyCode::Char('c') => return KeyAction::ScrollHistoryUp,
+                    KeyCode::Char('x') => return KeyAction::ScrollHistoryDown,
                     _ => {}
                 }
             }
