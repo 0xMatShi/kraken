@@ -488,15 +488,30 @@ impl RealEngine {
     }
 
     /// Обработка taker fill в контексте стратегии
-    /// Если мы в WaitingFirstLeg и taker_order_id совпадает с first leg order_id,
+    /// Если мы в WaitingFirstLeg и taker fill совпадает с первой ногой,
     /// переходим в SearchingSecondLeg
     fn handle_taker_fill_for_strategy(&self, taker_order_id: &str, is_up: bool, price: f64, size: f64) {
         let mut state = self.trading_state.lock().unwrap();
 
         match &*state {
-            TradingState::WaitingFirstLeg { order_id: first_leg_order_id, .. } => {
-                // Сравниваем по order_id - 100% уникальный идентификатор
-                if taker_order_id == first_leg_order_id {
+            TradingState::WaitingFirstLeg { order_id: first_leg_order_id, is_up: expected_is_up, price: expected_price, size: expected_size } => {
+                // ВАЖНО: WebSocket событие может прийти раньше, чем REST API вернет order_id
+                // Если order_id ещё пуст - сравниваем по атрибутам (is_up, price, size)
+                let is_our_first_leg = if first_leg_order_id.is_empty() {
+                    // order_id ещё не получен от REST API - сравниваем по атрибутам
+                    let matches = is_up == *expected_is_up &&
+                        (price - expected_price).abs() < 0.02 &&  // Погрешность для цены
+                        (size - expected_size).abs() < 0.01;
+                    if matches {
+                        info!("🔄 TAKER FILL распознан по атрибутам (order_id ещё не получен)");
+                    }
+                    matches
+                } else {
+                    // order_id известен - точное сравнение
+                    taker_order_id == first_leg_order_id
+                };
+
+                if is_our_first_leg {
                     info!("🔄 TAKER FILL = ПЕРВАЯ НОГА! order_id={}", taker_order_id);
                     info!("   {} @ {:.2} size={:.2} → SearchingSecondLeg",
                         if is_up { "UP" } else { "DOWN" }, price, size);
