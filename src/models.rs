@@ -62,6 +62,44 @@ pub struct SubscribeMessage {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Side { Up, Down }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum Coin {
+    BTC,
+    ETH,
+    SOL,
+    XRP,
+}
+
+impl Coin {
+    pub fn slug_prefix(&self) -> &'static str {
+        match self {
+            Coin::BTC => "btc-updown-15m",
+            Coin::ETH => "eth-updown-15m",
+            Coin::SOL => "sol-updown-15m",
+            Coin::XRP => "xrp-updown-15m",
+        }
+    }
+
+    pub fn coinbase_product(&self) -> &'static str {
+        match self {
+            Coin::BTC => "BTC-USD",
+            Coin::ETH => "ETH-USD",
+            Coin::SOL => "SOL-USD",
+            Coin::XRP => "XRP-USD",
+        }
+    }
+
+    pub fn from_index(index: u8) -> Option<Self> {
+        match index {
+            1 => Some(Coin::BTC),
+            2 => Some(Coin::ETH),
+            3 => Some(Coin::SOL),
+            4 => Some(Coin::XRP),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Portfolio {
     pub up_shares: f64,

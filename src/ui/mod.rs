@@ -11,7 +11,7 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table},
     style::{Color, Modifier, Style},
     layout::{Constraint, Layout, Rect},
     Frame,
@@ -78,6 +78,8 @@ pub struct UiStateInner {
     pub logs: VecDeque<String>,
     pub is_running: bool,
     pub dry_run: bool,
+    pub price_to_beat: Option<f64>,
+    pub current_price: Option<f64>,
 }
 
 pub type UiState = Arc<Mutex<UiStateInner>>;
@@ -141,6 +143,20 @@ pub fn stop_ui(state: &UiState) {
     }
 }
 
+/// Установить price to beat
+pub fn set_price_to_beat(state: &UiState, price: Option<f64>) {
+    if let Ok(mut s) = state.lock() {
+        s.price_to_beat = price;
+    }
+}
+
+/// Установить текущую цену
+pub fn set_current_price(state: &UiState, price: f64) {
+    if let Ok(mut s) = state.lock() {
+        s.current_price = Some(price);
+    }
+}
+
 /// Терминал для TUI
 pub type Terminal = ratatui::Terminal<CrosstermBackend<Stdout>>;
 
@@ -179,12 +195,12 @@ pub fn render(frame: &mut Frame, state: &UiState) {
 
     // Левая часть: event info, portfolio, logs
     let [event_area, portfolio_area, logs_area] = Layout::vertical([
-        Constraint::Length(6),   // Event info
+        Constraint::Length(8),   // Event info (увеличено для price info с заголовками)
         Constraint::Length(9),   // Portfolio
         Constraint::Fill(1),     // Logs
     ]).areas(left_area);
 
-    render_event_info(frame, event_area, &state.event_info, state.dry_run);
+    render_event_info(frame, event_area, &state.event_info, state.dry_run, state.price_to_beat, state.current_price);
     render_portfolio(frame, portfolio_area, &state.portfolio);
     render_logs(frame, logs_area, &state.logs);
 
@@ -199,7 +215,7 @@ pub fn render(frame: &mut Frame, state: &UiState) {
 }
 
 /// Рендер информации о событии
-fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, dry_run: bool) {
+fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, dry_run: bool, price_to_beat: Option<f64>, current_price: Option<f64>) {
     // Заголовок с индикатором режима
     let title = if dry_run {
         " MARKET [DRY RUN] "
@@ -221,8 +237,10 @@ fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, dry_run: b
     let remaining = info.remaining_seconds();
     let total = info.total_seconds;
 
-    // Title и progress
-    let [title_area, time_area, progress_area] = Layout::vertical([
+    // Title, time, progress, price labels, prices
+    let [title_area, time_area, progress_area, price_labels_area, prices_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -249,6 +267,31 @@ fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, dry_run: b
         .ratio(info.progress_ratio())
         .label(format!("{:.0}%", info.progress_ratio() * 100.0));
     frame.render_widget(gauge, progress_area);
+
+    // Price labels - выровненные
+    let price_labels = Line::from(vec![
+        Span::styled(format!("{:<13}", "Price to beat"), Style::default().fg(Color::Gray)),
+        Span::raw(" | "),
+        Span::styled("Current price", Style::default().fg(Color::Cyan)),
+    ]);
+    let labels_paragraph = Paragraph::new(price_labels);
+    frame.render_widget(labels_paragraph, price_labels_area);
+
+    // Price values - выровненные
+    let price_to_beat_str = price_to_beat
+        .map(|p| format!("${:.2}", p))
+        .unwrap_or_else(|| "N/A".to_string());
+    let current_price_str = current_price
+        .map(|p| format!("${:.2}", p))
+        .unwrap_or_else(|| "N/A".to_string());
+
+    let price_values = Line::from(vec![
+        Span::styled(format!("{:<13}", price_to_beat_str), Style::default().fg(Color::Gray)),
+        Span::raw(" | "),
+        Span::styled(current_price_str, Style::default().fg(Color::Cyan)),
+    ]);
+    let values_paragraph = Paragraph::new(price_values);
+    frame.render_widget(values_paragraph, prices_area);
 }
 
 /// Рендер портфолио
@@ -408,27 +451,35 @@ fn render_logs(frame: &mut Frame, area: Rect, logs: &VecDeque<String>) {
 
     // Берём последние логи, которые поместятся
     let height = inner.height as usize;
+    let width = inner.width as usize;
+
     let visible_logs: Vec<Line> = logs.iter()
         .rev()
         .take(height)
         .rev()
         .map(|s| {
+            // Обрезаем длинные строки чтобы избежать проблем с wrap
+            let truncated = if s.len() > width {
+                format!("{}…", &s[..width.saturating_sub(1)])
+            } else {
+                s.clone()
+            };
+
             // Подсветка по типу сообщения
-            let style = if s.contains("ERROR") || s.contains("❌") {
+            let style = if truncated.contains("ERROR") || truncated.contains("❌") {
                 Style::default().fg(Color::Red)
-            } else if s.contains("WARN") || s.contains("⚠️") {
+            } else if truncated.contains("WARN") || truncated.contains("⚠️") {
                 Style::default().fg(Color::Yellow)
-            } else if s.contains("✅") || s.contains("FOUND") || s.contains("НАЙДЕНО") {
+            } else if truncated.contains("✅") || truncated.contains("FOUND") || truncated.contains("НАЙДЕНО") {
                 Style::default().fg(Color::Green)
             } else {
                 Style::default().fg(Color::Gray)
             };
-            Line::styled(s.as_str(), style)
+            Line::styled(truncated, style)
         })
         .collect();
 
-    let paragraph = Paragraph::new(visible_logs)
-        .wrap(Wrap { trim: true });
+    let paragraph = Paragraph::new(visible_logs);
     frame.render_widget(paragraph, inner);
 }
 

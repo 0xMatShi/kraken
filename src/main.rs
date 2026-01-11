@@ -1,10 +1,11 @@
-mod models; mod trading; mod websocket; mod config; pub mod ui;
+mod models; mod trading; mod websocket; mod config; pub mod ui; mod price_tracker;
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::str::FromStr as _;
 use trading::scanner::AutoScanner;
 use websocket::market::DataStream;
 use websocket::user::UserStream;
+use websocket::coinbase::CoinbaseStream;
 use trading::engine::RealEngine;
 use chrono::{DateTime, Utc};
 
@@ -110,9 +111,12 @@ async fn main() -> anyhow::Result<()> {
 
     let scanner = AutoScanner::new();
 
+    // Загружаем price tracker
+    let mut price_tracker = price_tracker::PriceTracker::load();
+
     // Главный цикл выбора
     loop {
-        // Очищаем экран и показываем меню
+        // Очищаем экран и показываем меню выбора режима
         print!("\x1B[2J\x1B[1;1H");
         println!("MMDNA-Bot");
         println!("1. Start | 2. Start(DR) | 3. Exit");
@@ -128,15 +132,46 @@ async fn main() -> anyhow::Result<()> {
             _ => continue,      // Invalid input
         };
 
+        // Меню выбора монеты
+        print!("\x1B[2J\x1B[1;1H");
+        println!("Select Coin:");
+        println!("1. BTC | 2. ETH | 3. SOL | 4. XRP");
+        print!("> "); io::stdout().flush().unwrap();
+
+        let mut coin_input = String::new();
+        io::stdin().read_line(&mut coin_input).unwrap();
+
+        let coin = match coin_input.trim().parse::<u8>() {
+            Ok(idx) => {
+                if let Some(c) = models::Coin::from_index(idx) {
+                    c
+                } else {
+                    continue; // Invalid coin index
+                }
+            }
+            Err(_) => continue,
+        };
+
         // Ищем подходящий рынок
-        if let Some(target) = scanner.find_next_target("btc-updown-15m", 0.0, 15.0).await {
+        if let Some(target) = scanner.find_next_target(coin.slug_prefix(), 0.0, 15.0).await {
             // Парсим дату окончания
             let end_date = target.end_date.parse::<DateTime<Utc>>().unwrap_or(Utc::now());
             let total_seconds = 900; // Фиксированная длительность события: 15 минут
 
+            // Извлекаем timestamp из slug события
+            let event_timestamp = price_tracker::extract_timestamp_from_slug(&target.slug);
+
+            // Получаем price to beat для этого события
+            let price_to_beat = if let Some(ts) = event_timestamp {
+                price_tracker.get_price_to_beat(coin, ts)
+            } else {
+                None
+            };
+
             // Устанавливаем информацию о событии в UI
             ui::set_event_info(&ui_state, target.title.clone(), end_date, total_seconds);
             ui::set_dry_run(&ui_state, dry_run);
+            ui::set_price_to_beat(&ui_state, price_to_beat);
 
             // Создаем реальный движок
             let engine = Arc::new(RealEngine::new(
@@ -164,6 +199,9 @@ async fn main() -> anyhow::Result<()> {
 
             let user_stream = UserStream::new(engine.clone(), ws_client.clone());
 
+            // Создаем Coinbase stream для получения текущих цен
+            let coinbase_stream = CoinbaseStream::new(coin, ui_state.clone());
+
             tracing::info!("Запуск торговой сессии...");
 
             // Инициализируем терминал для TUI
@@ -178,6 +216,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                     res = user_stream.start_stream() => {
                         if let Err(e) = res { tracing::error!("User stream died: {}", e); }
+                    }
+                    res = coinbase_stream.start_stream() => {
+                        if let Err(e) = res { tracing::error!("Coinbase stream died: {}", e); }
                     }
                 }
             };
@@ -221,6 +262,21 @@ async fn main() -> anyhow::Result<()> {
 
             // Восстанавливаем терминал
             ui::restore_terminal(&mut terminal)?;
+
+            // Сохраняем последнюю цену для следующего события
+            if let Some(ts) = event_timestamp {
+                let last_price = {
+                    let state = ui_state.lock().unwrap();
+                    state.current_price
+                };
+
+                if let Some(price) = last_price {
+                    price_tracker.set_last_price(coin, price, ts);
+                    if let Err(e) = price_tracker.save() {
+                        tracing::error!("Не удалось сохранить price tracker: {}", e);
+                    }
+                }
+            }
 
             // Сбрасываем состояние UI для следующей сессии
             {
