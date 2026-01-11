@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub struct Market {
     #[serde(rename = "clobTokenIds")]
     pub clob_token_ids: String,
+    #[serde(rename = "conditionId")]
+    pub condition_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -24,6 +26,7 @@ pub struct TargetMarket {
     pub up_token: String,
     pub down_token: String,
     pub end_date: String,
+    pub condition_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

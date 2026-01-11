@@ -1,0 +1,12 @@
+[project]
+name = "redeem"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.14"
+dependencies = [
+    "poly-eip712-structs>=0.0.1",
+    "py-builder-relayer-client>=0.0.1",
+    "py-builder-signing-sdk>=0.0.2",
+    "python-dotenv>=1.2.1",
+    "web3>=7.14.0",
+]

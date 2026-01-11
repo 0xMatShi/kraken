@@ -184,6 +184,7 @@ async fn main() -> anyhow::Result<()> {
                     api_key,
                     app_config.trading.clone(),
                     ui_state.clone(),
+                    target.condition_id.clone(),
                 ));
 
                 let market_stream = DataStream::new(

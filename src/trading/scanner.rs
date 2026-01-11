@@ -114,7 +114,7 @@ impl AutoScanner {
 
         // Пытаемся достать токены из рынков
         let markets: Vec<Market> = serde_json::from_value(event.markets).ok()?;
-        
+
         for market in markets {
             let tokens: Vec<String> = serde_json::from_str(&market.clob_token_ids).ok()?;
             if tokens.len() >= 2 {
@@ -125,6 +125,7 @@ impl AutoScanner {
                     up_token: tokens[0].clone(),
                     down_token: tokens[1].clone(),
                     end_date: event.end_date,
+                    condition_id: market.condition_id.clone(),
                 });
             }
         }

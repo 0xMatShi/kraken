@@ -1,8 +1,11 @@
 use std::sync::{Arc, Mutex};
 use std::collections::{HashSet, HashMap};
+use std::fs;
+use std::path::Path;
 use crate::models::{Portfolio, Side, MarketPrices};
 use crate::config::TradingConfig;
 use crate::ui::{self, UiState, TradeHistoryEntry, TradeType, OpenOrder};
+use serde::{Serialize, Deserialize};
 
 use polymarket_client_sdk::clob::Client;
 use polymarket_client_sdk::auth::Normal;
@@ -13,6 +16,12 @@ use alloy::signers::local::PrivateKeySigner;
 use tracing::{info, warn, error};
 use uuid::Uuid;
 use chrono::Utc;
+
+#[derive(Serialize, Deserialize)]
+struct ClaimData {
+    condition_id: String,
+    winning_outcome_index: u8,  // 0 = UP/YES, 1 = DOWN/NO
+}
 
 
 pub struct RealEngine {
@@ -33,6 +42,8 @@ pub struct RealEngine {
     maker_placement_count: Mutex<u32>,              // Счетчик размещений с текущими ценами
     // UI state для отображения портфолио и контроля режима торговли
     ui_state: UiState,
+    // Condition ID для клейма наград
+    condition_id: Option<String>,
 }
 
 impl RealEngine {
@@ -44,6 +55,7 @@ impl RealEngine {
         our_api_key: Uuid,
         config: TradingConfig,
         ui_state: UiState,
+        condition_id: Option<String>,
     ) -> Self {
         Self {
             portfolio: Mutex::new(Portfolio::default()),
@@ -61,6 +73,7 @@ impl RealEngine {
             last_maker_prices: Mutex::new(None),
             maker_placement_count: Mutex::new(0),
             ui_state,
+            condition_id,
         }
     }
 
@@ -619,5 +632,38 @@ impl RealEngine {
         info!("PnL: ${:.2}", pnl);
         info!("Maker Trades: {}", port.maker_trades);
         info!("Taker Trades: {}", port.taker_trades);
+
+        // Сохраняем данные для клейма наград
+        if let Some(ref cond_id) = self.condition_id {
+            let winning_outcome_index = if winner == Side::Up { 0 } else { 1 };
+            let claim_data = ClaimData {
+                condition_id: cond_id.clone(),
+                winning_outcome_index,
+            };
+
+            // Создаем директорию src/redeem если её нет
+            let redeem_dir = Path::new("src/redeem");
+            if let Err(e) = fs::create_dir_all(redeem_dir) {
+                error!("❌ Ошибка создания директории src/redeem: {}", e);
+                return;
+            }
+
+            // Сохраняем в claim.json
+            let claim_path = redeem_dir.join("claim.json");
+            match serde_json::to_string_pretty(&claim_data) {
+                Ok(json_str) => {
+                    if let Err(e) = fs::write(&claim_path, json_str) {
+                        error!("❌ Ошибка записи claim.json: {}", e);
+                    } else {
+                        info!("💾 Данные для клейма сохранены в {:?}", claim_path);
+                        info!("   Condition ID: {}", cond_id);
+                        info!("   Winning Outcome: {} ({})", winning_outcome_index, if winning_outcome_index == 0 { "UP/YES" } else { "DOWN/NO" });
+                    }
+                },
+                Err(e) => error!("❌ Ошибка сериализации claim data: {}", e),
+            }
+        } else {
+            warn!("⚠️ Condition ID не найден, пропускаем сохранение claim.json");
+        }
     }
 }
