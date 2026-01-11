@@ -254,7 +254,7 @@ fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, dry_run: b
 /// Рендер портфолио
 fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio) {
     let block = Block::default()
-        .title(" POSITION ")
+        .title(" PORTFOLIO ")
         .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
