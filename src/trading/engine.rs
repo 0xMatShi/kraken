@@ -462,6 +462,53 @@ impl RealEngine {
 
         // Обновляем UI
         self.update_ui_portfolio();
+
+        // === ЛОГИКА СОСТОЯНИЯ СТРАТЕГИИ ДЛЯ TAKER FILLS ===
+        // Если лимитка пересекла спред и исполнилась как тейкер,
+        // мы должны распознать это как часть стратегии
+        if is_buy {
+            self.handle_taker_fill_for_strategy(is_up, price, size);
+        }
+    }
+
+    /// Обработка taker fill в контексте стратегии
+    /// Если мы в WaitingFirstLeg и taker fill соответствует первой ноге,
+    /// переходим в SearchingSecondLeg
+    fn handle_taker_fill_for_strategy(&self, is_up: bool, price: f64, size: f64) {
+        let mut state = self.trading_state.lock().unwrap();
+
+        match &*state {
+            TradingState::WaitingFirstLeg { is_up: expected_is_up, price: expected_price, size: expected_size, .. } => {
+                // Проверяем, что taker fill соответствует нашей первой ноге
+                // (та же сторона, близкая цена и размер)
+                if *expected_is_up == is_up
+                    && (price - *expected_price).abs() < 0.03  // Цена может немного отличаться
+                    && (size - *expected_size).abs() < 0.1    // Размер должен примерно совпадать
+                {
+                    info!("🔄 TAKER FILL = ПЕРВАЯ НОГА! {} @ {:.2} size={:.2}",
+                        if is_up { "UP" } else { "DOWN" }, price, size);
+                    info!("   Переходим в SearchingSecondLeg");
+
+                    let first_leg_price = price;
+                    let first_leg_is_up = is_up;
+                    let first_leg_size = size;
+
+                    *state = TradingState::SearchingSecondLeg {
+                        first_leg_price,
+                        first_leg_is_up,
+                        first_leg_size,
+                        second_leg_order_id: None,
+                    };
+                    drop(state);
+
+                    // Размещаем вторую ногу
+                    self.place_second_leg(first_leg_price, first_leg_is_up, first_leg_size);
+                }
+            }
+            _ => {
+                // В других состояниях taker fill не влияет на стратегию
+            }
+        }
     }
 
     // Обработка событий ордеров (MAKER orders - limit orders)
