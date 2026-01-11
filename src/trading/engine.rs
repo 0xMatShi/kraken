@@ -300,7 +300,7 @@ impl RealEngine {
                 .price(price_dec)
                 .size(size_dec)
                 .side(PolySide::Buy)
-                .order_type(OrderType::FOK) // Fill or Kill для taker
+                .order_type(OrderType::GTC) // Fill or Kill для taker
                 .build().await.unwrap();
 
             let signed = client.sign(&signer, order).await.unwrap();
