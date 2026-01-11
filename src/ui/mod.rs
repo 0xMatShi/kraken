@@ -321,7 +321,7 @@ pub fn render(frame: &mut Frame, state: &UiState) {
 
     // Левая часть: event info, portfolio, open orders, history
     let [event_area, portfolio_area, open_orders_area, history_area] = Layout::vertical([
-        Constraint::Length(8),    // Event info
+        Constraint::Length(8),    // Event info (включая URL)
         Constraint::Length(9),    // Portfolio
         Constraint::Length(14),   // Open Orders (увеличено для отображения большего числа ордеров)
         Constraint::Fill(1),      // History
@@ -369,8 +369,9 @@ fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, trading_en
     let remaining = info.remaining_seconds();
     let total = info.total_seconds;
 
-    // Title, time, progress, price labels, prices
-    let [title_area, time_area, progress_area, price_labels_area, prices_area] = Layout::vertical([
+    // Title, URL, time, progress, price labels, prices
+    let [title_area, url_area, time_area, progress_area, price_labels_area, prices_area] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -382,6 +383,14 @@ fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, trading_en
     let event_title = Paragraph::new(info.title.as_str())
         .style(Style::default().fg(Color::White));
     frame.render_widget(event_title, title_area);
+
+    // URL (Termius сделает его кликабельным)
+    if !info.slug.is_empty() {
+        let url = format!("https://polymarket.com/event/{}", info.slug);
+        let url_paragraph = Paragraph::new(url)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(url_paragraph, url_area);
+    }
 
     // Время в формате MM:SS
     let remaining_mins = remaining / 60;
@@ -787,10 +796,9 @@ pub enum KeyAction {
     ToggleTrading,
     ScrollHistoryUp,
     ScrollHistoryDown,
-    OpenLink,
 }
 
-/// Проверка нажатия клавиш: 'q' для выхода, 'r' для переключения торговли, 'c'/'x' для скролла истории, 'l' для открытия ссылки
+/// Проверка нажатия клавиш: 'q' для выхода, 'r' для переключения торговли, 'c'/'x' для скролла истории
 pub fn check_key_action() -> KeyAction {
     if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
         if let Ok(Event::Key(key)) = event::read() {
@@ -800,21 +808,10 @@ pub fn check_key_action() -> KeyAction {
                     KeyCode::Char('r') => return KeyAction::ToggleTrading,
                     KeyCode::Char('c') => return KeyAction::ScrollHistoryUp,
                     KeyCode::Char('x') => return KeyAction::ScrollHistoryDown,
-                    KeyCode::Char('l') => return KeyAction::OpenLink,
                     _ => {}
                 }
             }
         }
     }
     KeyAction::None
-}
-
-/// Открыть ссылку на событие в браузере
-pub fn open_event_link(state: &UiState) {
-    if let Ok(s) = state.lock() {
-        if !s.event_info.slug.is_empty() {
-            let url = format!("https://polymarket.com/event/{}", s.event_info.slug);
-            let _ = open::that(&url);
-        }
-    }
 }

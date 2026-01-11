@@ -253,9 +253,6 @@ async fn main() -> anyhow::Result<()> {
                             ui::KeyAction::ScrollHistoryDown => {
                                 ui::scroll_history_down(&ui_state_clone);
                             }
-                            ui::KeyAction::OpenLink => {
-                                ui::open_event_link(&ui_state_clone);
-                            }
                             ui::KeyAction::None => {}
                         }
 
