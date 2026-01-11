@@ -460,8 +460,17 @@ impl RealEngine {
                     let mut orders_info = self.active_orders_info.lock().unwrap();
 
                     if let Some((order_price, is_up, original_size, accumulated_filled)) = orders_info.get_mut(&order_id) {
-                        // Добавляем текущее исполнение к накопленному
+                        // ЗАЩИТА ОТ ПЕРЕУЧЕТА: вычисляем реальную дельту для портфолио
+                        let previous_filled = *accumulated_filled;
                         *accumulated_filled += size;
+
+                        // Если accumulated превышает original_size, засчитываем только до лимита
+                        let size_for_portfolio = if *accumulated_filled > *original_size {
+                            // Переполнение - берем только оставшееся до original_size
+                            (*original_size - previous_filled).max(0.0)
+                        } else {
+                            size
+                        };
 
                         info!("📊 MAKER PARTIAL FILL: {} {} @ {:.3} | Filled: {:.2}/{:.2}",
                             side_str, token_str, price, *accumulated_filled, *original_size);
@@ -482,41 +491,44 @@ impl RealEngine {
                         } else {
                             drop(orders_info); // Освобождаем мьютекс если ордер еще не полностью исполнен
                         }
+
+                        // Обновляем портфолио только если есть что добавить
+                        if size_for_portfolio > 0.0 {
+                            let mut port = self.portfolio.lock().unwrap();
+                            port.maker_trades += 1;
+
+                            let is_buy = matches!(side, PolySide::Buy);
+
+                            if asset_id == &*self.up_token {
+                                if is_buy {
+                                    port.up_shares += size_for_portfolio;
+                                    port.up_spent += price * size_for_portfolio;
+                                } else {
+                                    port.up_shares -= size_for_portfolio;
+                                    port.up_spent -= price * size_for_portfolio;
+                                }
+                            } else if asset_id == &*self.down_token {
+                                if is_buy {
+                                    port.down_shares += size_for_portfolio;
+                                    port.down_spent += price * size_for_portfolio;
+                                } else {
+                                    port.down_shares -= size_for_portfolio;
+                                    port.down_spent -= price * size_for_portfolio;
+                                }
+                            }
+
+                            info!("✅ MAKER FILLED: {} {} @ {:.3} | Size: {:.2} | Cost: ${:.2}",
+                                side_str, token_str, price, size_for_portfolio, price * size_for_portfolio);
+                            info!("💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
+                                port.up_shares, port.down_shares, port.up_shares - port.down_shares);
+
+                            drop(port);
+                            // Обновляем UI
+                            self.update_ui_portfolio();
+                        }
                     } else {
                         drop(orders_info); // Освобождаем мьютекс если ордер не найден
                     }
-
-                    let mut port = self.portfolio.lock().unwrap();
-                    port.maker_trades += 1;
-
-                    let is_buy = matches!(side, PolySide::Buy);
-
-                    if asset_id == &*self.up_token {
-                        if is_buy {
-                            port.up_shares += size;
-                            port.up_spent += price * size;
-                        } else {
-                            port.up_shares -= size;
-                            port.up_spent -= price * size;
-                        }
-                    } else if asset_id == &*self.down_token {
-                        if is_buy {
-                            port.down_shares += size;
-                            port.down_spent += price * size;
-                        } else {
-                            port.down_shares -= size;
-                            port.down_spent -= price * size;
-                        }
-                    }
-
-                    info!("✅ MAKER FILLED: {} {} @ {:.3} | Size: {:.2} | Cost: ${:.2}",
-                        side_str, token_str, price, size, price * size);
-                    info!("💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
-                        port.up_shares, port.down_shares, port.up_shares - port.down_shares);
-
-                    drop(port);
-                    // Обновляем UI
-                    self.update_ui_portfolio();
                 }
             }
             Some("CANCELLATION") => {
