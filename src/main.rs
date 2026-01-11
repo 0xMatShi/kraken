@@ -114,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
     loop {
         // Очищаем экран и показываем меню
         print!("\x1B[2J\x1B[1;1H");
-        println!("\nMMDNA-Bot");
+        println!("MMDNA-Bot");
         println!("1. Start | 2. Start(DR) | 3. Exit");
         print!("> "); io::stdout().flush().unwrap();
 
