@@ -77,7 +77,7 @@ pub struct UiStateInner {
     pub down_book: SideOrderBook,
     pub logs: VecDeque<String>,
     pub is_running: bool,
-    pub dry_run: bool,
+    pub trading_enabled: bool,  // false = dryrun, true = real trading
     pub price_to_beat: Option<f64>,
     pub current_price: Option<f64>,
 }
@@ -106,10 +106,17 @@ pub fn set_event_info(state: &UiState, title: String, end_date: DateTime<Utc>, t
     }
 }
 
-/// Установить режим dry run
-pub fn set_dry_run(state: &UiState, dry_run: bool) {
+/// Установить режим торговли (вызывается при инициализации)
+pub fn set_trading_enabled(state: &UiState, enabled: bool) {
     if let Ok(mut s) = state.lock() {
-        s.dry_run = dry_run;
+        s.trading_enabled = enabled;
+    }
+}
+
+/// Переключить режим торговли (вызывается при нажатии 'r')
+pub fn toggle_trading(state: &UiState) {
+    if let Ok(mut s) = state.lock() {
+        s.trading_enabled = !s.trading_enabled;
     }
 }
 
@@ -200,8 +207,8 @@ pub fn render(frame: &mut Frame, state: &UiState) {
         Constraint::Fill(1),     // Logs
     ]).areas(left_area);
 
-    render_event_info(frame, event_area, &state.event_info, state.dry_run, state.price_to_beat, state.current_price);
-    render_portfolio(frame, portfolio_area, &state.portfolio);
+    render_event_info(frame, event_area, &state.event_info, state.trading_enabled, state.price_to_beat, state.current_price);
+    render_portfolio(frame, portfolio_area, &state.portfolio, state.trading_enabled);
     render_logs(frame, logs_area, &state.logs);
 
     // Правая часть: стаканы UP и DOWN
@@ -215,15 +222,15 @@ pub fn render(frame: &mut Frame, state: &UiState) {
 }
 
 /// Рендер информации о событии
-fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, dry_run: bool, price_to_beat: Option<f64>, current_price: Option<f64>) {
+fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, trading_enabled: bool, price_to_beat: Option<f64>, current_price: Option<f64>) {
     // Заголовок с индикатором режима
-    let title = if dry_run {
+    let title = if !trading_enabled {
         " MARKET [DRY RUN] "
     } else {
         " MARKET "
     };
 
-    let title_color = if dry_run { Color::Yellow } else { Color::Cyan };
+    let title_color = if !trading_enabled { Color::Yellow } else { Color::Cyan };
 
     let block = Block::default()
         .title(title)
@@ -319,7 +326,7 @@ fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, dry_run: b
 }
 
 /// Рендер портфолио
-fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio) {
+fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio, trading_enabled: bool) {
     let block = Block::default()
         .title(" PORTFOLIO ")
         .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
@@ -363,6 +370,17 @@ fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio) {
             Span::raw("  |  "),
             Span::styled("Taker: ", Style::default().fg(Color::Gray)),
             Span::raw(format!("{}", portfolio.taker_trades)),
+        ]),
+        Line::from(""),
+        // Добавляем строку с индикатором Trading: ON/OFF
+        Line::from(vec![
+            Span::styled("Trading: ", Style::default().fg(Color::White)),
+            Span::styled(
+                if trading_enabled { "ON" } else { "OFF" },
+                Style::default()
+                    .fg(if trading_enabled { Color::Green } else { Color::Red })
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]),
     ];
 
@@ -511,14 +529,25 @@ fn render_logs(frame: &mut Frame, area: Rect, logs: &VecDeque<String>) {
     frame.render_widget(paragraph, inner);
 }
 
-/// Проверка нажатия 'q' для выхода
-pub fn check_exit_key() -> bool {
+/// Результат проверки нажатых клавиш
+pub enum KeyAction {
+    None,
+    Exit,
+    ToggleTrading,
+}
+
+/// Проверка нажатия клавиш: 'q' для выхода, 'r' для переключения торговли
+pub fn check_key_action() -> KeyAction {
     if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
         if let Ok(Event::Key(key)) = event::read() {
-            if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') {
-                return true;
+            if key.kind == KeyEventKind::Press {
+                match key.code {
+                    KeyCode::Char('q') => return KeyAction::Exit,
+                    KeyCode::Char('r') => return KeyAction::ToggleTrading,
+                    _ => {}
+                }
             }
         }
     }
-    false
+    KeyAction::None
 }

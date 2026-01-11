@@ -116,21 +116,20 @@ async fn main() -> anyhow::Result<()> {
 
     // Главный цикл выбора
     loop {
-        // Очищаем экран и показываем меню выбора режима
+        // Очищаем экран и показываем меню
         print!("\x1B[2J\x1B[1;1H");
         println!("MMDNA-Bot");
-        println!("1. Start | 2. Start(DR) | 3. Exit");
+        println!("1. Start | 2. Exit");
         print!("> "); io::stdout().flush().unwrap();
 
         let mut input = String::new();
         io::stdin().read_line(&mut input).unwrap();
 
-        let dry_run = match input.trim() {
-            "1" => false,       // Normal trading
-            "2" => true,        // Dry run mode
-            "3" => break,       // Exit
+        match input.trim() {
+            "1" => {},          // Start
+            "2" => break,       // Exit
             _ => continue,      // Invalid input
-        };
+        }
 
         // Меню выбора монеты
         print!("\x1B[2J\x1B[1;1H");
@@ -172,7 +171,6 @@ async fn main() -> anyhow::Result<()> {
 
                 // Устанавливаем информацию о событии в UI
                 ui::set_event_info(&ui_state, target.title.clone(), end_date, total_seconds);
-                ui::set_dry_run(&ui_state, dry_run);
                 ui::set_price_to_beat(&ui_state, price_to_beat);
 
                 // Создаем реальный движок
@@ -184,12 +182,7 @@ async fn main() -> anyhow::Result<()> {
                     api_key,
                     app_config.trading.clone(),
                     ui_state.clone(),
-                    dry_run,
                 ));
-
-                if dry_run {
-                    tracing::info!("DRY RUN MODE - только наблюдение");
-                }
 
                 let market_stream = DataStream::new(
                     target.up_token.clone(),
@@ -232,11 +225,27 @@ async fn main() -> anyhow::Result<()> {
                 // UI loop
                 let ui_task = async {
                     loop {
-                        // Проверка выхода
-                        if ui::check_exit_key() {
-                            user_exit_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                            ui::stop_ui(&ui_state_clone);
-                            break;
+                        // Проверка нажатых клавиш
+                        match ui::check_key_action() {
+                            ui::KeyAction::Exit => {
+                                user_exit_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                                ui::stop_ui(&ui_state_clone);
+                                break;
+                            }
+                            ui::KeyAction::ToggleTrading => {
+                                ui::toggle_trading(&ui_state_clone);
+                                // Логируем изменение состояния
+                                let trading_enabled = {
+                                    let state = ui_state_clone.lock().unwrap();
+                                    state.trading_enabled
+                                };
+                                if trading_enabled {
+                                    tracing::info!("🟢 ТОРГОВЛЯ ВКЛЮЧЕНА - режим реальной торговли");
+                                } else {
+                                    tracing::info!("🔴 ТОРГОВЛЯ ВЫКЛЮЧЕНА - режим наблюдения (DRY RUN)");
+                                }
+                            }
+                            ui::KeyAction::None => {}
                         }
 
                         // Проверяем, закончилась ли сессия
@@ -288,18 +297,22 @@ async fn main() -> anyhow::Result<()> {
                 // Проверяем, запросил ли пользователь выход
                 if user_exit_requested.load(std::sync::atomic::Ordering::SeqCst) {
                     tracing::info!("Пользователь запросил выход в меню");
-                    // Сбрасываем состояние UI
+                    // Сбрасываем состояние UI, но сохраняем trading_enabled
                     {
                         let mut state = ui_state.lock().unwrap();
+                        let trading_enabled = state.trading_enabled;
                         *state = ui::UiStateInner::default();
+                        state.trading_enabled = trading_enabled;
                     }
                     break; // Выход в главное меню
                 }
 
-                // Сбрасываем состояние UI для следующей сессии
+                // Сбрасываем состояние UI для следующей сессии, но сохраняем trading_enabled
                 {
                     let mut state = ui_state.lock().unwrap();
+                    let trading_enabled = state.trading_enabled;
                     *state = ui::UiStateInner::default();
+                    state.trading_enabled = trading_enabled;
                 }
 
                 tracing::info!("Событие завершено, ищем следующее...");

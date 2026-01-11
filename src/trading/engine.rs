@@ -30,10 +30,8 @@ pub struct RealEngine {
     // Защита от чрезмерного размещения лимиток
     last_maker_prices: Mutex<Option<(f64, f64)>>,  // (up_price, down_price)
     maker_placement_count: Mutex<u32>,              // Счетчик размещений с текущими ценами
-    // UI state для отображения портфолио
+    // UI state для отображения портфолио и контроля режима торговли
     ui_state: UiState,
-    // Dry run режим - только наблюдение без торговли
-    dry_run: bool,
 }
 
 impl RealEngine {
@@ -45,7 +43,6 @@ impl RealEngine {
         our_api_key: Uuid,
         config: TradingConfig,
         ui_state: UiState,
-        dry_run: bool,
     ) -> Self {
         Self {
             portfolio: Mutex::new(Portfolio::default()),
@@ -62,7 +59,6 @@ impl RealEngine {
             last_maker_prices: Mutex::new(None),
             maker_placement_count: Mutex::new(0),
             ui_state,
-            dry_run,
         }
     }
 
@@ -108,10 +104,16 @@ impl RealEngine {
     }
 
     pub fn process_tick(&self, prices: MarketPrices) {
-        // В режиме dry run не размещаем ордера
-        if self.dry_run {
+        // Проверяем режим торговли - если торговля выключена, не размещаем ордера
+        let trading_enabled = {
+            let state = self.ui_state.lock().unwrap();
+            state.trading_enabled
+        };
+
+        if !trading_enabled {
             return;
         }
+
         // ВРЕМЕННО ОТКЛЮЧЕНО: Проверка флага хеджирования
         // if self.is_hedging() {
         //     return;
