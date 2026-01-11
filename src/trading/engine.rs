@@ -648,16 +648,38 @@ impl RealEngine {
                 return;
             }
 
-            // Сохраняем в claim.json
+            // Читаем существующий claim.json или создаем новый массив
             let claim_path = redeem_dir.join("claim.json");
-            match serde_json::to_string_pretty(&claim_data) {
+            let mut claim_events: Vec<ClaimData> = if claim_path.exists() {
+                match fs::read_to_string(&claim_path) {
+                    Ok(content) => {
+                        serde_json::from_str(&content).unwrap_or_else(|e| {
+                            warn!("⚠️ Ошибка парсинга claim.json: {}. Создаем новый массив", e);
+                            Vec::new()
+                        })
+                    },
+                    Err(e) => {
+                        warn!("⚠️ Ошибка чтения claim.json: {}. Создаем новый массив", e);
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+
+            // Добавляем новое событие в массив
+            claim_events.push(claim_data);
+
+            // Сохраняем обновленный массив в claim.json
+            match serde_json::to_string_pretty(&claim_events) {
                 Ok(json_str) => {
                     if let Err(e) = fs::write(&claim_path, json_str) {
                         error!("❌ Ошибка записи claim.json: {}", e);
                     } else {
-                        info!("💾 Данные для клейма сохранены в {:?}", claim_path);
+                        info!("💾 Событие добавлено в claim.json ({:?})", claim_path);
                         info!("   Condition ID: {}", cond_id);
                         info!("   Winning Outcome: {} ({})", winning_outcome_index, if winning_outcome_index == 0 { "UP/YES" } else { "DOWN/NO" });
+                        info!("   Всего событий в очереди: {}", claim_events.len());
                     }
                 },
                 Err(e) => error!("❌ Ошибка сериализации claim data: {}", e),
