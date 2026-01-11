@@ -88,7 +88,11 @@ impl UserStream {
                     let size_matched: Option<f64> = order.size_matched
                         .and_then(|d| d.to_f64());
 
-                    self.engine.handle_ws_order(order_id, msg_type, price, order.side, &asset_id, size_matched);
+                    // original_size показывает оригинальный размер ордера (для PLACEMENT событий)
+                    let original_size: Option<f64> = order.original_size
+                        .and_then(|d| d.to_f64());
+
+                    self.engine.handle_ws_order(order_id, msg_type, price, order.side, &asset_id, size_matched, original_size);
                 }
                 Ok(_) => {}
                 Err(e) => {

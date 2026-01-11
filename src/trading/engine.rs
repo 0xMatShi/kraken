@@ -404,7 +404,7 @@ impl RealEngine {
     // PLACEMENT - ордер размещён
     // UPDATE - ордер частично/полностью исполнен (some of it is matched)
     // CANCELLATION - ордер отменён
-    pub fn handle_ws_order(&self, order_id: String, msg_type: Option<String>, price: f64, side: PolySide, asset_id: &str, size_matched: Option<f64>) {
+    pub fn handle_ws_order(&self, order_id: String, msg_type: Option<String>, price: f64, side: PolySide, asset_id: &str, size_matched: Option<f64>, original_size: Option<f64>) {
         // Создаем уникальный ключ: order_id + status
         let order_key = format!("{}:{:?}", order_id, msg_type);
 
@@ -429,6 +429,18 @@ impl RealEngine {
             Some("PLACEMENT") => {
                 // Сохраняем ID нашего ордера
                 self.add_order_id(order_id.clone());
+
+                // Отслеживаем выставленные shares
+                if let Some(size) = original_size {
+                    let mut port = self.portfolio.lock().unwrap();
+                    if asset_id == &*self.up_token {
+                        port.up_total_placed += size;
+                    } else if asset_id == &*self.down_token {
+                        port.down_total_placed += size;
+                    }
+                    drop(port);
+                    self.update_ui_portfolio();
+                }
 
                 info!("📝 MAKER PLACED: {} {} @ {:.3}",
                     side_str, token_str, price);

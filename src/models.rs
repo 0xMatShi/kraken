@@ -108,6 +108,9 @@ pub struct Portfolio {
     pub down_spent: f64,
     pub maker_trades: u32,
     pub taker_trades: u32,
+    // Отслеживание выставленных лимиток
+    pub up_total_placed: f64,    // Всего shares выставлено в UP лимитках
+    pub down_total_placed: f64,  // Всего shares выставлено в DOWN лимитках
 }
 
 #[allow(dead_code)]

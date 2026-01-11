@@ -342,15 +342,16 @@ fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio, tradin
     let total_spent = portfolio.up_spent + portfolio.down_spent;
 
     // Создаем текст с информацией о позициях
+    // Формат: filled/placed shares @ avg
     let text = vec![
         Line::from(vec![
             Span::styled("  UP: ", Style::default().fg(Color::Green)),
-            Span::raw(format!("{:.1} shares @ avg {:.3}", portfolio.up_shares, up_avg)),
+            Span::raw(format!("{:.1}/{:.1} shares @ avg {:.3}", portfolio.up_shares, portfolio.up_total_placed, up_avg)),
             Span::styled(format!("  ${:.2}", portfolio.up_spent), Style::default().fg(Color::Gray)),
         ]),
         Line::from(vec![
             Span::styled("DOWN: ", Style::default().fg(Color::Red)),
-            Span::raw(format!("{:.1} shares @ avg {:.3}", portfolio.down_shares, down_avg)),
+            Span::raw(format!("{:.1}/{:.1} shares @ avg {:.3}", portfolio.down_shares, portfolio.down_total_placed, down_avg)),
             Span::styled(format!("  ${:.2}", portfolio.down_spent), Style::default().fg(Color::Gray)),
         ]),
         Line::from(""),
