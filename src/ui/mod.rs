@@ -277,19 +277,43 @@ fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, dry_run: b
     let labels_paragraph = Paragraph::new(price_labels);
     frame.render_widget(labels_paragraph, price_labels_area);
 
-    // Price values - выровненные
+    // Price values - выровненные с индикаторами изменения
     let price_to_beat_str = price_to_beat
         .map(|p| format!("${:.2}", p))
         .unwrap_or_else(|| "N/A".to_string());
-    let current_price_str = current_price
-        .map(|p| format!("${:.2}", p))
-        .unwrap_or_else(|| "N/A".to_string());
 
-    let price_values = Line::from(vec![
+    // Формируем строку current price с индикатором
+    let mut price_spans = vec![
         Span::styled(format!("{:<13}", price_to_beat_str), Style::default().fg(Color::Gray)),
         Span::raw(" | "),
-        Span::styled(current_price_str, Style::default().fg(Color::Cyan)),
-    ]);
+    ];
+
+    if let Some(curr) = current_price {
+        let current_price_str = format!("${:.2}", curr);
+        price_spans.push(Span::styled(current_price_str, Style::default().fg(Color::Cyan)));
+
+        // Добавляем треугольник и разницу, если есть price_to_beat
+        if let Some(ptb) = price_to_beat {
+            let diff = curr - ptb;
+            if diff > 0.0 {
+                // Цена выше - зеленый треугольник вверх
+                price_spans.push(Span::raw(" "));
+                price_spans.push(Span::styled("▲", Style::default().fg(Color::Green)));
+                price_spans.push(Span::raw(" "));
+                price_spans.push(Span::styled(format!("+${:.2}", diff), Style::default().fg(Color::Green)));
+            } else if diff < 0.0 {
+                // Цена ниже - красный треугольник вниз
+                price_spans.push(Span::raw(" "));
+                price_spans.push(Span::styled("▼", Style::default().fg(Color::Red)));
+                price_spans.push(Span::raw(" "));
+                price_spans.push(Span::styled(format!("-${:.2}", diff.abs()), Style::default().fg(Color::Red)));
+            }
+        }
+    } else {
+        price_spans.push(Span::styled("N/A", Style::default().fg(Color::Cyan)));
+    }
+
+    let price_values = Line::from(price_spans);
     let values_paragraph = Paragraph::new(price_values);
     frame.render_widget(values_paragraph, prices_area);
 }
