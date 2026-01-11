@@ -362,6 +362,7 @@ impl RealEngine {
             if is_buy {
                 port.up_shares += size;
                 port.up_spent += price * size;
+                port.up_total_placed += size;  // Тейкер тоже считается как "выставленный"
             } else {
                 port.up_shares -= size;
                 port.up_spent -= price * size;
@@ -370,6 +371,7 @@ impl RealEngine {
             if is_buy {
                 port.down_shares += size;
                 port.down_spent += price * size;
+                port.down_total_placed += size;  // Тейкер тоже считается как "выставленный"
             } else {
                 port.down_shares -= size;
                 port.down_spent -= price * size;
