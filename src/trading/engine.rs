@@ -211,20 +211,13 @@ impl RealEngine {
         //     (Self::round_price(prices.up_bid + 0.01), Self::round_price(prices.down_bid + 0.01))
         // };
 
-        // СТРАТЕГИЯ 2
+        // СТРАТЕГИЯ 2: Упрощенная - всегда новый best_bid если есть спред
         let potential_pair_cost = (prices.up_bid + 0.01) + (prices.down_bid + 0.01);
         if potential_pair_cost >= 1.00 { return; }
 
-        let up_price = if prices.up_bid_size > 100.0 {
-            Self::round_price(prices.up_bid + 0.01)
-        } else {
-            Self::round_price(prices.up_bid)
-        };
-        let down_price = if prices.down_bid_size > 100.0 {
-            Self::round_price(prices.down_bid + 0.01)
-        } else {
-            Self::round_price(prices.down_bid)
-        };
+        // Всегда размещаем новым best_bid, не смотрим на размер очереди
+        let up_price = Self::round_price(prices.up_bid + 0.01);
+        let down_price = Self::round_price(prices.down_bid + 0.01);
 
         // Дополнительная проверка после округления
         if up_price < 0.01 || down_price < 0.01 { return; }
