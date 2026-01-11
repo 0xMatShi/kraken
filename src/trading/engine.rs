@@ -10,7 +10,6 @@ use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::clob::types::{OrderType, Side as PolySide};
 use polymarket_client_sdk::types::Decimal;
 use alloy::signers::local::PrivateKeySigner;
-use alloy::primitives::U256;
 use tracing::{info, warn, error};
 use uuid::Uuid;
 use chrono::Utc;
@@ -260,14 +259,10 @@ impl RealEngine {
             let down_price_dec: Decimal = format!("{:.2}", down_price).parse().unwrap();
             let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
-            // Конвертируем строковые токены в U256
-            let up_token_u256: U256 = up_token.parse().expect("Invalid up token ID");
-            let down_token_u256: U256 = down_token.parse().expect("Invalid down token ID");
-
             // let expiration = Utc::now() + TimeDelta::seconds(65);
 
             let order_up = client.limit_order()
-                .token_id(up_token_u256)
+                .token_id(up_token.as_ref())
                 .price(up_price_dec)
                 .size(size_dec)
                 .side(PolySide::Buy)
@@ -276,7 +271,7 @@ impl RealEngine {
                 .build().await.unwrap();
 
             let order_down = client.limit_order()
-                .token_id(down_token_u256)
+                .token_id(down_token.as_ref())
                 .price(down_price_dec)
                 .size(size_dec)
                 .side(PolySide::Buy)

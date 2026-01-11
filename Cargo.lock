@@ -2975,7 +2975,8 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 [[package]]
 name = "polymarket-client-sdk"
 version = "0.3.3"
-source = "git+https://github.com/Polymarket/rs-clob-client#142e22ce84ac256883ae9a227edbe031a5a3cdca"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb87b5a645248751d1f2f1b2155fb5735b872e76ec065bf49087f10665cd0d93"
 dependencies = [
  "alloy",
  "async-stream",
@@ -2996,9 +2997,9 @@ dependencies = [
  "rust_decimal_macros",
  "secrecy",
  "serde",
- "serde_html_form",
  "serde_json",
  "serde_repr",
+ "serde_urlencoded",
  "serde_with",
  "sha2",
  "strum_macros 0.27.2",
@@ -3923,19 +3924,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.111",
-]
-
-[[package]]
-name = "serde_html_form"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0946d52b4b7e28823148aebbeceb901012c595ad737920d504fa8634bb099e6f"
-dependencies = [
- "form_urlencoded",
- "indexmap 2.12.1",
- "itoa",
- "ryu",
- "serde_core",
 ]
 
 [[package]]
