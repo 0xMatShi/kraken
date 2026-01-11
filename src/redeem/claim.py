@@ -200,12 +200,6 @@ async def main():
                     print(f"   ⚠️ Не удалось получить данные маркета. Пропускаем.")
                     continue
 
-                # Проверяем, что событие действительно закончено
-                is_closed = market_data.get("closed", False)
-                if not is_closed:
-                    print(f"   ⏳ Событие еще не завершено (closed: false). Ждем...")
-                    continue
-
                 # Проверяем победителя по outcomePrices
                 raw_prices = market_data.get("outcomePrices", "[]")
                 try:
