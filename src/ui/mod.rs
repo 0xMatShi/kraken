@@ -1,6 +1,6 @@
 pub mod log_capture;
 
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashSet};
 use std::io::{self, Stdout};
 use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
@@ -80,6 +80,8 @@ pub struct UiStateInner {
     pub trading_enabled: bool,  // false = dryrun, true = real trading
     pub price_to_beat: Option<f64>,
     pub current_price: Option<f64>,
+    pub our_up_bid_prices: HashSet<u32>,   // Цены в центах, где размещены наши UP ордера
+    pub our_down_bid_prices: HashSet<u32>, // Цены в центах, где размещены наши DOWN ордера
 }
 
 pub type UiState = Arc<Mutex<UiStateInner>>;
@@ -164,6 +166,38 @@ pub fn set_current_price(state: &UiState, price: f64) {
     }
 }
 
+/// Добавить цену нашего bid ордера
+pub fn add_our_bid_price(state: &UiState, is_up: bool, price: f64) {
+    if let Ok(mut s) = state.lock() {
+        let price_cents = (price * 100.0).round() as u32;
+        if is_up {
+            s.our_up_bid_prices.insert(price_cents);
+        } else {
+            s.our_down_bid_prices.insert(price_cents);
+        }
+    }
+}
+
+/// Удалить цену нашего bid ордера
+pub fn remove_our_bid_price(state: &UiState, is_up: bool, price: f64) {
+    if let Ok(mut s) = state.lock() {
+        let price_cents = (price * 100.0).round() as u32;
+        if is_up {
+            s.our_up_bid_prices.remove(&price_cents);
+        } else {
+            s.our_down_bid_prices.remove(&price_cents);
+        }
+    }
+}
+
+/// Очистить все наши цены (при старте нового события)
+pub fn clear_our_bid_prices(state: &UiState) {
+    if let Ok(mut s) = state.lock() {
+        s.our_up_bid_prices.clear();
+        s.our_down_bid_prices.clear();
+    }
+}
+
 /// Терминал для TUI
 pub type Terminal = ratatui::Terminal<CrosstermBackend<Stdout>>;
 
@@ -217,8 +251,8 @@ pub fn render(frame: &mut Frame, state: &UiState) {
         Constraint::Percentage(50),
     ]).areas(right_area);
 
-    render_order_book(frame, up_book_area, "UP", &state.up_book, Color::Green);
-    render_order_book(frame, down_book_area, "DOWN", &state.down_book, Color::Red);
+    render_order_book(frame, up_book_area, "UP", &state.up_book, Color::Green, &state.our_up_bid_prices);
+    render_order_book(frame, down_book_area, "DOWN", &state.down_book, Color::Red, &state.our_down_bid_prices);
 }
 
 /// Рендер информации о событии
@@ -390,7 +424,7 @@ fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio, tradin
 }
 
 /// Рендер стакана
-fn render_order_book(frame: &mut Frame, area: Rect, title: &str, book: &SideOrderBook, color: Color) {
+fn render_order_book(frame: &mut Frame, area: Rect, title: &str, book: &SideOrderBook, color: Color, our_bid_prices: &HashSet<u32>) {
     let block = Block::default()
         .title(format!(" {} ORDER BOOK ", title))
         .title_style(Style::default().fg(color).add_modifier(Modifier::BOLD))
@@ -425,8 +459,15 @@ fn render_order_book(frame: &mut Frame, area: Rect, title: &str, book: &SideOrde
     let ask_rows: Vec<Row> = ask_data.iter()
         .rev()
         .map(|(price, size, cum_total)| {
+            let price_cents = (price * 100.0).round() as u32;
+            let has_our_order = our_bid_prices.contains(&price_cents);
+            let price_text = if has_our_order {
+                format!("{:.0}¢⏱", price * 100.0)
+            } else {
+                format!("{:.0}¢ ", price * 100.0)  // Пробел для выравнивания
+            };
             Row::new(vec![
-                Cell::from(format!("{:.0}¢", price * 100.0))
+                Cell::from(price_text)
                     .style(Style::default().fg(Color::Red)),
                 Cell::from(format!("{:.2}", size)),
                 Cell::from(format!("${:.2}", cum_total)),
@@ -461,8 +502,15 @@ fn render_order_book(frame: &mut Frame, area: Rect, title: &str, book: &SideOrde
         .filter(|l| l.size > 0.0)
         .map(|level| {
             cumulative_bid += level.price * level.size;
+            let price_cents = (level.price * 100.0).round() as u32;
+            let has_our_order = our_bid_prices.contains(&price_cents);
+            let price_text = if has_our_order {
+                format!("{:.0}¢⏱", level.price * 100.0)
+            } else {
+                format!("{:.0}¢ ", level.price * 100.0)  // Пробел для выравнивания
+            };
             Row::new(vec![
-                Cell::from(format!("{:.0}¢", level.price * 100.0))
+                Cell::from(price_text)
                     .style(Style::default().fg(Color::Green)),
                 Cell::from(format!("{:.2}", level.size)),
                 Cell::from(format!("${:.2}", cumulative_bid)),

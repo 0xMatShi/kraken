@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use crate::models::{Portfolio, Side, MarketPrices};
 use crate::config::TradingConfig;
 use crate::ui::{self, UiState};
@@ -24,6 +24,7 @@ pub struct RealEngine {
     seen_trades: Mutex<HashSet<String>>,
     seen_orders: Mutex<HashSet<String>>,
     active_order_ids: Mutex<HashSet<String>>,
+    active_orders_info: Mutex<HashMap<String, (f64, bool, f64)>>,  // order_id -> (price, is_up, original_size)
     our_api_key: Uuid,
     // hedging_in_progress: Arc<Mutex<bool>>,
     config: TradingConfig,
@@ -53,6 +54,7 @@ impl RealEngine {
             seen_trades: Mutex::new(HashSet::new()),
             seen_orders: Mutex::new(HashSet::new()),
             active_order_ids: Mutex::new(HashSet::new()),
+            active_orders_info: Mutex::new(HashMap::new()),
             our_api_key,
             // hedging_in_progress: Arc::new(Mutex::new(false)),
             config,
@@ -432,12 +434,24 @@ impl RealEngine {
                 // Сохраняем ID нашего ордера
                 self.add_order_id(order_id.clone());
 
+                // Определяем is_up (UP или DOWN токен)
+                let is_up = asset_id == &*self.up_token;
+
+                // Сохраняем информацию об ордере (цена, сторона и original_size)
+                if let Some(size) = original_size {
+                    let mut orders_info = self.active_orders_info.lock().unwrap();
+                    orders_info.insert(order_id.clone(), (price, is_up, size));
+                }
+
+                // Обновляем UI - добавляем цену в список наших bid prices
+                ui::add_our_bid_price(&self.ui_state, is_up, price);
+
                 // Отслеживаем выставленные shares
                 if let Some(size) = original_size {
                     let mut port = self.portfolio.lock().unwrap();
-                    if asset_id == &*self.up_token {
+                    if is_up {
                         port.up_total_placed += size;
-                    } else if asset_id == &*self.down_token {
+                    } else {
                         port.down_total_placed += size;
                     }
                     drop(port);
@@ -450,6 +464,26 @@ impl RealEngine {
             Some("UPDATE") => {
                 // UPDATE = частичное или полное исполнение MAKER ордера
                 if let Some(size) = size_matched {
+                    // Проверяем, полностью ли исполнен ордер
+                    let order_info = {
+                        let orders_info = self.active_orders_info.lock().unwrap();
+                        orders_info.get(&order_id).cloned()
+                    };
+
+                    // Если ордер полностью исполнен (size_matched == original_size), удаляем часики
+                    if let Some((order_price, is_up, original_size)) = order_info {
+                        // Сравниваем с небольшой погрешностью для float
+                        if (size - original_size).abs() < 0.01 {
+                            // Ордер полностью исполнен - удаляем из HashMap и UI
+                            {
+                                let mut orders_info = self.active_orders_info.lock().unwrap();
+                                orders_info.remove(&order_id);
+                            }
+                            ui::remove_our_bid_price(&self.ui_state, is_up, order_price);
+                            info!("🔔 ОРДЕР ПОЛНОСТЬЮ ИСПОЛНЕН: {} {} @ {:.3}", side_str, token_str, price);
+                        }
+                    }
+
                     let mut port = self.portfolio.lock().unwrap();
                     port.maker_trades += 1;
 
@@ -486,6 +520,17 @@ impl RealEngine {
             Some("CANCELLATION") => {
                 // Удаляем из активных
                 self.remove_order_id(&order_id);
+
+                // Получаем информацию о цене и стороне из нашего хранилища
+                let order_info = {
+                    let mut orders_info = self.active_orders_info.lock().unwrap();
+                    orders_info.remove(&order_id)
+                };
+
+                // Обновляем UI - удаляем цену из списка наших bid prices
+                if let Some((order_price, is_up, _size)) = order_info {
+                    ui::remove_our_bid_price(&self.ui_state, is_up, order_price);
+                }
 
                 warn!("❌ MAKER CANCELLED: {} {} @ {:.3}",
                     side_str, token_str, price);
