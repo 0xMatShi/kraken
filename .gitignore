@@ -5,6 +5,7 @@
 /logs
 .env
 .mcp.json
+price_tracker.json
 .claude
 /examples
 /analyze

@@ -152,136 +152,162 @@ async fn main() -> anyhow::Result<()> {
             Err(_) => continue,
         };
 
-        // Ищем подходящий рынок
-        if let Some(target) = scanner.find_next_target(coin.slug_prefix(), 0.0, 15.0).await {
-            // Парсим дату окончания
-            let end_date = target.end_date.parse::<DateTime<Utc>>().unwrap_or(Utc::now());
-            let total_seconds = 900; // Фиксированная длительность события: 15 минут
+        // Автоматический цикл торговли для выбранной монеты
+        loop {
+            // Ищем подходящий рынок
+            if let Some(target) = scanner.find_next_target(coin.slug_prefix(), 0.0, 15.0).await {
+                // Парсим дату окончания
+                let end_date = target.end_date.parse::<DateTime<Utc>>().unwrap_or(Utc::now());
+                let total_seconds = 900; // Фиксированная длительность события: 15 минут
 
-            // Извлекаем timestamp из slug события
-            let event_timestamp = price_tracker::extract_timestamp_from_slug(&target.slug);
+                // Извлекаем timestamp из slug события
+                let event_timestamp = price_tracker::extract_timestamp_from_slug(&target.slug);
 
-            // Получаем price to beat для этого события
-            let price_to_beat = if let Some(ts) = event_timestamp {
-                price_tracker.get_price_to_beat(coin, ts)
-            } else {
-                None
-            };
-
-            // Устанавливаем информацию о событии в UI
-            ui::set_event_info(&ui_state, target.title.clone(), end_date, total_seconds);
-            ui::set_dry_run(&ui_state, dry_run);
-            ui::set_price_to_beat(&ui_state, price_to_beat);
-
-            // Создаем реальный движок
-            let engine = Arc::new(RealEngine::new(
-                client.clone(),
-                signer.clone(),
-                target.up_token.clone(),
-                target.down_token.clone(),
-                api_key,
-                app_config.trading.clone(),
-                ui_state.clone(),
-                dry_run,
-            ));
-
-            if dry_run {
-                tracing::info!("DRY RUN MODE - только наблюдение");
-            }
-
-            let market_stream = DataStream::new(
-                target.up_token.clone(),
-                target.down_token.clone(),
-                engine.clone(),
-                ws_market_url.clone(),
-                ui_state.clone(),
-            );
-
-            let user_stream = UserStream::new(engine.clone(), ws_client.clone());
-
-            // Создаем Coinbase stream для получения текущих цен
-            let coinbase_stream = CoinbaseStream::new(coin, ui_state.clone());
-
-            tracing::info!("Запуск торговой сессии...");
-
-            // Инициализируем терминал для TUI
-            let mut terminal = ui::init_terminal()?;
-
-            // Запускаем UI рендеринг и торговую логику параллельно
-            let ui_state_clone = ui_state.clone();
-            let trading_task = async {
-                tokio::select! {
-                    res = market_stream.start_stream(target.end_date) => {
-                        if let Err(e) = res { tracing::error!("Market stream died: {}", e); }
-                    }
-                    res = user_stream.start_stream() => {
-                        if let Err(e) = res { tracing::error!("User stream died: {}", e); }
-                    }
-                    res = coinbase_stream.start_stream() => {
-                        if let Err(e) = res { tracing::error!("Coinbase stream died: {}", e); }
-                    }
-                }
-            };
-
-            // UI loop
-            let ui_task = async {
-                loop {
-                    // Проверка выхода
-                    if ui::check_exit_key() {
-                        ui::stop_ui(&ui_state_clone);
-                        break;
-                    }
-
-                    // Проверяем, закончилась ли сессия
-                    {
-                        let state = ui_state_clone.lock().unwrap();
-                        if !state.is_running {
-                            break;
-                        }
-                    }
-
-                    // Рендерим UI
-                    terminal.draw(|frame| {
-                        ui::render(frame, &ui_state_clone);
-                    }).ok();
-
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            };
-
-            // Запускаем оба в параллель
-            tokio::select! {
-                _ = trading_task => {
-                    // Торговля завершилась
-                    ui::stop_ui(&ui_state);
-                }
-                _ = ui_task => {
-                    // UI завершился (нажата q)
-                }
-            }
-
-            // Восстанавливаем терминал
-            ui::restore_terminal(&mut terminal)?;
-
-            // Сохраняем последнюю цену для следующего события
-            if let Some(ts) = event_timestamp {
-                let last_price = {
-                    let state = ui_state.lock().unwrap();
-                    state.current_price
+                // Получаем price to beat для этого события
+                let price_to_beat = if let Some(ts) = event_timestamp {
+                    price_tracker.get_price_to_beat(coin, ts)
+                } else {
+                    None
                 };
 
-                if let Some(price) = last_price {
-                    price_tracker.set_last_price(coin, price, ts);
-                    if let Err(e) = price_tracker.save() {
-                        tracing::error!("Не удалось сохранить price tracker: {}", e);
+                // Устанавливаем информацию о событии в UI
+                ui::set_event_info(&ui_state, target.title.clone(), end_date, total_seconds);
+                ui::set_dry_run(&ui_state, dry_run);
+                ui::set_price_to_beat(&ui_state, price_to_beat);
+
+                // Создаем реальный движок
+                let engine = Arc::new(RealEngine::new(
+                    client.clone(),
+                    signer.clone(),
+                    target.up_token.clone(),
+                    target.down_token.clone(),
+                    api_key,
+                    app_config.trading.clone(),
+                    ui_state.clone(),
+                    dry_run,
+                ));
+
+                if dry_run {
+                    tracing::info!("DRY RUN MODE - только наблюдение");
+                }
+
+                let market_stream = DataStream::new(
+                    target.up_token.clone(),
+                    target.down_token.clone(),
+                    engine.clone(),
+                    ws_market_url.clone(),
+                    ui_state.clone(),
+                );
+
+                let user_stream = UserStream::new(engine.clone(), ws_client.clone());
+
+                // Создаем Coinbase stream для получения текущих цен
+                let coinbase_stream = CoinbaseStream::new(coin, ui_state.clone());
+
+                tracing::info!("Запуск торговой сессии...");
+
+                // Инициализируем терминал для TUI
+                let mut terminal = ui::init_terminal()?;
+
+                // Флаг для отслеживания причины завершения
+                let user_exit_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let user_exit_flag = user_exit_requested.clone();
+
+                // Запускаем UI рендеринг и торговую логику параллельно
+                let ui_state_clone = ui_state.clone();
+                let trading_task = async {
+                    tokio::select! {
+                        res = market_stream.start_stream(target.end_date) => {
+                            if let Err(e) = res { tracing::error!("Market stream died: {}", e); }
+                        }
+                        res = user_stream.start_stream() => {
+                            if let Err(e) = res { tracing::error!("User stream died: {}", e); }
+                        }
+                        res = coinbase_stream.start_stream() => {
+                            if let Err(e) = res { tracing::error!("Coinbase stream died: {}", e); }
+                        }
+                    }
+                };
+
+                // UI loop
+                let ui_task = async {
+                    loop {
+                        // Проверка выхода
+                        if ui::check_exit_key() {
+                            user_exit_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            ui::stop_ui(&ui_state_clone);
+                            break;
+                        }
+
+                        // Проверяем, закончилась ли сессия
+                        {
+                            let state = ui_state_clone.lock().unwrap();
+                            if !state.is_running {
+                                break;
+                            }
+                        }
+
+                        // Рендерим UI
+                        terminal.draw(|frame| {
+                            ui::render(frame, &ui_state_clone);
+                        }).ok();
+
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                };
+
+                // Запускаем оба в параллель
+                tokio::select! {
+                    _ = trading_task => {
+                        // Торговля завершилась
+                        ui::stop_ui(&ui_state);
+                    }
+                    _ = ui_task => {
+                        // UI завершился (может быть нажата q или событие закончилось)
                     }
                 }
-            }
 
-            // Сбрасываем состояние UI для следующей сессии
-            {
-                let mut state = ui_state.lock().unwrap();
-                *state = ui::UiStateInner::default();
+                // Восстанавливаем терминал
+                ui::restore_terminal(&mut terminal)?;
+
+                // Сохраняем последнюю цену для следующего события
+                if let Some(ts) = event_timestamp {
+                    let last_price = {
+                        let state = ui_state.lock().unwrap();
+                        state.current_price
+                    };
+
+                    if let Some(price) = last_price {
+                        price_tracker.set_last_price(coin, price, ts);
+                        if let Err(e) = price_tracker.save() {
+                            tracing::error!("Не удалось сохранить price tracker: {}", e);
+                        }
+                    }
+                }
+
+                // Проверяем, запросил ли пользователь выход
+                if user_exit_requested.load(std::sync::atomic::Ordering::SeqCst) {
+                    tracing::info!("Пользователь запросил выход в меню");
+                    // Сбрасываем состояние UI
+                    {
+                        let mut state = ui_state.lock().unwrap();
+                        *state = ui::UiStateInner::default();
+                    }
+                    break; // Выход в главное меню
+                }
+
+                // Сбрасываем состояние UI для следующей сессии
+                {
+                    let mut state = ui_state.lock().unwrap();
+                    *state = ui::UiStateInner::default();
+                }
+
+                tracing::info!("Событие завершено, ищем следующее...");
+                // Цикл продолжится и найдет следующее событие
+            } else {
+                // Если событие не найдено, выходим из автоматического цикла
+                tracing::warn!("Не найдено подходящих событий");
+                break;
             }
         }
     }
