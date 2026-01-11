@@ -223,12 +223,16 @@ impl RealEngine {
             let price_dec: Decimal = format!("{:.2}", first_leg_price).parse().unwrap();
             let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
+            // Экспирация: now + 60 + 10 секунд (чтобы ордер не висел вечно если цена убежит)
+            let expiration = Utc::now() + chrono::Duration::seconds(60 + 10);
+
             let order = client.limit_order()
                 .token_id(token_id.as_ref())
                 .price(price_dec)
                 .size(size_dec)
                 .side(PolySide::Buy)
-                .order_type(OrderType::GTC)
+                .order_type(OrderType::GTD)
+                .expiration(expiration)
                 .build().await.unwrap();
 
             let signed = client.sign(&signer, order).await.unwrap();
