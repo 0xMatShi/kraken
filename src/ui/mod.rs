@@ -459,8 +459,12 @@ fn render_logs(frame: &mut Frame, area: Rect, logs: &VecDeque<String>) {
         .rev()
         .map(|s| {
             // Обрезаем длинные строки чтобы избежать проблем с wrap
-            let truncated = if s.len() > width {
-                format!("{}…", &s[..width.saturating_sub(1)])
+            let truncated = if s.chars().count() > width {
+                let truncate_at = s.char_indices()
+                    .nth(width.saturating_sub(1))
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(s.len());
+                format!("{}…", &s[..truncate_at])
             } else {
                 s.clone()
             };
