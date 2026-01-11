@@ -83,6 +83,7 @@ pub struct SideOrderBook {
 #[derive(Debug, Clone, Default)]
 pub struct EventInfo {
     pub title: String,
+    pub slug: String,
     pub end_date: DateTime<Utc>,
     pub total_seconds: i64,
 }
@@ -185,9 +186,9 @@ pub fn scroll_history_down(state: &UiState) {
 }
 
 /// Обновить информацию о событии
-pub fn set_event_info(state: &UiState, title: String, end_date: DateTime<Utc>, total_seconds: i64) {
+pub fn set_event_info(state: &UiState, title: String, slug: String, end_date: DateTime<Utc>, total_seconds: i64) {
     if let Ok(mut s) = state.lock() {
-        s.event_info = EventInfo { title, end_date, total_seconds };
+        s.event_info = EventInfo { title, slug, end_date, total_seconds };
         s.is_running = true;
     }
 }
@@ -786,9 +787,10 @@ pub enum KeyAction {
     ToggleTrading,
     ScrollHistoryUp,
     ScrollHistoryDown,
+    OpenLink,
 }
 
-/// Проверка нажатия клавиш: 'q' для выхода, 'r' для переключения торговли, 'c'/'x' для скролла истории
+/// Проверка нажатия клавиш: 'q' для выхода, 'r' для переключения торговли, 'c'/'x' для скролла истории, 'l' для открытия ссылки
 pub fn check_key_action() -> KeyAction {
     if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
         if let Ok(Event::Key(key)) = event::read() {
@@ -798,10 +800,21 @@ pub fn check_key_action() -> KeyAction {
                     KeyCode::Char('r') => return KeyAction::ToggleTrading,
                     KeyCode::Char('c') => return KeyAction::ScrollHistoryUp,
                     KeyCode::Char('x') => return KeyAction::ScrollHistoryDown,
+                    KeyCode::Char('l') => return KeyAction::OpenLink,
                     _ => {}
                 }
             }
         }
     }
     KeyAction::None
+}
+
+/// Открыть ссылку на событие в браузере
+pub fn open_event_link(state: &UiState) {
+    if let Ok(s) = state.lock() {
+        if !s.event_info.slug.is_empty() {
+            let url = format!("https://polymarket.com/event/{}", s.event_info.slug);
+            let _ = open::that(&url);
+        }
+    }
 }

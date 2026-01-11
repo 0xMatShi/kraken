@@ -170,7 +170,7 @@ async fn main() -> anyhow::Result<()> {
                 };
 
                 // Устанавливаем информацию о событии в UI
-                ui::set_event_info(&ui_state, target.title.clone(), end_date, total_seconds);
+                ui::set_event_info(&ui_state, target.title.clone(), target.slug.clone(), end_date, total_seconds);
                 ui::set_price_to_beat(&ui_state, price_to_beat);
                 ui::clear_our_bid_prices(&ui_state);
                 ui::clear_open_orders(&ui_state);
@@ -252,6 +252,9 @@ async fn main() -> anyhow::Result<()> {
                             }
                             ui::KeyAction::ScrollHistoryDown => {
                                 ui::scroll_history_down(&ui_state_clone);
+                            }
+                            ui::KeyAction::OpenLink => {
+                                ui::open_event_link(&ui_state_clone);
                             }
                             ui::KeyAction::None => {}
                         }
