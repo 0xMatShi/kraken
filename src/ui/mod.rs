@@ -322,7 +322,7 @@ pub fn render(frame: &mut Frame, state: &UiState) {
     let [event_area, portfolio_area, open_orders_area, history_area] = Layout::vertical([
         Constraint::Length(8),    // Event info
         Constraint::Length(9),    // Portfolio
-        Constraint::Length(8),    // Open Orders (минимум для заголовка + несколько ордеров)
+        Constraint::Length(14),   // Open Orders (увеличено для отображения большего числа ордеров)
         Constraint::Fill(1),      // History
     ]).areas(left_area);
 
