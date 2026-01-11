@@ -24,7 +24,7 @@ pub struct RealEngine {
     seen_trades: Mutex<HashSet<String>>,
     seen_orders: Mutex<HashSet<String>>,
     active_order_ids: Mutex<HashSet<String>>,
-    active_orders_info: Mutex<HashMap<String, (f64, bool, f64)>>,  // order_id -> (price, is_up, original_size)
+    active_orders_info: Mutex<HashMap<String, (f64, bool, f64, f64)>>,  // order_id -> (price, is_up, original_size, accumulated_filled)
     our_api_key: Uuid,
     // hedging_in_progress: Arc<Mutex<bool>>,
     config: TradingConfig,
@@ -409,14 +409,13 @@ impl RealEngine {
     // UPDATE - ордер частично/полностью исполнен (some of it is matched)
     // CANCELLATION - ордер отменён
     pub fn handle_ws_order(&self, order_id: String, msg_type: Option<String>, price: f64, side: PolySide, asset_id: &str, size_matched: Option<f64>, original_size: Option<f64>) {
-        // Создаем уникальный ключ: order_id + status
-        let order_key = format!("{}:{:?}", order_id, msg_type);
-
-        // Проверяем дубликаты
-        {
+        // Дедупликация только для PLACEMENT и CANCELLATION
+        // UPDATE события НЕ дедуплицируются, так как ордер может исполняться частями
+        if msg_type.as_deref() != Some("UPDATE") {
+            let order_key = format!("{}:{:?}", order_id, msg_type);
             let mut seen = self.seen_orders.lock().unwrap();
             if seen.contains(&order_key) {
-                return; // Молча игнорируем дубликаты
+                return; // Молча игнорируем дубликаты PLACEMENT/CANCELLATION
             }
             seen.insert(order_key);
         }
@@ -437,10 +436,10 @@ impl RealEngine {
                 // Определяем is_up (UP или DOWN токен)
                 let is_up = asset_id == &*self.up_token;
 
-                // Сохраняем информацию об ордере (цена, сторона и original_size)
+                // Сохраняем информацию об ордере (цена, сторона, original_size и accumulated_filled = 0.0)
                 if let Some(size) = original_size {
                     let mut orders_info = self.active_orders_info.lock().unwrap();
-                    orders_info.insert(order_id.clone(), (price, is_up, size));
+                    orders_info.insert(order_id.clone(), (price, is_up, size, 0.0));
                 }
 
                 // Обновляем UI - добавляем цену в список наших bid prices
@@ -464,24 +463,34 @@ impl RealEngine {
             Some("UPDATE") => {
                 // UPDATE = частичное или полное исполнение MAKER ордера
                 if let Some(size) = size_matched {
-                    // Проверяем, полностью ли исполнен ордер
-                    let order_info = {
-                        let orders_info = self.active_orders_info.lock().unwrap();
-                        orders_info.get(&order_id).cloned()
-                    };
+                    // Получаем информацию об ордере и накапливаем исполнение
+                    let mut orders_info = self.active_orders_info.lock().unwrap();
 
-                    // Если ордер полностью исполнен (size_matched == original_size), удаляем часики
-                    if let Some((order_price, is_up, original_size)) = order_info {
-                        // Сравниваем с небольшой погрешностью для float
-                        if (size - original_size).abs() < 0.01 {
-                            // Ордер полностью исполнен - удаляем из HashMap и UI
-                            {
-                                let mut orders_info = self.active_orders_info.lock().unwrap();
-                                orders_info.remove(&order_id);
-                            }
-                            ui::remove_our_bid_price(&self.ui_state, is_up, order_price);
+                    if let Some((order_price, is_up, original_size, accumulated_filled)) = orders_info.get_mut(&order_id) {
+                        // Добавляем текущее исполнение к накопленному
+                        *accumulated_filled += size;
+
+                        info!("📊 MAKER PARTIAL FILL: {} {} @ {:.3} | Filled: {:.2}/{:.2}",
+                            side_str, token_str, price, *accumulated_filled, *original_size);
+
+                        // Проверяем, полностью ли исполнен ордер (с погрешностью 0.01)
+                        if (*accumulated_filled - *original_size).abs() < 0.01 || *accumulated_filled >= *original_size {
+                            // Ордер полностью исполнен - сохраняем данные для удаления
+                            let final_price = *order_price;
+                            let final_is_up = *is_up;
+
+                            // Удаляем из HashMap
+                            orders_info.remove(&order_id);
+                            drop(orders_info); // Освобождаем мьютекс
+
+                            // Удаляем часики из UI
+                            ui::remove_our_bid_price(&self.ui_state, final_is_up, final_price);
                             info!("🔔 ОРДЕР ПОЛНОСТЬЮ ИСПОЛНЕН: {} {} @ {:.3}", side_str, token_str, price);
+                        } else {
+                            drop(orders_info); // Освобождаем мьютекс если ордер еще не полностью исполнен
                         }
+                    } else {
+                        drop(orders_info); // Освобождаем мьютекс если ордер не найден
                     }
 
                     let mut port = self.portfolio.lock().unwrap();
@@ -528,7 +537,7 @@ impl RealEngine {
                 };
 
                 // Обновляем UI - удаляем цену из списка наших bid prices
-                if let Some((order_price, is_up, _size)) = order_info {
+                if let Some((order_price, is_up, _original_size, _accumulated)) = order_info {
                     ui::remove_our_bid_price(&self.ui_state, is_up, order_price);
                 }
 
