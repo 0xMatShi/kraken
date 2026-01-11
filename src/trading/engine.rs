@@ -23,6 +23,34 @@ struct ClaimData {
     winning_outcome_index: u8,  // 0 = UP/YES, 1 = DOWN/NO
 }
 
+/// Состояние торговой стратегии
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum TradingState {
+    /// Ждём спред 2с (up_bid + down_bid == 0.98)
+    Idle,
+    /// Первая нога размещена, ждём заполнения
+    WaitingFirstLeg {
+        order_id: String,
+        is_up: bool,
+        price: f64,
+        size: f64,
+    },
+    /// Первая нога заполнена, ищем вторую ногу
+    /// Мониторим ask для хеджа + размещена лимитка второй ноги
+    SearchingSecondLeg {
+        first_leg_price: f64,
+        first_leg_is_up: bool,
+        first_leg_size: f64,
+        second_leg_order_id: Option<String>,
+    },
+}
+
+impl Default for TradingState {
+    fn default() -> Self {
+        TradingState::Idle
+    }
+}
 
 pub struct RealEngine {
     portfolio: Mutex<Portfolio>,
@@ -35,15 +63,13 @@ pub struct RealEngine {
     active_order_ids: Mutex<HashSet<String>>,
     active_orders_info: Mutex<HashMap<String, (f64, bool, f64, f64)>>,  // order_id -> (price, is_up, original_size, accumulated_filled)
     our_api_key: Uuid,
-    // hedging_in_progress: Arc<Mutex<bool>>,
     config: TradingConfig,
-    // Защита от чрезмерного размещения лимиток
-    last_maker_prices: Mutex<Option<(f64, f64)>>,  // (up_price, down_price)
-    maker_placement_count: Mutex<u32>,              // Счетчик размещений с текущими ценами
     // UI state для отображения портфолио и контроля режима торговли
     ui_state: UiState,
     // Condition ID для клейма наград
     condition_id: Option<String>,
+    // Состояние торговой стратегии
+    trading_state: Mutex<TradingState>,
 }
 
 impl RealEngine {
@@ -68,12 +94,10 @@ impl RealEngine {
             active_order_ids: Mutex::new(HashSet::new()),
             active_orders_info: Mutex::new(HashMap::new()),
             our_api_key,
-            // hedging_in_progress: Arc::new(Mutex::new(false)),
             config,
-            last_maker_prices: Mutex::new(None),
-            maker_placement_count: Mutex::new(0),
             ui_state,
             condition_id,
+            trading_state: Mutex::new(TradingState::Idle),
         }
     }
 
@@ -87,25 +111,6 @@ impl RealEngine {
     fn round_price(price: f64) -> f64 {
         (price * 100.0).round() / 100.0
     }
-
-    // ВРЕМЕННО ОТКЛЮЧЕНО: Методы для работы с флагом хеджирования
-    // fn is_hedging(&self) -> bool {
-    //     *self.hedging_in_progress.lock().unwrap()
-    // }
-
-    // fn set_hedging(&self, value: bool) {
-    //     *self.hedging_in_progress.lock().unwrap() = value;
-    // }
-
-    // ВРЕМЕННО ОТКЛЮЧЕНО: Таймер для автоматического сброса флага хеджирования
-    // fn start_hedging_timer(&self) {
-    //     let hedging_flag = Arc::clone(&self.hedging_in_progress);
-    //     tokio::spawn(async move {
-    //         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-    //         *hedging_flag.lock().unwrap() = false;
-    //         info!("⏰ Таймер хеджирования истек. Снимаем блокировку");
-    //     });
-    // }
 
     // Методы для работы с активными ордерами
     pub fn add_order_id(&self, order_id: String) {
@@ -129,210 +134,255 @@ impl RealEngine {
             return;
         }
 
-        // ВРЕМЕННО ОТКЛЮЧЕНО: Проверка флага хеджирования
-        // if self.is_hedging() {
-        //     return;
-        // }
         self.run_logic(prices);
     }
 
     fn run_logic(&self, prices: MarketPrices) {
-        let (up_shares, down_shares, up_spent, down_spent) = {
+        let (up_spent, down_spent) = {
             let port = self.portfolio.lock().unwrap();
-            (port.up_shares, port.down_shares, port.up_spent, port.down_spent)
+            (port.up_spent, port.down_spent)
         };
 
         if (up_spent + down_spent) >= self.config.max_balance {
             return;
         }
 
-        let _skew = up_shares - down_shares;
+        // Получаем текущее состояние стратегии
+        let state = {
+            self.trading_state.lock().unwrap().clone()
+        };
 
-        // ВРЕМЕННО ОТКЛЮЧЕНО: Логика хеджирования
-        // if skew >= self.config.hedge_size {
-        //     // Устанавливаем флаг хеджирования
-        //     self.set_hedging(true);
-        //     // Запускаем таймер для автоматического сброса флага через 3 секунды
-        //     self.start_hedging_timer();
-        //     // Вычисляем сколько ордеров нужно для закрытия перекоса
-        //     let num_orders = ((skew - self.config.hedge_size) / self.config.size).ceil() as i32;
-        //     // Отправляем все нужные ордера
-        //     for _ in 0..num_orders {
-        //         self.execute_hedge_trade(Side::Down);
-        //     }
-        //     return;
-        // } else if skew <= -self.config.hedge_size {
-        //     // Устанавливаем флаг хеджирования
-        //     self.set_hedging(true);
-        //     // Запускаем таймер для автоматического сброса флага через 3 секунды
-        //     self.start_hedging_timer();
-        //     // Вычисляем сколько ордеров нужно для закрытия перекоса
-        //     let num_orders = ((skew.abs() - self.config.hedge_size) / self.config.size).ceil() as i32;
-        //     // Отправляем все нужные ордера
-        //     for _ in 0..num_orders {
-        //         self.execute_hedge_trade(Side::Up);
-        //     }
-        //     return;
-        // }
-
-        self.manage_adaptive_maker(&prices);
+        match state {
+            TradingState::Idle => {
+                // Ждём спред 2с (up_bid + down_bid == 0.98)
+                self.try_place_first_leg(&prices);
+            }
+            TradingState::WaitingFirstLeg { .. } => {
+                // Первая нога размещена, ждём заполнения через WebSocket
+                // Ничего не делаем в tick
+            }
+            TradingState::SearchingSecondLeg { first_leg_price, first_leg_is_up, first_leg_size, second_leg_order_id } => {
+                // Мониторим ask противоположной стороны для хеджа
+                self.check_hedge_opportunity(&prices, first_leg_price, first_leg_is_up, first_leg_size, second_leg_order_id);
+            }
+        }
     }
 
-    fn manage_adaptive_maker(&self, prices: &MarketPrices) {
-
-        // Проверяем, что обе стороны имеют валидные bid цены
+    /// Пытаемся разместить первую ногу при спреде 2с
+    fn try_place_first_leg(&self, prices: &MarketPrices) {
+        // Проверяем валидность цен
         if prices.up_bid < 0.01 || prices.down_bid < 0.01 {
             return;
         }
 
-        // СТРАТЕГИЯ 1
-        // let potential_pair_cost = prices.up_bid + prices.down_bid;
-        // if potential_pair_cost >= 1.00 { return; }
-
-        // // Стратегия размещения в зависимости от спреда
-        // let (up_price, down_price) = if potential_pair_cost >= 0.99 {
-        //     // Спред 1с: встаем в очередь с обеих сторон, только если сайз <= 100
-        //     if prices.up_bid_size > 100.0 || prices.down_bid_size > 100.0 {
-        //         return; // Не размещаем, если хотя бы в одной очереди > 100 акций
-        //     }
-        //     (Self::round_price(prices.up_bid), Self::round_price(prices.down_bid))
-        // } else if potential_pair_cost >= 0.98 {
-        //     // Спред 2с: старая логика - где конкуренция больше, там новый best_bid
-        //     if prices.up_bid_size > prices.down_bid_size {
-        //         // UP конкуренция больше → встаем новым best_bid
-        //         // DOWN конкуренция меньше → встаем в очередь, но проверяем лимит
-        //         if prices.down_bid_size > 100.0 {
-        //             return; // Не размещаем, если в очереди DOWN > 100 акций
-        //         }
-        //         (Self::round_price(prices.up_bid + 0.01), Self::round_price(prices.down_bid))
-        //     } else if prices.down_bid_size > prices.up_bid_size {
-        //         // DOWN конкуренция больше → встаем новым best_bid
-        //         // UP конкуренция меньше → встаем в очередь, но проверяем лимит
-        //         if prices.up_bid_size > 100.0 {
-        //             return; // Не размещаем, если в очереди UP > 100 акций
-        //         }
-        //         (Self::round_price(prices.up_bid), Self::round_price(prices.down_bid + 0.01))
-        //     } else {
-        //         // Конкуренция равна - встаем в очередь с обеих сторон
-        //         if prices.up_bid_size > 100.0 || prices.down_bid_size > 100.0 {
-        //             return; // Не размещаем, если хотя бы в одной очереди > 100 акций
-        //         }
-        //         (Self::round_price(prices.up_bid), Self::round_price(prices.down_bid))
-        //     }
-        // } else {
-        //     // Спред 3с и больше: встаем новым best_bid с обеих сторон
-        //     (Self::round_price(prices.up_bid + 0.01), Self::round_price(prices.down_bid + 0.01))
-        // };
-
-        // СТРАТЕГИЯ 2: Упрощенная - всегда новый best_bid если есть спред
-        let potential_pair_cost = (prices.up_bid + 0.01) + (prices.down_bid + 0.01);
-        if potential_pair_cost >= 1.00 { return; }
-
-        // Всегда размещаем новым best_bid, не смотрим на размер очереди
-        let up_price = Self::round_price(prices.up_bid + 0.01);
-        let down_price = Self::round_price(prices.down_bid + 0.01);
-
-        // Дополнительная проверка после округления
-        if up_price < 0.01 || down_price < 0.01 { return; }
-
-        // Защита от чрезмерного размещения лимиток
-        {
-            let mut last_prices = self.last_maker_prices.lock().unwrap();
-            let mut count = self.maker_placement_count.lock().unwrap();
-
-            if let Some((last_up, last_down)) = *last_prices {
-                // Проверяем, совпадают ли цены с предыдущими
-                if (last_up - up_price).abs() < 0.001 && (last_down - down_price).abs() < 0.001 {
-                    // Цены не изменились, увеличиваем счетчик
-                    *count += 1;
-
-                    // Если уже было 3 или больше размещений с такими же ценами, скипаем
-                    if *count > 2 { return; }
-                } else {
-                    // Цены изменились, сбрасываем счетчик
-                    *count = 1;
-                    *last_prices = Some((up_price, down_price));
-                }
-            } else {
-                // Первое размещение
-                *count = 1;
-                *last_prices = Some((up_price, down_price));
-            }
+        // Проверяем спред: up_bid + down_bid должно быть ровно 0.98
+        let pair_cost = prices.up_bid + prices.down_bid;
+        if (pair_cost - 0.98).abs() > 0.001 {
+            return; // Спред не 2с
         }
 
-        let up_token = Arc::clone(&self.up_token);
-        let down_token = Arc::clone(&self.down_token);
+        // Определяем сторону для первой ноги: bid > 0.50
+        let (first_leg_is_up, first_leg_price) = if prices.up_bid > 0.50 {
+            (true, Self::round_price(prices.up_bid + 0.01))
+        } else if prices.down_bid > 0.50 {
+            (false, Self::round_price(prices.down_bid + 0.01))
+        } else {
+            // Обе стороны <= 0.50, не размещаем
+            return;
+        };
+
+        if first_leg_price < 0.01 || first_leg_price > 0.99 {
+            return;
+        }
+
+        info!("🎯 Спред 2с найден! Размещаем первую ногу: {} @ {:.2}",
+            if first_leg_is_up { "UP" } else { "DOWN" }, first_leg_price);
+
+        // Переходим в состояние ожидания сразу, чтобы не дублировать ордера
+        // order_id будет обновлён при получении PLACEMENT через WebSocket
+        *self.trading_state.lock().unwrap() = TradingState::WaitingFirstLeg {
+            order_id: String::new(), // Заполнится при PLACEMENT
+            is_up: first_leg_is_up,
+            price: first_leg_price,
+            size: self.config.size,
+        };
+
+        let token_id = if first_leg_is_up {
+            Arc::clone(&self.up_token)
+        } else {
+            Arc::clone(&self.down_token)
+        };
         let client = self.client.clone();
         let signer = self.signer.clone();
         let size = self.config.size;
 
         tokio::spawn(async move {
-            // Конвертируем через строку с точным форматированием до 2 знаков
-            let up_price_dec: Decimal = format!("{:.2}", up_price).parse().unwrap();
-            let down_price_dec: Decimal = format!("{:.2}", down_price).parse().unwrap();
+            let price_dec: Decimal = format!("{:.2}", first_leg_price).parse().unwrap();
             let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
-            // let expiration = Utc::now() + TimeDelta::seconds(65);
-
-            let order_up = client.limit_order()
-                .token_id(up_token.as_ref())
-                .price(up_price_dec)
+            let order = client.limit_order()
+                .token_id(token_id.as_ref())
+                .price(price_dec)
                 .size(size_dec)
                 .side(PolySide::Buy)
                 .order_type(OrderType::GTC)
-                // .expiration(expiration)
                 .build().await.unwrap();
 
-            let order_down = client.limit_order()
-                .token_id(down_token.as_ref())
-                .price(down_price_dec)
-                .size(size_dec)
-                .side(PolySide::Buy)
-                .order_type(OrderType::GTC)
-                // .expiration(expiration)
-                .build().await.unwrap();
+            let signed = client.sign(&signer, order).await.unwrap();
 
-            let signed_up = client.sign(&signer, order_up).await.unwrap();
-            let signed_down = client.sign(&signer, order_down).await.unwrap();
-
-            match client.post_orders(vec![signed_up, signed_down]).await {
-                Ok(_responses) => {},
-                Err(e) => error!("❌ Ошибка размещения Maker ордеров: {}", e),
+            match client.post_order(signed).await {
+                Ok(response) => {
+                    if !response.order_id.is_empty() {
+                        info!("📝 Первая нога размещена: order_id={}", response.order_id);
+                    }
+                },
+                Err(e) => error!("❌ Ошибка размещения первой ноги: {}", e),
             }
         });
     }
 
-    // ВРЕМЕННО ОТКЛЮЧЕНО: Функция хеджирования
-    // fn execute_hedge_trade(&self, side: Side) {
-    //     let client: Client<Authenticated<Normal>> = self.client.clone();
-    //     let signer = self.signer.clone();
-    //     let token_id = if side == Side::Up { Arc::clone(&self.up_token) } else { Arc::clone(&self.down_token) };
-    //     let size = self.config.size;
+    /// Проверяем возможность хеджа и управляем второй ногой
+    fn check_hedge_opportunity(
+        &self,
+        prices: &MarketPrices,
+        first_leg_price: f64,
+        first_leg_is_up: bool,
+        first_leg_size: f64,
+        second_leg_order_id: Option<String>,
+    ) {
+        // Получаем ask противоположной стороны
+        let opposite_ask = if first_leg_is_up {
+            prices.down_ask
+        } else {
+            prices.up_ask
+        };
 
-    //     tokio::spawn(async move {
-    //         // Конвертируем через строку с точным форматированием до 2 знаков
-    //         let price_dec: Decimal = format!("{:.2}", 0.99).parse().unwrap();
-    //         let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
+        // Проверяем условие хеджа: first_leg_price + opposite_ask >= 1.02
+        if opposite_ask > 0.0 && (first_leg_price + opposite_ask) >= 1.02 {
+            info!("🚨 ХЕДЖ УСЛОВИЕ! Первая нога: {:.2} + Ask: {:.2} = {:.2} >= 1.02",
+                first_leg_price, opposite_ask, first_leg_price + opposite_ask);
 
-    //         let order = client.limit_order()
-    //             .token_id(&*token_id)
-    //             .price(price_dec)
-    //             .size(size_dec)
-    //             .side(PolySide::Buy)
-    //             .build().await.unwrap();
+            // Отправляем taker хедж
+            self.execute_hedge_taker(first_leg_is_up, first_leg_size);
 
-    //         let signed = client.sign(&signer, order).await.unwrap();
+            // Отменяем лимитку второй ноги если она есть
+            if let Some(order_id) = second_leg_order_id {
+                self.cancel_order(order_id);
+            }
 
-    //         match client.post_order(signed).await {
-    //             Ok(response) => {
-    //                 if !response.order_id.is_empty() {
-    //                     info!("🎯 Taker Hedge отправлен");
-    //                 }
-    //             },
-    //             Err(e) => error!("❌ Ошибка отправки Taker Hedge: {}", e),
-    //         }
-    //     });
-    // }
+            // Возвращаемся в Idle
+            *self.trading_state.lock().unwrap() = TradingState::Idle;
+            return;
+        }
+    }
+
+    /// Выполняем taker хедж сделку
+    fn execute_hedge_taker(&self, first_leg_is_up: bool, size: f64) {
+        // Хедж на противоположную сторону
+        let hedge_is_up = !first_leg_is_up;
+        let token_id = if hedge_is_up {
+            Arc::clone(&self.up_token)
+        } else {
+            Arc::clone(&self.down_token)
+        };
+        let client = self.client.clone();
+        let signer = self.signer.clone();
+
+        info!("🎯 Отправляем TAKER HEDGE: {} size={:.2}",
+            if hedge_is_up { "UP" } else { "DOWN" }, size);
+
+        tokio::spawn(async move {
+            let price_dec: Decimal = "0.99".parse().unwrap();
+            let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
+
+            let order = client.limit_order()
+                .token_id(token_id.as_ref())
+                .price(price_dec)
+                .size(size_dec)
+                .side(PolySide::Buy)
+                .order_type(OrderType::FOK) // Fill or Kill для taker
+                .build().await.unwrap();
+
+            let signed = client.sign(&signer, order).await.unwrap();
+
+            match client.post_order(signed).await {
+                Ok(response) => {
+                    if !response.order_id.is_empty() {
+                        info!("✅ HEDGE TAKER отправлен: order_id={}", response.order_id);
+                    }
+                },
+                Err(e) => error!("❌ Ошибка отправки HEDGE TAKER: {}", e),
+            }
+        });
+    }
+
+    /// Размещаем лимитку второй ноги
+    fn place_second_leg(&self, first_leg_price: f64, first_leg_is_up: bool, first_leg_size: f64) {
+        // Цена второй ноги: 0.98 - first_leg_price
+        let second_leg_price = Self::round_price(0.98 - first_leg_price);
+        let second_leg_is_up = !first_leg_is_up;
+
+        if second_leg_price < 0.01 || second_leg_price > 0.99 {
+            warn!("⚠️ Некорректная цена второй ноги: {:.2}", second_leg_price);
+            return;
+        }
+
+        info!("📝 Размещаем вторую ногу: {} @ {:.2}",
+            if second_leg_is_up { "UP" } else { "DOWN" }, second_leg_price);
+
+        let token_id = if second_leg_is_up {
+            Arc::clone(&self.up_token)
+        } else {
+            Arc::clone(&self.down_token)
+        };
+        let client = self.client.clone();
+        let signer = self.signer.clone();
+        let size = first_leg_size;
+
+        tokio::spawn(async move {
+            let price_dec: Decimal = format!("{:.2}", second_leg_price).parse().unwrap();
+            let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
+
+            let order = client.limit_order()
+                .token_id(token_id.as_ref())
+                .price(price_dec)
+                .size(size_dec)
+                .side(PolySide::Buy)
+                .order_type(OrderType::GTC)
+                .build().await.unwrap();
+
+            let signed = client.sign(&signer, order).await.unwrap();
+
+            match client.post_order(signed).await {
+                Ok(response) => {
+                    if !response.order_id.is_empty() {
+                        info!("📝 Вторая нога размещена: order_id={}", response.order_id);
+                    }
+                },
+                Err(e) => error!("❌ Ошибка размещения второй ноги: {}", e),
+            }
+        });
+    }
+
+    /// Отменяем ордер по ID
+    fn cancel_order(&self, order_id: String) {
+        let client = self.client.clone();
+
+        info!("🚫 Отменяем ордер: {}", order_id);
+
+        tokio::spawn(async move {
+            match client.cancel_order(&order_id).await {
+                Ok(result) => {
+                    if !result.canceled.is_empty() {
+                        info!("✅ Ордер отменён: {}", order_id);
+                    } else {
+                        warn!("⚠️ Ордер не был отменён: {}", order_id);
+                    }
+                },
+                Err(e) => error!("❌ Ошибка отмены ордера {}: {}", order_id, e),
+            }
+        });
+    }
 
     // Trade события = TAKER сделки (market orders FAK)
     // Это подтверждение исполнения taker-hedge и taker-emergency ордеров
@@ -395,10 +445,6 @@ impl RealEngine {
         info!("💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
             port.up_shares, port.down_shares, port.up_shares - port.down_shares);
 
-        // ВРЕМЕННО ОТКЛЮЧЕНО: Проверка перекоса и снятие флага хеджирования
-        // let current_skew = port.up_shares - port.down_shares;
-
-        // Освобождаем мьютекс портфеля перед работой с флагом
         drop(port);
 
         // Добавляем запись в историю торговли
@@ -416,12 +462,6 @@ impl RealEngine {
 
         // Обновляем UI
         self.update_ui_portfolio();
-
-        // // Если перекос выровнялся (меньше HEDGE_SIZE), снимаем флаг хеджирования
-        // if current_skew.abs() < self.config.hedge_size && self.is_hedging() {
-        //     self.set_hedging(false);
-        //     info!("✅ Перекос выровнен. Возобновляем нормальную торговлю");
-        // }
     }
 
     // Обработка событий ордеров (MAKER orders - limit orders)
@@ -489,6 +529,26 @@ impl RealEngine {
 
                 info!("📝 MAKER PLACED: {} {} @ {:.3}",
                     side_str, token_str, price);
+
+                // === ЛОГИКА СОСТОЯНИЯ СТРАТЕГИИ ===
+                let mut state = self.trading_state.lock().unwrap();
+
+                // Если мы в WaitingFirstLeg с пустым order_id - обновляем order_id
+                if let TradingState::WaitingFirstLeg { order_id: ref mut first_order_id, .. } = *state {
+                    if first_order_id.is_empty() {
+                        info!("🎯 Первая нога подтверждена: {} @ {:.2}", token_str, price);
+                        *first_order_id = order_id.clone();
+                    }
+                } else if let TradingState::SearchingSecondLeg { first_leg_price, first_leg_is_up, first_leg_size, second_leg_order_id: None } = &*state {
+                    // Это размещение второй ноги - сохраняем её order_id
+                    info!("📝 Вторая нога подтверждена: {} @ {:.2}", token_str, price);
+                    *state = TradingState::SearchingSecondLeg {
+                        first_leg_price: *first_leg_price,
+                        first_leg_is_up: *first_leg_is_up,
+                        first_leg_size: *first_leg_size,
+                        second_leg_order_id: Some(order_id.clone()),
+                    };
+                }
             }
             Some("UPDATE") => {
                 // UPDATE = частичное или полное исполнение MAKER ордера
@@ -512,6 +572,8 @@ impl RealEngine {
                         // Сохраняем is_up для использования после освобождения мьютекса
                         let current_is_up = *is_up;
                         let current_accumulated = *accumulated_filled;
+                        let current_original_size = *original_size;
+                        let current_order_price = *order_price;
 
                         info!("📊 MAKER PARTIAL FILL: {} {} @ {:.3} | Filled: {:.2}/{:.2}",
                             side_str, token_str, price, *accumulated_filled, *original_size);
@@ -520,10 +582,12 @@ impl RealEngine {
                         ui::update_open_order_filled(&self.ui_state, &order_id, current_accumulated);
 
                         // Проверяем, полностью ли исполнен ордер (с погрешностью 0.01)
-                        if (*accumulated_filled - *original_size).abs() < 0.01 || *accumulated_filled >= *original_size {
+                        let is_fully_filled = (current_accumulated - current_original_size).abs() < 0.01 || current_accumulated >= current_original_size;
+
+                        if is_fully_filled {
                             // Ордер полностью исполнен - сохраняем данные для удаления
-                            let final_price = *order_price;
-                            let final_is_up = *is_up;
+                            let final_price = current_order_price;
+                            let final_is_up = current_is_up;
 
                             // Удаляем из HashMap
                             orders_info.remove(&order_id);
@@ -534,6 +598,9 @@ impl RealEngine {
                             // Удаляем открытый ордер из UI
                             ui::remove_open_order(&self.ui_state, &order_id);
                             info!("🔔 ОРДЕР ПОЛНОСТЬЮ ИСПОЛНЕН: {} {} @ {:.3}", side_str, token_str, price);
+
+                            // === ЛОГИКА СОСТОЯНИЯ СТРАТЕГИИ ===
+                            self.handle_order_fully_filled(&order_id, final_price, final_is_up, current_original_size);
                         } else {
                             drop(orders_info); // Освобождаем мьютекс если ордер еще не полностью исполнен
                         }
@@ -611,10 +678,75 @@ impl RealEngine {
 
                 warn!("❌ MAKER CANCELLED: {} {} @ {:.3}",
                     side_str, token_str, price);
+
+                // === ЛОГИКА СОСТОЯНИЯ СТРАТЕГИИ ===
+                self.handle_order_cancelled(&order_id);
             }
             _ => {
                 // Другие типы событий
             }
+        }
+    }
+
+    /// Обработка полного заполнения ордера - переходы состояний
+    fn handle_order_fully_filled(&self, order_id: &str, filled_price: f64, filled_is_up: bool, filled_size: f64) {
+        let mut state = self.trading_state.lock().unwrap();
+
+        match &*state {
+            TradingState::WaitingFirstLeg { order_id: first_order_id, .. } => {
+                if order_id == first_order_id {
+                    // Первая нога заполнена → переходим в SearchingSecondLeg
+                    info!("✅ ПЕРВАЯ НОГА ЗАПОЛНЕНА! {} @ {:.2} size={:.2}",
+                        if filled_is_up { "UP" } else { "DOWN" }, filled_price, filled_size);
+
+                    *state = TradingState::SearchingSecondLeg {
+                        first_leg_price: filled_price,
+                        first_leg_is_up: filled_is_up,
+                        first_leg_size: filled_size,
+                        second_leg_order_id: None,
+                    };
+                    drop(state);
+
+                    // Размещаем лимитку второй ноги
+                    self.place_second_leg(filled_price, filled_is_up, filled_size);
+                }
+            }
+            TradingState::SearchingSecondLeg { second_leg_order_id: Some(second_order_id), .. } => {
+                if order_id == second_order_id {
+                    // Вторая нога заполнена → возвращаемся в Idle
+                    info!("✅ ВТОРАЯ НОГА ЗАПОЛНЕНА! Пара завершена. Возвращаемся в Idle");
+                    *state = TradingState::Idle;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Обработка отмены ордера - переходы состояний
+    fn handle_order_cancelled(&self, order_id: &str) {
+        let mut state = self.trading_state.lock().unwrap();
+
+        match &*state {
+            TradingState::WaitingFirstLeg { order_id: first_order_id, .. } => {
+                if order_id == first_order_id {
+                    // Первая нога отменена → возвращаемся в Idle
+                    info!("⚠️ Первая нога отменена. Возвращаемся в Idle");
+                    *state = TradingState::Idle;
+                }
+            }
+            TradingState::SearchingSecondLeg { second_leg_order_id: Some(second_order_id), first_leg_price, first_leg_is_up, first_leg_size } => {
+                if order_id == second_order_id {
+                    // Вторая нога отменена - продолжаем мониторить хедж без лимитки
+                    info!("⚠️ Вторая нога отменена. Продолжаем мониторить хедж");
+                    *state = TradingState::SearchingSecondLeg {
+                        first_leg_price: *first_leg_price,
+                        first_leg_is_up: *first_leg_is_up,
+                        first_leg_size: *first_leg_size,
+                        second_leg_order_id: None,
+                    };
+                }
+            }
+            _ => {}
         }
     }
 
