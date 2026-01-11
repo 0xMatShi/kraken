@@ -68,8 +68,8 @@ pub struct RealEngine {
     ui_state: UiState,
     // Condition ID для клейма наград
     condition_id: Option<String>,
-    // Состояние торговой стратегии
-    trading_state: Mutex<TradingState>,
+    // Состояние торговой стратегии (Arc для передачи в async блоки)
+    trading_state: Arc<Mutex<TradingState>>,
 }
 
 impl RealEngine {
@@ -97,7 +97,7 @@ impl RealEngine {
             config,
             ui_state,
             condition_id,
-            trading_state: Mutex::new(TradingState::Idle),
+            trading_state: Arc::new(Mutex::new(TradingState::Idle)),
         }
     }
 
@@ -216,6 +216,9 @@ impl RealEngine {
         let signer = self.signer.clone();
         let size = self.config.size;
 
+        // Клонируем Arc на trading_state для использования в async блоке
+        let trading_state = Arc::clone(&self.trading_state);
+
         tokio::spawn(async move {
             let price_dec: Decimal = format!("{:.2}", first_leg_price).parse().unwrap();
             let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
@@ -234,6 +237,12 @@ impl RealEngine {
                 Ok(response) => {
                     if !response.order_id.is_empty() {
                         info!("📝 Первая нога размещена: order_id={}", response.order_id);
+
+                        // Обновляем order_id в trading_state
+                        let mut state = trading_state.lock().unwrap();
+                        if let TradingState::WaitingFirstLeg { ref mut order_id, .. } = *state {
+                            *order_id = response.order_id;
+                        }
                     }
                 },
                 Err(e) => error!("❌ Ошибка размещения первой ноги: {}", e),
@@ -395,6 +404,7 @@ impl RealEngine {
         side: PolySide,
         asset_id: &str,
         trade_owner: Option<Uuid>,
+        taker_order_id: Option<String>,
     ) {
         // ПРОВЕРКА 1: trade_owner должен совпадать с нашим API key
         let owner_matches = trade_owner.map_or(false, |owner| owner == self.our_api_key);
@@ -467,27 +477,25 @@ impl RealEngine {
         // Если лимитка пересекла спред и исполнилась как тейкер,
         // мы должны распознать это как часть стратегии
         if is_buy {
-            self.handle_taker_fill_for_strategy(is_up, price, size);
+            if let Some(ref order_id) = taker_order_id {
+                self.handle_taker_fill_for_strategy(order_id, is_up, price, size);
+            }
         }
     }
 
     /// Обработка taker fill в контексте стратегии
-    /// Если мы в WaitingFirstLeg и taker fill соответствует первой ноге,
+    /// Если мы в WaitingFirstLeg и taker_order_id совпадает с first leg order_id,
     /// переходим в SearchingSecondLeg
-    fn handle_taker_fill_for_strategy(&self, is_up: bool, price: f64, size: f64) {
+    fn handle_taker_fill_for_strategy(&self, taker_order_id: &str, is_up: bool, price: f64, size: f64) {
         let mut state = self.trading_state.lock().unwrap();
 
         match &*state {
-            TradingState::WaitingFirstLeg { is_up: expected_is_up, price: expected_price, size: expected_size, .. } => {
-                // Проверяем, что taker fill соответствует нашей первой ноге
-                // (та же сторона, близкая цена и размер)
-                if *expected_is_up == is_up
-                    && (price - *expected_price).abs() < 0.03  // Цена может немного отличаться
-                    && (size - *expected_size).abs() < 0.1    // Размер должен примерно совпадать
-                {
-                    info!("🔄 TAKER FILL = ПЕРВАЯ НОГА! {} @ {:.2} size={:.2}",
+            TradingState::WaitingFirstLeg { order_id: first_leg_order_id, .. } => {
+                // Сравниваем по order_id - 100% уникальный идентификатор
+                if taker_order_id == first_leg_order_id {
+                    info!("🔄 TAKER FILL = ПЕРВАЯ НОГА! order_id={}", taker_order_id);
+                    info!("   {} @ {:.2} size={:.2} → SearchingSecondLeg",
                         if is_up { "UP" } else { "DOWN" }, price, size);
-                    info!("   Переходим в SearchingSecondLeg");
 
                     let first_leg_price = price;
                     let first_leg_is_up = is_up;

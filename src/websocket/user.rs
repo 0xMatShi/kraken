@@ -66,6 +66,7 @@ impl UserStream {
                     let size: f64 = trade.size.to_f64().unwrap_or(0.0);
                     let asset_id = trade.asset_id.to_string();
                     let trade_owner = trade.trade_owner;
+                    let taker_order_id = trade.taker_order_id.clone();
 
                     self.engine.handle_ws_trade(
                         trade_id,
@@ -74,6 +75,7 @@ impl UserStream {
                         trade.side,
                         &asset_id,
                         trade_owner,
+                        taker_order_id,
                     );
                 }
                 Ok(WsMessage::Order(order)) => {
