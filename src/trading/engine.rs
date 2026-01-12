@@ -270,7 +270,7 @@ impl RealEngine {
             prices.up_ask
         };
 
-        // Проверяем условие хеджа: first_leg_price + opposite_ask >= 1.02
+        // Проверяем условие хеджа: first_leg_price + opposite_ask >= 1.04
         if opposite_ask > 0.0 && (first_leg_price + opposite_ask) >= 1.04 {
             info!("🚨 ХЕДЖ УСЛОВИЕ! Первая нога: {:.2} + Ask: {:.2} = {:.2} >= 1.04",
                 first_leg_price, opposite_ask, first_leg_price + opposite_ask);
