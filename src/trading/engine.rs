@@ -394,7 +394,7 @@ impl RealEngine {
     /// Размещаем лимитку второй ноги
     fn place_second_leg(&self, first_leg_price: f64, first_leg_is_up: bool, first_leg_size: f64) {
         // Цена второй ноги: 0.99 - first_leg_price
-        let second_leg_price = Self::round_price(0.98 - first_leg_price);
+        let second_leg_price = Self::round_price(0.99 - first_leg_price);
         let second_leg_is_up = !first_leg_is_up;
 
         if second_leg_price < 0.01 || second_leg_price > 0.99 {
