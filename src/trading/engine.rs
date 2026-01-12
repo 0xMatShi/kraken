@@ -182,9 +182,9 @@ impl RealEngine {
         }
 
         // Определяем сторону для первой ноги: bid > 0.50
-        let (first_leg_is_up, first_leg_price) = if prices.up_bid > 0.60 {
+        let (first_leg_is_up, first_leg_price) = if prices.up_bid > 0.65 {
             (true, Self::round_price(prices.up_bid + 0.01))
-        } else if prices.down_bid > 0.60 {
+        } else if prices.down_bid > 0.65 {
             (false, Self::round_price(prices.down_bid + 0.01))
         } else {
             // Обе стороны <= 0.50, не размещаем
