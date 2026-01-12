@@ -52,14 +52,13 @@ impl Default for TradingState {
     }
 }
 
-// === РЕЗЕРВАЦИЯ ЦЕН ОТКЛЮЧЕНА ===
-// /// Ключ для бронирования цены (is_up, price_cents)
-// /// price_cents = (price * 100).round() as i32
-// type ReservedPriceKey = (bool, i32);
-//
-// fn price_to_cents(price: f64) -> i32 {
-//     (price * 100.0).round() as i32
-// }
+/// Ключ для бронирования цены (is_up, price_cents)
+/// price_cents = (price * 100).round() as i32
+type ReservedPriceKey = (bool, i32);
+
+fn price_to_cents(price: f64) -> i32 {
+    (price * 100.0).round() as i32
+}
 
 pub struct RealEngine {
     portfolio: Mutex<Portfolio>,
@@ -82,9 +81,8 @@ pub struct RealEngine {
     up_threads: Vec<Arc<Mutex<TradingState>>>,
     // DOWN-потоки: первая нога всегда DOWN, вторая нога UP
     down_threads: Vec<Arc<Mutex<TradingState>>>,
-    // === РЕЗЕРВАЦИЯ ЦЕН ОТКЛЮЧЕНА ===
     // Забронированные цены: (is_up, price_cents) - потоки не дублируют позиции
-    // reserved_prices: Mutex<HashSet<ReservedPriceKey>>,
+    reserved_prices: Mutex<HashSet<ReservedPriceKey>>,
 }
 
 impl RealEngine {
@@ -129,8 +127,7 @@ impl RealEngine {
             condition_id,
             up_threads,
             down_threads,
-            // === РЕЗЕРВАЦИЯ ЦЕН ОТКЛЮЧЕНА ===
-            // reserved_prices: Mutex::new(HashSet::new()),
+            reserved_prices: Mutex::new(HashSet::new()),
         }
     }
 
@@ -245,22 +242,21 @@ impl RealEngine {
             return;
         }
 
-        // === РЕЗЕРВАЦИЯ ЦЕН ОТКЛЮЧЕНА ===
         // Проверяем, не забронирована ли эта цена другим потоком
-        // let price_key: ReservedPriceKey = (first_leg_is_up, price_to_cents(first_leg_price));
-        // {
-        //     let reserved = self.reserved_prices.lock().unwrap();
-        //     if reserved.contains(&price_key) {
-        //         // Цена уже забронирована - пропускаем
-        //         return;
-        //     }
-        // }
-        //
-        // // Бронируем цену перед размещением
-        // {
-        //     let mut reserved = self.reserved_prices.lock().unwrap();
-        //     reserved.insert(price_key);
-        // }
+        let price_key: ReservedPriceKey = (first_leg_is_up, price_to_cents(first_leg_price));
+        {
+            let reserved = self.reserved_prices.lock().unwrap();
+            if reserved.contains(&price_key) {
+                // Цена уже забронирована - пропускаем
+                return;
+            }
+        }
+
+        // Бронируем цену перед размещением
+        {
+            let mut reserved = self.reserved_prices.lock().unwrap();
+            reserved.insert(price_key);
+        }
 
         let stream_type = if is_up_side { "UP" } else { "DOWN" };
         info!("🎯 {}-поток #{} | Спред 2с найден! Размещаем первую ногу: {} @ {:.2} (bid={:.2})",
@@ -943,19 +939,18 @@ impl RealEngine {
                     self.place_second_leg(filled_price, filled_is_up, filled_size);
                 }
             }
-            TradingState::SearchingSecondLeg { second_leg_order_id: Some(second_order_id), first_leg_price: _, first_leg_is_up: _, .. } => {
+            TradingState::SearchingSecondLeg { second_leg_order_id: Some(second_order_id), first_leg_price, first_leg_is_up, .. } => {
                 if order_id == second_order_id {
                     // Вторая нога заполнена → возвращаемся в Idle
                     info!("✅ {} | ВТОРАЯ НОГА ЗАПОЛНЕНА! Пара завершена. Возвращаемся в Idle", stream_name);
 
-                    // === РЕЗЕРВАЦИЯ ЦЕН ОТКЛЮЧЕНА ===
                     // Освобождаем забронированную цену первой ноги
-                    // let price_key: ReservedPriceKey = (*first_leg_is_up, price_to_cents(*first_leg_price));
-                    // {
-                    //     let mut reserved = self.reserved_prices.lock().unwrap();
-                    //     reserved.remove(&price_key);
-                    // }
-                    // info!("🔓 {} | Цена {:.2} {} освобождена", stream_name, first_leg_price, if *first_leg_is_up { "UP" } else { "DOWN" });
+                    let price_key: ReservedPriceKey = (*first_leg_is_up, price_to_cents(*first_leg_price));
+                    {
+                        let mut reserved = self.reserved_prices.lock().unwrap();
+                        reserved.remove(&price_key);
+                    }
+                    info!("🔓 {} | Цена {:.2} {} освобождена", stream_name, first_leg_price, if *first_leg_is_up { "UP" } else { "DOWN" });
 
                     *state = TradingState::Idle;
                 }
@@ -987,15 +982,14 @@ impl RealEngine {
         let mut state = trading_state.lock().unwrap();
 
         match &*state {
-            TradingState::WaitingFirstLeg { order_id: first_order_id, price: _, is_up: _, .. } => {
+            TradingState::WaitingFirstLeg { order_id: first_order_id, price, is_up, .. } => {
                 if order_id == first_order_id {
                     // Первая нога отменена → возвращаемся в Idle
-                    // === РЕЗЕРВАЦИЯ ЦЕН ОТКЛЮЧЕНА ===
-                    // let price_key: ReservedPriceKey = (*is_up, price_to_cents(*price));
-                    // {
-                    //     let mut reserved = self.reserved_prices.lock().unwrap();
-                    //     reserved.remove(&price_key);
-                    // }
+                    let price_key: ReservedPriceKey = (*is_up, price_to_cents(*price));
+                    {
+                        let mut reserved = self.reserved_prices.lock().unwrap();
+                        reserved.remove(&price_key);
+                    }
                     info!("⚠️ {} | Первая нога отменена. Возвращаемся в Idle", stream_name);
                     *state = TradingState::Idle;
                 }
