@@ -256,7 +256,7 @@ impl RealEngine {
             let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
             // Экспирация: now + 60 + 10 секунд (чтобы ордер не висел вечно если цена убежит)
-            let expiration = Utc::now() + chrono::Duration::seconds(60 + 5);
+            let expiration = Utc::now() + chrono::Duration::seconds(60 + 3);
 
             let order = client.limit_order()
                 .token_id(token_id.as_ref())
