@@ -271,8 +271,8 @@ impl RealEngine {
         };
 
         // Проверяем условие хеджа: first_leg_price + opposite_ask >= 1.02
-        if opposite_ask > 0.0 && (first_leg_price + opposite_ask) >= 1.02 {
-            info!("🚨 ХЕДЖ УСЛОВИЕ! Первая нога: {:.2} + Ask: {:.2} = {:.2} >= 1.02",
+        if opposite_ask > 0.0 && (first_leg_price + opposite_ask) >= 1.04 {
+            info!("🚨 ХЕДЖ УСЛОВИЕ! Первая нога: {:.2} + Ask: {:.2} = {:.2} >= 1.04",
                 first_leg_price, opposite_ask, first_leg_price + opposite_ask);
 
             // Отправляем taker хедж
