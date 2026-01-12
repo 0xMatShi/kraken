@@ -68,8 +68,11 @@ pub struct RealEngine {
     ui_state: UiState,
     // Condition ID для клейма наград
     condition_id: Option<String>,
-    // Состояние торговой стратегии (Arc для передачи в async блоки)
-    trading_state: Arc<Mutex<TradingState>>,
+    // Два независимых потока стратегии:
+    // UP-поток: первая нога = UP, вторая нога = DOWN
+    up_trading_state: Arc<Mutex<TradingState>>,
+    // DOWN-поток: первая нога = DOWN, вторая нога = UP
+    down_trading_state: Arc<Mutex<TradingState>>,
 }
 
 impl RealEngine {
@@ -97,7 +100,9 @@ impl RealEngine {
             config,
             ui_state,
             condition_id,
-            trading_state: Arc::new(Mutex::new(TradingState::Idle)),
+            // Два независимых потока - каждый в своём Idle
+            up_trading_state: Arc::new(Mutex::new(TradingState::Idle)),
+            down_trading_state: Arc::new(Mutex::new(TradingState::Idle)),
         }
     }
 
@@ -147,29 +152,47 @@ impl RealEngine {
             return;
         }
 
-        // Получаем текущее состояние стратегии
-        let state = {
-            self.trading_state.lock().unwrap().clone()
+        // === UP-ПОТОК: первая нога UP, вторая нога DOWN ===
+        let up_state = {
+            self.up_trading_state.lock().unwrap().clone()
         };
 
-        match state {
+        match up_state {
             TradingState::Idle => {
-                // Ждём спред 2с (up_bid + down_bid == 0.98)
-                self.try_place_first_leg(&prices);
+                // Ищем возможность купить UP (если up_bid > 0.65)
+                self.try_place_first_leg_for_stream(&prices, true); // true = UP stream
             }
             TradingState::WaitingFirstLeg { .. } => {
-                // Первая нога размещена, ждём заполнения через WebSocket
-                // Ничего не делаем в tick
+                // Ждём заполнения первой ноги UP через WebSocket
             }
             TradingState::SearchingSecondLeg { .. } => {
-                // Хеджирование отключено - просто ждём заполнения второй ноги
-                // self.check_hedge_opportunity(&prices, first_leg_price, first_leg_is_up, first_leg_size, second_leg_order_id);
+                // Ждём заполнения второй ноги DOWN
+            }
+        }
+
+        // === DOWN-ПОТОК: первая нога DOWN, вторая нога UP ===
+        let down_state = {
+            self.down_trading_state.lock().unwrap().clone()
+        };
+
+        match down_state {
+            TradingState::Idle => {
+                // Ищем возможность купить DOWN (если down_bid > 0.65)
+                self.try_place_first_leg_for_stream(&prices, false); // false = DOWN stream
+            }
+            TradingState::WaitingFirstLeg { .. } => {
+                // Ждём заполнения первой ноги DOWN через WebSocket
+            }
+            TradingState::SearchingSecondLeg { .. } => {
+                // Ждём заполнения второй ноги UP
             }
         }
     }
 
-    /// Пытаемся разместить первую ногу при спреде 2с
-    fn try_place_first_leg(&self, prices: &MarketPrices) {
+    /// Пытаемся разместить первую ногу для конкретного потока
+    /// is_up_stream = true → UP-поток (первая нога UP, вторая DOWN)
+    /// is_up_stream = false → DOWN-поток (первая нога DOWN, вторая UP)
+    fn try_place_first_leg_for_stream(&self, prices: &MarketPrices, is_up_stream: bool) {
         // Проверяем валидность цен
         if prices.up_bid < 0.01 || prices.down_bid < 0.01 {
             return;
@@ -181,26 +204,38 @@ impl RealEngine {
             return; // Спред не 2с
         }
 
-        // Определяем сторону для первой ноги: bid > 0.50
-        let (first_leg_is_up, first_leg_price) = if prices.up_bid > 0.65 {
-            (true, Self::round_price(prices.up_bid + 0.01))
-        } else if prices.down_bid > 0.65 {
-            (false, Self::round_price(prices.down_bid + 0.01))
+        // Определяем цену первой ноги в зависимости от потока
+        let (first_leg_is_up, first_leg_price, bid_price) = if is_up_stream {
+            // UP-поток: покупаем UP только если 0.65 < up_bid < 0.95
+            if prices.up_bid <= 0.65 || prices.up_bid >= 0.95 {
+                return;
+            }
+            (true, Self::round_price(prices.up_bid + 0.01), prices.up_bid)
         } else {
-            // Обе стороны <= 0.50, не размещаем
-            return;
+            // DOWN-поток: покупаем DOWN только если 0.65 < down_bid < 0.95
+            if prices.down_bid <= 0.65 || prices.down_bid >= 0.95 {
+                return;
+            }
+            (false, Self::round_price(prices.down_bid + 0.01), prices.down_bid)
         };
 
         if first_leg_price < 0.01 || first_leg_price > 0.99 {
             return;
         }
 
-        info!("🎯 Спред 2с найден! Размещаем первую ногу: {} @ {:.2}",
-            if first_leg_is_up { "UP" } else { "DOWN" }, first_leg_price);
+        let stream_name = if is_up_stream { "UP-поток" } else { "DOWN-поток" };
+        info!("🎯 {} | Спред 2с найден! Размещаем первую ногу: {} @ {:.2} (bid={:.2})",
+            stream_name, if first_leg_is_up { "UP" } else { "DOWN" }, first_leg_price, bid_price);
+
+        // Выбираем правильный trading_state для этого потока
+        let trading_state = if is_up_stream {
+            Arc::clone(&self.up_trading_state)
+        } else {
+            Arc::clone(&self.down_trading_state)
+        };
 
         // Переходим в состояние ожидания сразу, чтобы не дублировать ордера
-        // order_id будет обновлён при получении PLACEMENT через WebSocket
-        *self.trading_state.lock().unwrap() = TradingState::WaitingFirstLeg {
+        *trading_state.lock().unwrap() = TradingState::WaitingFirstLeg {
             order_id: String::new(), // Заполнится при PLACEMENT
             is_up: first_leg_is_up,
             price: first_leg_price,
@@ -215,9 +250,6 @@ impl RealEngine {
         let client = self.client.clone();
         let signer = self.signer.clone();
         let size = self.config.size;
-
-        // Клонируем Arc на trading_state для использования в async блоке
-        let trading_state = Arc::clone(&self.trading_state);
 
         tokio::spawn(async move {
             let price_dec: Decimal = format!("{:.2}", first_leg_price).parse().unwrap();
@@ -489,31 +521,48 @@ impl RealEngine {
     }
 
     /// Обработка taker fill в контексте стратегии
-    /// Если мы в WaitingFirstLeg и taker fill совпадает с первой ногой,
-    /// переходим в SearchingSecondLeg
+    /// Проверяем ОБА потока - UP и DOWN
     fn handle_taker_fill_for_strategy(&self, taker_order_id: &str, is_up: bool, price: f64, size: f64) {
-        let mut state = self.trading_state.lock().unwrap();
+        // Проверяем UP-поток (первая нога = UP)
+        if is_up {
+            self.check_first_leg_fill_for_stream(&self.up_trading_state, taker_order_id, is_up, price, size, "UP-поток");
+        }
+        // Проверяем DOWN-поток (первая нога = DOWN)
+        if !is_up {
+            self.check_first_leg_fill_for_stream(&self.down_trading_state, taker_order_id, is_up, price, size, "DOWN-поток");
+        }
+    }
+
+    /// Проверяем заполнение первой ноги для конкретного потока
+    fn check_first_leg_fill_for_stream(
+        &self,
+        trading_state: &Arc<Mutex<TradingState>>,
+        taker_order_id: &str,
+        is_up: bool,
+        price: f64,
+        size: f64,
+        stream_name: &str,
+    ) {
+        let mut state = trading_state.lock().unwrap();
 
         match &*state {
             TradingState::WaitingFirstLeg { order_id: first_leg_order_id, is_up: expected_is_up, price: expected_price, size: expected_size } => {
                 // ВАЖНО: WebSocket событие может прийти раньше, чем REST API вернет order_id
-                // Если order_id ещё пуст - сравниваем по атрибутам (is_up, price, size)
                 let is_our_first_leg = if first_leg_order_id.is_empty() {
                     // order_id ещё не получен от REST API - сравниваем по атрибутам
                     let matches = is_up == *expected_is_up &&
-                        (price - expected_price).abs() < 0.02 &&  // Погрешность для цены
-                        (size - expected_size).abs() < 0.01;
+                        (price - *expected_price).abs() < 0.02 &&
+                        (size - *expected_size).abs() < 0.01;
                     if matches {
-                        info!("🔄 TAKER FILL распознан по атрибутам (order_id ещё не получен)");
+                        info!("🔄 {} | TAKER FILL распознан по атрибутам (order_id ещё не получен)", stream_name);
                     }
                     matches
                 } else {
-                    // order_id известен - точное сравнение
                     taker_order_id == first_leg_order_id
                 };
 
                 if is_our_first_leg {
-                    info!("🔄 TAKER FILL = ПЕРВАЯ НОГА! order_id={}", taker_order_id);
+                    info!("🔄 {} | TAKER FILL = ПЕРВАЯ НОГА! order_id={}", stream_name, taker_order_id);
                     info!("   {} @ {:.2} size={:.2} → SearchingSecondLeg",
                         if is_up { "UP" } else { "DOWN" }, price, size);
 
@@ -533,8 +582,40 @@ impl RealEngine {
                     self.place_second_leg(first_leg_price, first_leg_is_up, first_leg_size);
                 }
             }
-            _ => {
-                // В других состояниях taker fill не влияет на стратегию
+            _ => {}
+        }
+    }
+
+    /// Обновляем placement для конкретного потока
+    /// is_first_leg = true → проверяем первую ногу, false → проверяем вторую ногу
+    fn update_placement_for_stream(
+        &self,
+        trading_state: &Arc<Mutex<TradingState>>,
+        order_id: &str,
+        price: f64,
+        token_str: &str,
+        is_first_leg: bool,
+    ) {
+        let mut state = trading_state.lock().unwrap();
+
+        if is_first_leg {
+            // Проверяем, это ли первая нога
+            if let TradingState::WaitingFirstLeg { order_id: ref mut first_order_id, .. } = *state {
+                if first_order_id.is_empty() {
+                    info!("🎯 Первая нога подтверждена: {} @ {:.2}", token_str, price);
+                    *first_order_id = order_id.to_string();
+                }
+            }
+        } else {
+            // Проверяем, это ли вторая нога
+            if let TradingState::SearchingSecondLeg { first_leg_price, first_leg_is_up, first_leg_size, second_leg_order_id: None } = *state {
+                info!("📝 Вторая нога подтверждена: {} @ {:.2}", token_str, price);
+                *state = TradingState::SearchingSecondLeg {
+                    first_leg_price,
+                    first_leg_is_up,
+                    first_leg_size,
+                    second_leg_order_id: Some(order_id.to_string()),
+                };
             }
         }
     }
@@ -605,24 +686,23 @@ impl RealEngine {
                 info!("📝 MAKER PLACED: {} {} @ {:.3}",
                     side_str, token_str, price);
 
-                // === ЛОГИКА СОСТОЯНИЯ СТРАТЕГИИ ===
-                let mut state = self.trading_state.lock().unwrap();
+                // === ЛОГИКА СОСТОЯНИЯ СТРАТЕГИИ ДЛЯ ОБОИХ ПОТОКОВ ===
+                // UP-поток: первая нога UP, вторая нога DOWN
+                if is_up {
+                    // Это может быть первая нога UP-потока
+                    self.update_placement_for_stream(&self.up_trading_state, &order_id, price, token_str, true);
+                } else {
+                    // Это может быть вторая нога UP-потока (DOWN)
+                    self.update_placement_for_stream(&self.up_trading_state, &order_id, price, token_str, false);
+                }
 
-                // Если мы в WaitingFirstLeg с пустым order_id - обновляем order_id
-                if let TradingState::WaitingFirstLeg { order_id: ref mut first_order_id, .. } = *state {
-                    if first_order_id.is_empty() {
-                        info!("🎯 Первая нога подтверждена: {} @ {:.2}", token_str, price);
-                        *first_order_id = order_id.clone();
-                    }
-                } else if let TradingState::SearchingSecondLeg { first_leg_price, first_leg_is_up, first_leg_size, second_leg_order_id: None } = &*state {
-                    // Это размещение второй ноги - сохраняем её order_id
-                    info!("📝 Вторая нога подтверждена: {} @ {:.2}", token_str, price);
-                    *state = TradingState::SearchingSecondLeg {
-                        first_leg_price: *first_leg_price,
-                        first_leg_is_up: *first_leg_is_up,
-                        first_leg_size: *first_leg_size,
-                        second_leg_order_id: Some(order_id.clone()),
-                    };
+                // DOWN-поток: первая нога DOWN, вторая нога UP
+                if !is_up {
+                    // Это может быть первая нога DOWN-потока
+                    self.update_placement_for_stream(&self.down_trading_state, &order_id, price, token_str, true);
+                } else {
+                    // Это может быть вторая нога DOWN-потока (UP)
+                    self.update_placement_for_stream(&self.down_trading_state, &order_id, price, token_str, false);
                 }
             }
             Some("UPDATE") => {
@@ -763,16 +843,35 @@ impl RealEngine {
         }
     }
 
-    /// Обработка полного заполнения ордера - переходы состояний
+    /// Обработка полного заполнения ордера - проверяем ОБА потока
     fn handle_order_fully_filled(&self, order_id: &str, filled_price: f64, filled_is_up: bool, filled_size: f64) {
-        let mut state = self.trading_state.lock().unwrap();
+        // Проверяем UP-поток
+        self.handle_order_fully_filled_for_stream(
+            &self.up_trading_state, order_id, filled_price, filled_is_up, filled_size, "UP-поток"
+        );
+        // Проверяем DOWN-поток
+        self.handle_order_fully_filled_for_stream(
+            &self.down_trading_state, order_id, filled_price, filled_is_up, filled_size, "DOWN-поток"
+        );
+    }
+
+    fn handle_order_fully_filled_for_stream(
+        &self,
+        trading_state: &Arc<Mutex<TradingState>>,
+        order_id: &str,
+        filled_price: f64,
+        filled_is_up: bool,
+        filled_size: f64,
+        stream_name: &str,
+    ) {
+        let mut state = trading_state.lock().unwrap();
 
         match &*state {
             TradingState::WaitingFirstLeg { order_id: first_order_id, .. } => {
                 if order_id == first_order_id {
                     // Первая нога заполнена → переходим в SearchingSecondLeg
-                    info!("✅ ПЕРВАЯ НОГА ЗАПОЛНЕНА! {} @ {:.2} size={:.2}",
-                        if filled_is_up { "UP" } else { "DOWN" }, filled_price, filled_size);
+                    info!("✅ {} | ПЕРВАЯ НОГА ЗАПОЛНЕНА! {} @ {:.2} size={:.2}",
+                        stream_name, if filled_is_up { "UP" } else { "DOWN" }, filled_price, filled_size);
 
                     *state = TradingState::SearchingSecondLeg {
                         first_leg_price: filled_price,
@@ -789,7 +888,7 @@ impl RealEngine {
             TradingState::SearchingSecondLeg { second_leg_order_id: Some(second_order_id), .. } => {
                 if order_id == second_order_id {
                     // Вторая нога заполнена → возвращаемся в Idle
-                    info!("✅ ВТОРАЯ НОГА ЗАПОЛНЕНА! Пара завершена. Возвращаемся в Idle");
+                    info!("✅ {} | ВТОРАЯ НОГА ЗАПОЛНЕНА! Пара завершена. Возвращаемся в Idle", stream_name);
                     *state = TradingState::Idle;
                 }
             }
@@ -797,22 +896,34 @@ impl RealEngine {
         }
     }
 
-    /// Обработка отмены ордера - переходы состояний
+    /// Обработка отмены ордера - проверяем ОБА потока
     fn handle_order_cancelled(&self, order_id: &str) {
-        let mut state = self.trading_state.lock().unwrap();
+        // Проверяем UP-поток
+        self.handle_order_cancelled_for_stream(&self.up_trading_state, order_id, "UP-поток");
+        // Проверяем DOWN-поток
+        self.handle_order_cancelled_for_stream(&self.down_trading_state, order_id, "DOWN-поток");
+    }
+
+    fn handle_order_cancelled_for_stream(
+        &self,
+        trading_state: &Arc<Mutex<TradingState>>,
+        order_id: &str,
+        stream_name: &str,
+    ) {
+        let mut state = trading_state.lock().unwrap();
 
         match &*state {
             TradingState::WaitingFirstLeg { order_id: first_order_id, .. } => {
                 if order_id == first_order_id {
                     // Первая нога отменена → возвращаемся в Idle
-                    info!("⚠️ Первая нога отменена. Возвращаемся в Idle");
+                    info!("⚠️ {} | Первая нога отменена. Возвращаемся в Idle", stream_name);
                     *state = TradingState::Idle;
                 }
             }
             TradingState::SearchingSecondLeg { second_leg_order_id: Some(second_order_id), first_leg_price, first_leg_is_up, first_leg_size } => {
                 if order_id == second_order_id {
-                    // Вторая нога отменена - продолжаем мониторить хедж без лимитки
-                    info!("⚠️ Вторая нога отменена. Продолжаем мониторить хедж");
+                    // Вторая нога отменена - сбрасываем second_leg_order_id
+                    info!("⚠️ {} | Вторая нога отменена", stream_name);
                     *state = TradingState::SearchingSecondLeg {
                         first_leg_price: *first_leg_price,
                         first_leg_is_up: *first_leg_is_up,
