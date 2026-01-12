@@ -18,6 +18,9 @@ pub struct TradingConfig {
 
     /// Порог перекоса для хеджирования (количество акций)
     pub hedge_size: f64,
+
+    /// Количество одновременных потоков (максимум активных первых ног)
+    pub threads: usize,
 }
 
 impl Config {
