@@ -503,7 +503,7 @@ fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio, tradin
     // Формат: filled/placed shares @ avg  $spent  PnL
     let mut up_line = vec![
         Span::styled("  UP: ", Style::default().fg(Color::Green)),
-        Span::raw(format!("{:.1}/{:.1} shares @ avg {:.3}", portfolio.up_shares, portfolio.up_total_placed, up_avg)),
+        Span::raw(format!("{:.1} shares @ avg {:.3}", portfolio.up_shares, up_avg)),
         Span::styled(format!("  ${:.2}", portfolio.up_spent), Style::default().fg(Color::Gray)),
     ];
     if portfolio.up_shares > 0.0 {
@@ -512,7 +512,7 @@ fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio, tradin
 
     let mut down_line = vec![
         Span::styled("DOWN: ", Style::default().fg(Color::Red)),
-        Span::raw(format!("{:.1}/{:.1} shares @ avg {:.3}", portfolio.down_shares, portfolio.down_total_placed, down_avg)),
+        Span::raw(format!("{:.1} shares @ avg {:.3}", portfolio.down_shares, down_avg)),
         Span::styled(format!("  ${:.2}", portfolio.down_spent), Style::default().fg(Color::Gray)),
     ];
     if portfolio.down_shares > 0.0 {
