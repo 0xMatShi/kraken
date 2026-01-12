@@ -207,13 +207,13 @@ impl RealEngine {
         // Определяем цену первой ноги в зависимости от потока
         let (first_leg_is_up, first_leg_price, bid_price) = if is_up_stream {
             // UP-поток: покупаем UP только если 0.65 < up_bid < 0.95
-            if prices.up_bid <= 0.65 || prices.up_bid >= 0.95 {
+            if prices.up_bid <= 0.60 || prices.up_bid >= 0.95 {
                 return;
             }
             (true, Self::round_price(prices.up_bid + 0.01), prices.up_bid)
         } else {
             // DOWN-поток: покупаем DOWN только если 0.65 < down_bid < 0.95
-            if prices.down_bid <= 0.65 || prices.down_bid >= 0.95 {
+            if prices.down_bid <= 0.60 || prices.down_bid >= 0.95 {
                 return;
             }
             (false, Self::round_price(prices.down_bid + 0.01), prices.down_bid)
