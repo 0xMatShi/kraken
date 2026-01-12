@@ -12,3 +12,4 @@ price_tracker.json
 /analyze
 claim.json
 .venv
+tmpclaude-*-cwd
