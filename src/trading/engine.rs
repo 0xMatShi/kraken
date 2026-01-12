@@ -161,9 +161,9 @@ impl RealEngine {
                 // Первая нога размещена, ждём заполнения через WebSocket
                 // Ничего не делаем в tick
             }
-            TradingState::SearchingSecondLeg { first_leg_price, first_leg_is_up, first_leg_size, second_leg_order_id } => {
-                // Мониторим ask противоположной стороны для хеджа
-                self.check_hedge_opportunity(&prices, first_leg_price, first_leg_is_up, first_leg_size, second_leg_order_id);
+            TradingState::SearchingSecondLeg { .. } => {
+                // Хеджирование отключено - просто ждём заполнения второй ноги
+                // self.check_hedge_opportunity(&prices, first_leg_price, first_leg_is_up, first_leg_size, second_leg_order_id);
             }
         }
     }
@@ -182,9 +182,9 @@ impl RealEngine {
         }
 
         // Определяем сторону для первой ноги: bid > 0.50
-        let (first_leg_is_up, first_leg_price) = if prices.up_bid > 0.50 {
+        let (first_leg_is_up, first_leg_price) = if prices.up_bid > 0.60 {
             (true, Self::round_price(prices.up_bid + 0.01))
-        } else if prices.down_bid > 0.50 {
+        } else if prices.down_bid > 0.60 {
             (false, Self::round_price(prices.down_bid + 0.01))
         } else {
             // Обе стороны <= 0.50, не размещаем
@@ -254,85 +254,86 @@ impl RealEngine {
         });
     }
 
-    /// Проверяем возможность хеджа и управляем второй ногой
-    fn check_hedge_opportunity(
-        &self,
-        prices: &MarketPrices,
-        first_leg_price: f64,
-        first_leg_is_up: bool,
-        first_leg_size: f64,
-        second_leg_order_id: Option<String>,
-    ) {
-        // Получаем ask противоположной стороны
-        let opposite_ask = if first_leg_is_up {
-            prices.down_ask
-        } else {
-            prices.up_ask
-        };
-
-        // Проверяем условие хеджа: first_leg_price + opposite_ask >= 1.04
-        if opposite_ask > 0.0 && (first_leg_price + opposite_ask) >= 1.04 {
-            info!("🚨 ХЕДЖ УСЛОВИЕ! Первая нога: {:.2} + Ask: {:.2} = {:.2} >= 1.04",
-                first_leg_price, opposite_ask, first_leg_price + opposite_ask);
-
-            // Отправляем taker хедж
-            self.execute_hedge_taker(first_leg_is_up, first_leg_size);
-
-            // Отменяем лимитку второй ноги если она есть
-            if let Some(order_id) = second_leg_order_id {
-                self.cancel_order(order_id);
-            }
-
-            // Возвращаемся в Idle
-            *self.trading_state.lock().unwrap() = TradingState::Idle;
-            return;
-        }
-    }
-
-    /// Выполняем taker хедж сделку
-    fn execute_hedge_taker(&self, first_leg_is_up: bool, size: f64) {
-        // Хедж на противоположную сторону
-        let hedge_is_up = !first_leg_is_up;
-        let token_id = if hedge_is_up {
-            Arc::clone(&self.up_token)
-        } else {
-            Arc::clone(&self.down_token)
-        };
-        let client = self.client.clone();
-        let signer = self.signer.clone();
-
-        info!("🎯 Отправляем TAKER HEDGE: {} size={:.2}",
-            if hedge_is_up { "UP" } else { "DOWN" }, size);
-
-        tokio::spawn(async move {
-            let price_dec: Decimal = "0.99".parse().unwrap();
-            let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
-
-            let order = client.limit_order()
-                .token_id(token_id.as_ref())
-                .price(price_dec)
-                .size(size_dec)
-                .side(PolySide::Buy)
-                .order_type(OrderType::GTC) // Fill or Kill для taker
-                .build().await.unwrap();
-
-            let signed = client.sign(&signer, order).await.unwrap();
-
-            match client.post_order(signed).await {
-                Ok(response) => {
-                    if !response.order_id.is_empty() {
-                        info!("✅ HEDGE TAKER отправлен: order_id={}", response.order_id);
-                    }
-                },
-                Err(e) => error!("❌ Ошибка отправки HEDGE TAKER: {}", e),
-            }
-        });
-    }
+    // === ХЕДЖИРОВАНИЕ ОТКЛЮЧЕНО ===
+    // /// Проверяем возможность хеджа и управляем второй ногой
+    // fn check_hedge_opportunity(
+    //     &self,
+    //     prices: &MarketPrices,
+    //     first_leg_price: f64,
+    //     first_leg_is_up: bool,
+    //     first_leg_size: f64,
+    //     second_leg_order_id: Option<String>,
+    // ) {
+    //     // Получаем ask противоположной стороны
+    //     let opposite_ask = if first_leg_is_up {
+    //         prices.down_ask
+    //     } else {
+    //         prices.up_ask
+    //     };
+    //
+    //     // Проверяем условие хеджа: first_leg_price + opposite_ask >= 1.05
+    //     if opposite_ask > 0.0 && (first_leg_price + opposite_ask) >= 1.05 {
+    //         info!("🚨 ХЕДЖ УСЛОВИЕ! Первая нога: {:.2} + Ask: {:.2} = {:.2} >= 1.05",
+    //             first_leg_price, opposite_ask, first_leg_price + opposite_ask);
+    //
+    //         // Отправляем taker хедж
+    //         self.execute_hedge_taker(first_leg_is_up, first_leg_size);
+    //
+    //         // Отменяем лимитку второй ноги если она есть
+    //         if let Some(order_id) = second_leg_order_id {
+    //             self.cancel_order(order_id);
+    //         }
+    //
+    //         // Возвращаемся в Idle
+    //         *self.trading_state.lock().unwrap() = TradingState::Idle;
+    //         return;
+    //     }
+    // }
+    //
+    // /// Выполняем taker хедж сделку
+    // fn execute_hedge_taker(&self, first_leg_is_up: bool, size: f64) {
+    //     // Хедж на противоположную сторону
+    //     let hedge_is_up = !first_leg_is_up;
+    //     let token_id = if hedge_is_up {
+    //         Arc::clone(&self.up_token)
+    //     } else {
+    //         Arc::clone(&self.down_token)
+    //     };
+    //     let client = self.client.clone();
+    //     let signer = self.signer.clone();
+    //
+    //     info!("🎯 Отправляем TAKER HEDGE: {} size={:.2}",
+    //         if hedge_is_up { "UP" } else { "DOWN" }, size);
+    //
+    //     tokio::spawn(async move {
+    //         let price_dec: Decimal = "0.99".parse().unwrap();
+    //         let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
+    //
+    //         let order = client.limit_order()
+    //             .token_id(token_id.as_ref())
+    //             .price(price_dec)
+    //             .size(size_dec)
+    //             .side(PolySide::Buy)
+    //             .order_type(OrderType::GTC) // Fill or Kill для taker
+    //             .build().await.unwrap();
+    //
+    //         let signed = client.sign(&signer, order).await.unwrap();
+    //
+    //         match client.post_order(signed).await {
+    //             Ok(response) => {
+    //                 if !response.order_id.is_empty() {
+    //                     info!("✅ HEDGE TAKER отправлен: order_id={}", response.order_id);
+    //                 }
+    //             },
+    //             Err(e) => error!("❌ Ошибка отправки HEDGE TAKER: {}", e),
+    //         }
+    //     });
+    // }
 
     /// Размещаем лимитку второй ноги
     fn place_second_leg(&self, first_leg_price: f64, first_leg_is_up: bool, first_leg_size: f64) {
-        // Цена второй ноги: 0.98 - first_leg_price
-        let second_leg_price = Self::round_price(0.98 - first_leg_price);
+        // Цена второй ноги: 0.99 - first_leg_price
+        let second_leg_price = Self::round_price(0.99 - first_leg_price);
         let second_leg_is_up = !first_leg_is_up;
 
         if second_leg_price < 0.01 || second_leg_price > 0.99 {
@@ -377,25 +378,25 @@ impl RealEngine {
         });
     }
 
-    /// Отменяем ордер по ID
-    fn cancel_order(&self, order_id: String) {
-        let client = self.client.clone();
-
-        info!("🚫 Отменяем ордер: {}", order_id);
-
-        tokio::spawn(async move {
-            match client.cancel_order(&order_id).await {
-                Ok(result) => {
-                    if !result.canceled.is_empty() {
-                        info!("✅ Ордер отменён: {}", order_id);
-                    } else {
-                        warn!("⚠️ Ордер не был отменён: {}", order_id);
-                    }
-                },
-                Err(e) => error!("❌ Ошибка отмены ордера {}: {}", order_id, e),
-            }
-        });
-    }
+    // /// Отменяем ордер по ID (используется для хеджирования)
+    // fn cancel_order(&self, order_id: String) {
+    //     let client = self.client.clone();
+    //
+    //     info!("🚫 Отменяем ордер: {}", order_id);
+    //
+    //     tokio::spawn(async move {
+    //         match client.cancel_order(&order_id).await {
+    //             Ok(result) => {
+    //                 if !result.canceled.is_empty() {
+    //                     info!("✅ Ордер отменён: {}", order_id);
+    //                 } else {
+    //                     warn!("⚠️ Ордер не был отменён: {}", order_id);
+    //                 }
+    //             },
+    //             Err(e) => error!("❌ Ошибка отмены ордера {}: {}", order_id, e),
+    //         }
+    //     });
+    // }
 
     // Trade события = TAKER сделки (market orders FAK)
     // Это подтверждение исполнения taker-hedge и taker-emergency ордеров
