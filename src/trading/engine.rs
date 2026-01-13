@@ -422,7 +422,7 @@ impl RealEngine {
                     prices.up_bid    // Если первая нога DOWN, вторая нога UP
                 };
                 // Размещаем на 0.01 ниже best_bid
-                Self::round_price(bid - 0.03)
+                Self::round_price(bid)
             } else {    
                 warn!("⚠️ {} | Актуальные цены недоступны, пропускаем размещение второй ноги", stream_name);
                 return;
