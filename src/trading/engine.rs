@@ -405,6 +405,12 @@ impl RealEngine {
     /// Размещаем лимитку второй ноги по актуальному best_bid
     /// remaining_size - размер который нужно разместить (first_leg_size - second_leg_filled)
     fn place_second_leg(&self, first_leg_is_up: bool, remaining_size: f64, trading_state: &Arc<Mutex<TradingState>>, stream_name: &str) {
+        // ПРОВЕРКА 1: Минимальный размер ордера должен быть >= 5.0
+        if remaining_size < 5.0 {
+            warn!("⚠️ {} | Размер второй ноги < 5.0 ({:.2}), пропускаем размещение", stream_name, remaining_size);
+            return;
+        }
+
         // Получаем актуальный best_bid из last_prices
         let second_leg_price = {
             let prices_opt = self.last_prices.lock().unwrap();
@@ -447,6 +453,7 @@ impl RealEngine {
         };
         let client = self.client.clone();
         let signer = self.signer.clone();
+        let trading_state_clone = Arc::clone(trading_state);
 
         tokio::spawn(async move {
             let price_dec: Decimal = format!("{:.2}", second_leg_price).parse().unwrap();
@@ -466,6 +473,27 @@ impl RealEngine {
                 Ok(response) => {
                     if !response.order_id.is_empty() {
                         info!("📝 Вторая нога размещена: order_id={}", response.order_id);
+
+                        // ВАЖНО: Сразу сохраняем order_id в состояние ЭТОГО потока
+                        // Это гарантирует, что другие потоки не смогут забрать этот ордер
+                        let mut state = trading_state_clone.lock().unwrap();
+                        if let TradingState::SearchingSecondLeg {
+                            first_leg_price,
+                            first_leg_is_up,
+                            first_leg_size,
+                            second_leg_current_price,
+                            second_leg_filled,
+                            ..
+                        } = *state {
+                            *state = TradingState::SearchingSecondLeg {
+                                first_leg_price,
+                                first_leg_is_up,
+                                first_leg_size,
+                                second_leg_order_id: Some(response.order_id),
+                                second_leg_current_price,
+                                second_leg_filled,
+                            };
+                        }
                     }
                 },
                 Err(e) => error!("❌ Ошибка размещения второй ноги: {}", e),
@@ -536,8 +564,9 @@ impl RealEngine {
 
             let new_best_bid = Self::round_price(new_best_bid);
 
-            // Проверяем изменился ли best_bid на >= 0.01 (минимум 1 цент)
-            let price_diff = (new_best_bid - current_price).abs();
+            // Проверяем ПОВЫСИЛСЯ ли best_bid на >= 0.01 (минимум 1 цент)
+            // ВАЖНО: Реагируем ТОЛЬКО на повышение цены, игнорируем понижение
+            let price_diff = new_best_bid - current_price;
             if price_diff >= 0.01 {
                 let remaining_size = first_leg_size - second_leg_filled;
 
@@ -546,7 +575,7 @@ impl RealEngine {
                     return;
                 }
 
-                info!("🔄 {} | Best_bid изменился: {:.2} → {:.2} (diff={:.2})",
+                info!("🔄 {} | Best_bid ПОВЫСИЛСЯ: {:.2} → {:.2} (+{:.2})",
                     stream_name, current_price, new_best_bid, price_diff);
                 info!("   Отменяем текущий ордер и перевыставляем с size={:.2}", remaining_size);
 
@@ -760,6 +789,7 @@ impl RealEngine {
 
     /// Обновляем placement для конкретного потока
     /// is_first_leg = true → проверяем первую ногу, false → проверяем вторую ногу
+    /// Возвращает true если апдейт был успешно выполнен
     fn update_placement_for_stream(
         &self,
         trading_state: &Arc<Mutex<TradingState>>,
@@ -767,7 +797,7 @@ impl RealEngine {
         price: f64,
         token_str: &str,
         is_first_leg: bool,
-    ) {
+    ) -> bool {
         let mut state = trading_state.lock().unwrap();
 
         if is_first_leg {
@@ -776,22 +806,37 @@ impl RealEngine {
                 if first_order_id.is_empty() {
                     info!("🎯 Первая нога подтверждена: {} @ {:.2}", token_str, price);
                     *first_order_id = order_id.to_string();
+                    return true;
                 }
             }
         } else {
             // Проверяем, это ли вторая нога
-            if let TradingState::SearchingSecondLeg { first_leg_price, first_leg_is_up, first_leg_size, second_leg_order_id: None, .. } = *state {
-                info!("📝 Вторая нога подтверждена: {} @ {:.2}", token_str, price);
-                *state = TradingState::SearchingSecondLeg {
-                    first_leg_price,
-                    first_leg_is_up,
-                    first_leg_size,
-                    second_leg_order_id: Some(order_id.to_string()),
-                    second_leg_current_price: Some(price),
-                    second_leg_filled: 0.0,
-                };
+            if let TradingState::SearchingSecondLeg {
+                first_leg_price,
+                first_leg_is_up,
+                first_leg_size,
+                second_leg_order_id: Some(ref existing_order_id),
+                second_leg_filled,
+                ..
+            } = *state {
+                // ВАЖНО: Проверяем совпадение order_id - это 100% способ идентификации потока
+                if existing_order_id == order_id {
+                    info!("📝 Вторая нога PLACEMENT подтверждён (order_id match): {} @ {:.2}", token_str, price);
+                    // Обновляем цену из PLACEMENT события (она может немного отличаться)
+                    *state = TradingState::SearchingSecondLeg {
+                        first_leg_price,
+                        first_leg_is_up,
+                        first_leg_size,
+                        second_leg_order_id: Some(order_id.to_string()),
+                        second_leg_current_price: Some(price),
+                        second_leg_filled,
+                    };
+                    return true;
+                }
             }
         }
+
+        false
     }
 
     // Обработка событий ордеров (MAKER orders - limit orders)
@@ -861,38 +906,56 @@ impl RealEngine {
                     side_str, token_str, price);
 
                 // === ЛОГИКА СОСТОЯНИЯ СТРАТЕГИИ ДЛЯ ВСЕХ ПОТОКОВ ===
+                // ВАЖНО: После первого успешного апдейта выходим, чтобы не дать другим потокам забрать тот же order_id
+                let mut placement_handled = false;
+
                 // Проверяем UP-потоки
                 for trading_state in self.up_threads.iter() {
+                    if placement_handled { break; }
+
                     let state = trading_state.lock().unwrap().clone();
                     match &state {
                         TradingState::WaitingFirstLeg { is_up: expected_is_up, .. } => {
                             if is_up == *expected_is_up {
-                                self.update_placement_for_stream(trading_state, &order_id, price, token_str, true);
+                                if self.update_placement_for_stream(trading_state, &order_id, price, token_str, true) {
+                                    placement_handled = true;
+                                }
                             }
                         }
                         TradingState::SearchingSecondLeg { first_leg_is_up, .. } => {
                             if is_up != *first_leg_is_up {
-                                self.update_placement_for_stream(trading_state, &order_id, price, token_str, false);
+                                if self.update_placement_for_stream(trading_state, &order_id, price, token_str, false) {
+                                    placement_handled = true;
+                                }
                             }
                         }
                         _ => {}
                     }
                 }
-                // Проверяем DOWN-потоки
-                for trading_state in self.down_threads.iter() {
-                    let state = trading_state.lock().unwrap().clone();
-                    match &state {
-                        TradingState::WaitingFirstLeg { is_up: expected_is_up, .. } => {
-                            if is_up == *expected_is_up {
-                                self.update_placement_for_stream(trading_state, &order_id, price, token_str, true);
+
+                // Проверяем DOWN-потоки (только если UP-потоки не забрали ордер)
+                if !placement_handled {
+                    for trading_state in self.down_threads.iter() {
+                        if placement_handled { break; }
+
+                        let state = trading_state.lock().unwrap().clone();
+                        match &state {
+                            TradingState::WaitingFirstLeg { is_up: expected_is_up, .. } => {
+                                if is_up == *expected_is_up {
+                                    if self.update_placement_for_stream(trading_state, &order_id, price, token_str, true) {
+                                        placement_handled = true;
+                                    }
+                                }
                             }
-                        }
-                        TradingState::SearchingSecondLeg { first_leg_is_up, .. } => {
-                            if is_up != *first_leg_is_up {
-                                self.update_placement_for_stream(trading_state, &order_id, price, token_str, false);
+                            TradingState::SearchingSecondLeg { first_leg_is_up, .. } => {
+                                if is_up != *first_leg_is_up {
+                                    if self.update_placement_for_stream(trading_state, &order_id, price, token_str, false) {
+                                        placement_handled = true;
+                                    }
+                                }
                             }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
             }
