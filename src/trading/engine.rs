@@ -411,7 +411,7 @@ impl RealEngine {
             return;
         }
 
-        // Получаем актуальный best_bid из last_prices
+        // Получаем актуальный best_bid из last_prices и размещаем на 0.01 ниже
         let second_leg_price = {
             let prices_opt = self.last_prices.lock().unwrap();
             if let Some(ref prices) = *prices_opt {
@@ -421,7 +421,8 @@ impl RealEngine {
                 } else {
                     prices.up_bid    // Если первая нога DOWN, вторая нога UP
                 };
-                Self::round_price(bid)
+                // Размещаем на 0.01 ниже best_bid
+                Self::round_price(bid - 0.01)
             } else {
                 warn!("⚠️ {} | Актуальные цены недоступны, пропускаем размещение второй ноги", stream_name);
                 return;
