@@ -501,26 +501,6 @@ impl RealEngine {
         });
     }
 
-    /// Отменяем ордер по ID (используется для перевыставления второй ноги)
-    fn cancel_order(&self, order_id: String, stream_name: &str) {
-        let client = self.client.clone();
-
-        info!("🚫 {} | Отменяем ордер для перевыставления: {}", stream_name, order_id);
-
-        tokio::spawn(async move {
-            match client.cancel_order(&order_id).await {
-                Ok(result) => {
-                    if !result.canceled.is_empty() {
-                        info!("✅ Ордер отменён: {}", order_id);
-                    } else {
-                        warn!("⚠️ Ордер не был отменён: {}", order_id);
-                    }
-                },
-                Err(e) => error!("❌ Ошибка отмены ордера {}: {}", order_id, e),
-            }
-        });
-    }
-
     /// Проверяем возможность перевыставления второй ноги если best_bid изменился
     /// Вызывается при каждом process_tick()
     fn check_second_leg_repricing(&self, prices: &MarketPrices) {
@@ -579,16 +559,134 @@ impl RealEngine {
                     stream_name, current_price, new_best_bid, price_diff);
                 info!("   Отменяем текущий ордер и перевыставляем с size={:.2}", remaining_size);
 
-                // Клонируем order_id для отмены
+                // Клонируем данные для async task
                 let order_id_to_cancel = order_id.clone();
+                let stream_name_owned = stream_name.to_string();
+                let trading_state_clone = Arc::clone(trading_state);
+                let client = self.client.clone();
+                let up_token = Arc::clone(&self.up_token);
+                let down_token = Arc::clone(&self.down_token);
+                let signer = self.signer.clone();
 
                 drop(state);  // Освобождаем мьютекс перед асинхронными операциями
 
-                // Отменяем текущий ордер
-                self.cancel_order(order_id_to_cancel, stream_name);
+                // Запускаем async task для последовательной отмены и размещения
+                tokio::spawn(async move {
+                    // ШАГ 1: Отменяем текущий ордер и ждём результата
+                    info!("🚫 {} | Отменяем ордер для перевыставления: {}", stream_name_owned, order_id_to_cancel);
 
-                // Размещаем новый ордер по новому best_bid с оставшимся размером
-                self.place_second_leg(first_leg_is_up, remaining_size, trading_state, stream_name);
+                    let cancel_success = match client.cancel_order(&order_id_to_cancel).await {
+                        Ok(result) => {
+                            if !result.canceled.is_empty() {
+                                info!("✅ Ордер отменён: {}", order_id_to_cancel);
+                                true
+                            } else {
+                                warn!("⚠️ Ордер не был отменён: {}", order_id_to_cancel);
+                                false
+                            }
+                        },
+                        Err(e) => {
+                            error!("❌ Ошибка отмены ордера {}: {}", order_id_to_cancel, e);
+                            false
+                        }
+                    };
+
+                    // ШАГ 2: Только если отмена успешна - размещаем новую ногу
+                    if cancel_success {
+                        // Обновляем состояние - убираем старый order_id
+                        {
+                            let mut state = trading_state_clone.lock().unwrap();
+                            if let TradingState::SearchingSecondLeg {
+                                first_leg_price,
+                                first_leg_is_up,
+                                first_leg_size,
+                                second_leg_filled,
+                                ..
+                            } = *state {
+                                *state = TradingState::SearchingSecondLeg {
+                                    first_leg_price,
+                                    first_leg_is_up,
+                                    first_leg_size,
+                                    second_leg_order_id: None,  // Сбрасываем order_id
+                                    second_leg_current_price: None,
+                                    second_leg_filled,
+                                };
+                            }
+                        }
+
+                        // Проверяем минимальный размер
+                        if remaining_size < 5.0 {
+                            warn!("⚠️ {} | Размер второй ноги < 5.0 ({:.2}), пропускаем размещение", stream_name_owned, remaining_size);
+                            return;
+                        }
+
+                        // Получаем актуальные цены из состояния
+                        let second_leg_is_up = !first_leg_is_up;
+                        let second_leg_price = new_best_bid;  // Используем уже вычисленный best_bid
+
+                        info!("📝 {} | Размещаем вторую ногу после отмены: {} @ {:.2} | Size: {:.2}",
+                            stream_name_owned, if second_leg_is_up { "UP" } else { "DOWN" }, second_leg_price, remaining_size);
+
+                        // Обновляем second_leg_current_price
+                        {
+                            let mut state = trading_state_clone.lock().unwrap();
+                            if let TradingState::SearchingSecondLeg { ref mut second_leg_current_price, .. } = *state {
+                                *second_leg_current_price = Some(second_leg_price);
+                            }
+                        }
+
+                        let token_id = if second_leg_is_up {
+                            Arc::clone(&up_token)
+                        } else {
+                            Arc::clone(&down_token)
+                        };
+
+                        // Размещаем новый ордер
+                        let price_dec: Decimal = format!("{:.2}", second_leg_price).parse().unwrap();
+                        let size_dec: Decimal = format!("{:.2}", remaining_size).parse().unwrap();
+
+                        let order = client.limit_order()
+                            .token_id(token_id.as_ref())
+                            .price(price_dec)
+                            .size(size_dec)
+                            .side(PolySide::Buy)
+                            .order_type(OrderType::GTC)
+                            .build().await.unwrap();
+
+                        let signed = client.sign(&signer, order).await.unwrap();
+
+                        match client.post_order(signed).await {
+                            Ok(response) => {
+                                if !response.order_id.is_empty() {
+                                    info!("📝 Новая вторая нога размещена: order_id={}", response.order_id);
+
+                                    // Сохраняем новый order_id
+                                    let mut state = trading_state_clone.lock().unwrap();
+                                    if let TradingState::SearchingSecondLeg {
+                                        first_leg_price,
+                                        first_leg_is_up,
+                                        first_leg_size,
+                                        second_leg_current_price,
+                                        second_leg_filled,
+                                        ..
+                                    } = *state {
+                                        *state = TradingState::SearchingSecondLeg {
+                                            first_leg_price,
+                                            first_leg_is_up,
+                                            first_leg_size,
+                                            second_leg_order_id: Some(response.order_id),
+                                            second_leg_current_price,
+                                            second_leg_filled,
+                                        };
+                                    }
+                                }
+                            },
+                            Err(e) => error!("❌ Ошибка размещения новой второй ноги: {}", e),
+                        }
+                    } else {
+                        warn!("⚠️ {} | Отмена не удалась, пропускаем перевыставление", stream_name_owned);
+                    }
+                });
             }
         }
     }
