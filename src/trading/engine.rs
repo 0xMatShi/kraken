@@ -404,7 +404,7 @@ impl RealEngine {
 
     /// Размещаем лимитку второй ноги по актуальному best_bid
     /// remaining_size - размер который нужно разместить (first_leg_size - second_leg_filled)
-    fn place_second_leg(&self, first_leg_is_up: bool, remaining_size: f64, trading_state: &Arc<Mutex<TradingState>>) {
+    fn place_second_leg(&self, first_leg_is_up: bool, remaining_size: f64, trading_state: &Arc<Mutex<TradingState>>, stream_name: &str) {
         // Получаем актуальный best_bid из last_prices
         let second_leg_price = {
             let prices_opt = self.last_prices.lock().unwrap();
@@ -417,7 +417,7 @@ impl RealEngine {
                 };
                 Self::round_price(bid)
             } else {
-                warn!("⚠️ Актуальные цены недоступны, пропускаем размещение второй ноги");
+                warn!("⚠️ {} | Актуальные цены недоступны, пропускаем размещение второй ноги", stream_name);
                 return;
             }
         };
@@ -425,12 +425,12 @@ impl RealEngine {
         let second_leg_is_up = !first_leg_is_up;
 
         if second_leg_price < 0.01 || second_leg_price > 0.99 {
-            warn!("⚠️ Некорректная цена второй ноги: {:.2}", second_leg_price);
+            warn!("⚠️ {} | Некорректная цена второй ноги: {:.2}", stream_name, second_leg_price);
             return;
         }
 
-        info!("📝 Размещаем вторую ногу: {} @ {:.2} (best_bid) | Size: {:.2}",
-            if second_leg_is_up { "UP" } else { "DOWN" }, second_leg_price, remaining_size);
+        info!("📝 {} | Размещаем вторую ногу: {} @ {:.2} (best_bid) | Size: {:.2}",
+            stream_name, if second_leg_is_up { "UP" } else { "DOWN" }, second_leg_price, remaining_size);
 
         // Обновляем second_leg_current_price в состоянии потока
         {
@@ -474,10 +474,10 @@ impl RealEngine {
     }
 
     /// Отменяем ордер по ID (используется для перевыставления второй ноги)
-    fn cancel_order(&self, order_id: String) {
+    fn cancel_order(&self, order_id: String, stream_name: &str) {
         let client = self.client.clone();
 
-        info!("🚫 Отменяем ордер для перевыставления: {}", order_id);
+        info!("🚫 {} | Отменяем ордер для перевыставления: {}", stream_name, order_id);
 
         tokio::spawn(async move {
             match client.cancel_order(&order_id).await {
@@ -556,10 +556,10 @@ impl RealEngine {
                 drop(state);  // Освобождаем мьютекс перед асинхронными операциями
 
                 // Отменяем текущий ордер
-                self.cancel_order(order_id_to_cancel);
+                self.cancel_order(order_id_to_cancel, stream_name);
 
                 // Размещаем новый ордер по новому best_bid с оставшимся размером
-                self.place_second_leg(first_leg_is_up, remaining_size, trading_state);
+                self.place_second_leg(first_leg_is_up, remaining_size, trading_state, stream_name);
             }
         }
     }
@@ -751,7 +751,7 @@ impl RealEngine {
                     drop(state);
 
                     // Размещаем вторую ногу по актуальному best_bid
-                    self.place_second_leg(first_leg_is_up, first_leg_size, trading_state);
+                    self.place_second_leg(first_leg_is_up, first_leg_size, trading_state, stream_name);
                 }
             }
             _ => {}
@@ -1089,7 +1089,7 @@ impl RealEngine {
                     drop(state);
 
                     // Размещаем лимитку второй ноги по актуальному best_bid
-                    self.place_second_leg(filled_is_up, filled_size, trading_state);
+                    self.place_second_leg(filled_is_up, filled_size, trading_state, stream_name);
                 }
             }
             TradingState::SearchingSecondLeg { second_leg_order_id: Some(second_order_id), first_leg_price, first_leg_is_up, .. } => {
