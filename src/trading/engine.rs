@@ -43,6 +43,8 @@ pub enum TradingState {
         first_leg_is_up: bool,
         first_leg_size: f64,
         second_leg_order_id: Option<String>,
+        second_leg_current_price: Option<f64>,  // Цена по которой размещен текущий ордер второй ноги
+        second_leg_filled: f64,  // Сколько уже исполнено из второй ноги
     },
 }
 
@@ -83,6 +85,8 @@ pub struct RealEngine {
     down_threads: Vec<Arc<Mutex<TradingState>>>,
     // Забронированные цены: (is_up, price_cents) - потоки не дублируют позиции
     reserved_prices: Mutex<HashSet<ReservedPriceKey>>,
+    // Последние актуальные цены из WebSocket для размещения второй ноги
+    last_prices: Mutex<Option<MarketPrices>>,
 }
 
 impl RealEngine {
@@ -128,6 +132,7 @@ impl RealEngine {
             up_threads,
             down_threads,
             reserved_prices: Mutex::new(HashSet::new()),
+            last_prices: Mutex::new(None),
         }
     }
 
@@ -154,6 +159,9 @@ impl RealEngine {
     }
 
     pub fn process_tick(&self, prices: MarketPrices) {
+        // Сохраняем последние актуальные цены для размещения второй ноги
+        *self.last_prices.lock().unwrap() = Some(prices.clone());
+
         // Проверяем режим торговли - если торговля выключена, не размещаем ордера
         let trading_enabled = {
             let state = self.ui_state.lock().unwrap();
@@ -164,7 +172,10 @@ impl RealEngine {
             return;
         }
 
-        self.run_logic(prices);
+        self.run_logic(prices.clone());
+
+        // Проверяем возможность перевыставления второй ноги
+        self.check_second_leg_repricing(&prices);
     }
 
     fn run_logic(&self, prices: MarketPrices) {
@@ -217,25 +228,25 @@ impl RealEngine {
             return;
         }
 
-        // Проверяем спред: up_bid + down_bid должно быть ровно 0.98
-        let pair_cost = prices.up_bid + prices.down_bid;
-        if (pair_cost - 0.98).abs() > 0.001 {
-            return; // Спред не 2с
-        }
+        // // Проверяем спред: up_bid + down_bid должно быть ровно 0.98
+        // let pair_cost = prices.up_bid + prices.down_bid;
+        // if (pair_cost - 0.98).abs() > 0.001 {
+        //     return; // Спред не 2с
+        // }
 
         // Определяем цену первой ноги в зависимости от стороны
         let (first_leg_is_up, first_leg_price, bid_price) = if is_up_side {
             // Покупаем UP только если 0.52 < up_bid < 0.96
-            if prices.up_bid <= 0.51 || prices.up_bid >= 0.89 {
+            if prices.up_bid <= 0.51 || prices.up_bid >= 0.96 {
                 return;
             }
-            (true, Self::round_price(prices.up_bid + 0.01), prices.up_bid)
+            (true, Self::round_price(prices.up_bid), prices.up_bid)
         } else {
             // Покупаем DOWN только если 0.52 < down_bid < 0.96
-            if prices.down_bid <= 0.51 || prices.down_bid >= 0.89 {
+            if prices.down_bid <= 0.51 || prices.down_bid >= 0.96 {
                 return;
             }
-            (false, Self::round_price(prices.down_bid + 0.01), prices.down_bid)
+            (false, Self::round_price(prices.down_bid), prices.down_bid)
         };
 
         if first_leg_price < 0.01 || first_leg_price > 0.99 {
@@ -391,10 +402,26 @@ impl RealEngine {
     //     });
     // }
 
-    /// Размещаем лимитку второй ноги
-    fn place_second_leg(&self, first_leg_price: f64, first_leg_is_up: bool, first_leg_size: f64) {
-        // Цена второй ноги: 0.99 - first_leg_price
-        let second_leg_price = Self::round_price(0.99 - first_leg_price);
+    /// Размещаем лимитку второй ноги по актуальному best_bid
+    /// remaining_size - размер который нужно разместить (first_leg_size - second_leg_filled)
+    fn place_second_leg(&self, first_leg_is_up: bool, remaining_size: f64, trading_state: &Arc<Mutex<TradingState>>) {
+        // Получаем актуальный best_bid из last_prices
+        let second_leg_price = {
+            let prices_opt = self.last_prices.lock().unwrap();
+            if let Some(ref prices) = *prices_opt {
+                // Определяем best_bid противоположной стороны
+                let bid = if first_leg_is_up {
+                    prices.down_bid  // Если первая нога UP, вторая нога DOWN
+                } else {
+                    prices.up_bid    // Если первая нога DOWN, вторая нога UP
+                };
+                Self::round_price(bid)
+            } else {
+                warn!("⚠️ Актуальные цены недоступны, пропускаем размещение второй ноги");
+                return;
+            }
+        };
+
         let second_leg_is_up = !first_leg_is_up;
 
         if second_leg_price < 0.01 || second_leg_price > 0.99 {
@@ -402,8 +429,16 @@ impl RealEngine {
             return;
         }
 
-        info!("📝 Размещаем вторую ногу: {} @ {:.2}",
-            if second_leg_is_up { "UP" } else { "DOWN" }, second_leg_price);
+        info!("📝 Размещаем вторую ногу: {} @ {:.2} (best_bid) | Size: {:.2}",
+            if second_leg_is_up { "UP" } else { "DOWN" }, second_leg_price, remaining_size);
+
+        // Обновляем second_leg_current_price в состоянии потока
+        {
+            let mut state = trading_state.lock().unwrap();
+            if let TradingState::SearchingSecondLeg { ref mut second_leg_current_price, .. } = *state {
+                *second_leg_current_price = Some(second_leg_price);
+            }
+        }
 
         let token_id = if second_leg_is_up {
             Arc::clone(&self.up_token)
@@ -412,11 +447,10 @@ impl RealEngine {
         };
         let client = self.client.clone();
         let signer = self.signer.clone();
-        let size = first_leg_size;
 
         tokio::spawn(async move {
             let price_dec: Decimal = format!("{:.2}", second_leg_price).parse().unwrap();
-            let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
+            let size_dec: Decimal = format!("{:.2}", remaining_size).parse().unwrap();
 
             let order = client.limit_order()
                 .token_id(token_id.as_ref())
@@ -439,25 +473,130 @@ impl RealEngine {
         });
     }
 
-    // /// Отменяем ордер по ID (используется для хеджирования)
-    // fn cancel_order(&self, order_id: String) {
-    //     let client = self.client.clone();
-    //
-    //     info!("🚫 Отменяем ордер: {}", order_id);
-    //
-    //     tokio::spawn(async move {
-    //         match client.cancel_order(&order_id).await {
-    //             Ok(result) => {
-    //                 if !result.canceled.is_empty() {
-    //                     info!("✅ Ордер отменён: {}", order_id);
-    //                 } else {
-    //                     warn!("⚠️ Ордер не был отменён: {}", order_id);
-    //                 }
-    //             },
-    //             Err(e) => error!("❌ Ошибка отмены ордера {}: {}", order_id, e),
-    //         }
-    //     });
-    // }
+    /// Отменяем ордер по ID (используется для перевыставления второй ноги)
+    fn cancel_order(&self, order_id: String) {
+        let client = self.client.clone();
+
+        info!("🚫 Отменяем ордер для перевыставления: {}", order_id);
+
+        tokio::spawn(async move {
+            match client.cancel_order(&order_id).await {
+                Ok(result) => {
+                    if !result.canceled.is_empty() {
+                        info!("✅ Ордер отменён: {}", order_id);
+                    } else {
+                        warn!("⚠️ Ордер не был отменён: {}", order_id);
+                    }
+                },
+                Err(e) => error!("❌ Ошибка отмены ордера {}: {}", order_id, e),
+            }
+        });
+    }
+
+    /// Проверяем возможность перевыставления второй ноги если best_bid изменился
+    /// Вызывается при каждом process_tick()
+    fn check_second_leg_repricing(&self, prices: &MarketPrices) {
+        // Проверяем UP-потоки
+        for (thread_idx, trading_state) in self.up_threads.iter().enumerate() {
+            let stream_name = format!("UP-поток #{}", thread_idx + 1);
+            self.check_second_leg_repricing_for_stream(trading_state, prices, &stream_name);
+        }
+        // Проверяем DOWN-потоки
+        for (thread_idx, trading_state) in self.down_threads.iter().enumerate() {
+            let stream_name = format!("DOWN-поток #{}", thread_idx + 1);
+            self.check_second_leg_repricing_for_stream(trading_state, prices, &stream_name);
+        }
+    }
+
+    /// Проверяем перевыставление второй ноги для конкретного потока
+    fn check_second_leg_repricing_for_stream(
+        &self,
+        trading_state: &Arc<Mutex<TradingState>>,
+        prices: &MarketPrices,
+        stream_name: &str,
+    ) {
+        let state = trading_state.lock().unwrap();
+
+        // Проверяем только потоки в состоянии SearchingSecondLeg с размещенным ордером
+        if let TradingState::SearchingSecondLeg {
+            first_leg_is_up,
+            first_leg_size,
+            second_leg_order_id: Some(ref order_id),
+            second_leg_current_price: Some(current_price),
+            second_leg_filled,
+            ..
+        } = *state
+        {
+            // Получаем актуальный best_bid для противоположной стороны
+            let new_best_bid = if first_leg_is_up {
+                prices.down_bid  // Вторая нога DOWN
+            } else {
+                prices.up_bid    // Вторая нога UP
+            };
+
+            let new_best_bid = Self::round_price(new_best_bid);
+
+            // Проверяем изменился ли best_bid на >= 0.01 (минимум 1 цент)
+            let price_diff = (new_best_bid - current_price).abs();
+            if price_diff >= 0.01 {
+                let remaining_size = first_leg_size - second_leg_filled;
+
+                if remaining_size < 0.01 {
+                    // Вся вторая нога уже исполнена, но ордер еще не отменен
+                    return;
+                }
+
+                info!("🔄 {} | Best_bid изменился: {:.2} → {:.2} (diff={:.2})",
+                    stream_name, current_price, new_best_bid, price_diff);
+                info!("   Отменяем текущий ордер и перевыставляем с size={:.2}", remaining_size);
+
+                // Клонируем order_id для отмены
+                let order_id_to_cancel = order_id.clone();
+
+                drop(state);  // Освобождаем мьютекс перед асинхронными операциями
+
+                // Отменяем текущий ордер
+                self.cancel_order(order_id_to_cancel);
+
+                // Размещаем новый ордер по новому best_bid с оставшимся размером
+                self.place_second_leg(first_leg_is_up, remaining_size, trading_state);
+            }
+        }
+    }
+
+    /// Обновляем second_leg_filled при UPDATE события второй ноги
+    /// Проверяем ВСЕ потоки (UP и DOWN)
+    fn update_second_leg_filled(&self, order_id: &str, size: f64) {
+        // Проверяем UP-потоки
+        for trading_state in self.up_threads.iter() {
+            self.update_second_leg_filled_for_stream(trading_state, order_id, size);
+        }
+        // Проверяем DOWN-потоки
+        for trading_state in self.down_threads.iter() {
+            self.update_second_leg_filled_for_stream(trading_state, order_id, size);
+        }
+    }
+
+    /// Обновляем second_leg_filled для конкретного потока
+    fn update_second_leg_filled_for_stream(
+        &self,
+        trading_state: &Arc<Mutex<TradingState>>,
+        order_id: &str,
+        size: f64,
+    ) {
+        let mut state = trading_state.lock().unwrap();
+
+        if let TradingState::SearchingSecondLeg {
+            second_leg_order_id: Some(ref second_order_id),
+            ref mut second_leg_filled,
+            ..
+        } = *state
+        {
+            if order_id == second_order_id {
+                *second_leg_filled += size;
+            }
+        }
+    }
 
     // Trade события = TAKER сделки (market orders FAK)
     // Это подтверждение исполнения taker-hedge и taker-emergency ордеров
@@ -606,11 +745,13 @@ impl RealEngine {
                         first_leg_is_up,
                         first_leg_size,
                         second_leg_order_id: None,
+                        second_leg_current_price: None,
+                        second_leg_filled: 0.0,
                     };
                     drop(state);
 
-                    // Размещаем вторую ногу
-                    self.place_second_leg(first_leg_price, first_leg_is_up, first_leg_size);
+                    // Размещаем вторую ногу по актуальному best_bid
+                    self.place_second_leg(first_leg_is_up, first_leg_size, trading_state);
                 }
             }
             _ => {}
@@ -639,13 +780,15 @@ impl RealEngine {
             }
         } else {
             // Проверяем, это ли вторая нога
-            if let TradingState::SearchingSecondLeg { first_leg_price, first_leg_is_up, first_leg_size, second_leg_order_id: None } = *state {
+            if let TradingState::SearchingSecondLeg { first_leg_price, first_leg_is_up, first_leg_size, second_leg_order_id: None, .. } = *state {
                 info!("📝 Вторая нога подтверждена: {} @ {:.2}", token_str, price);
                 *state = TradingState::SearchingSecondLeg {
                     first_leg_price,
                     first_leg_is_up,
                     first_leg_size,
                     second_leg_order_id: Some(order_id.to_string()),
+                    second_leg_current_price: Some(price),
+                    second_leg_filled: 0.0,
                 };
             }
         }
@@ -759,24 +902,31 @@ impl RealEngine {
                     // Получаем информацию об ордере и накапливаем исполнение
                     let mut orders_info = self.active_orders_info.lock().unwrap();
 
-                    if let Some((order_price, is_up, original_size, accumulated_filled)) = orders_info.get_mut(&order_id) {
+                    if let Some((_order_price, _is_up, _original_size, accumulated_filled)) = orders_info.get_mut(&order_id) {
                         // ЗАЩИТА ОТ ПЕРЕУЧЕТА: вычисляем реальную дельту для портфолио
                         let previous_filled = *accumulated_filled;
                         *accumulated_filled += size;
 
-                        // Если accumulated превышает original_size, засчитываем только до лимита
-                        let size_for_portfolio = if *accumulated_filled > *original_size {
-                            // Переполнение - берем только оставшееся до original_size
-                            (*original_size - previous_filled).max(0.0)
-                        } else {
-                            size
-                        };
+                        // Обновляем second_leg_filled в состоянии потока (если это вторая нога)
+                        drop(orders_info);  // Освобождаем мьютекс перед вызовом update
+                        self.update_second_leg_filled(&order_id, size);
+                        let mut orders_info = self.active_orders_info.lock().unwrap();  // Захватываем снова
 
-                        // Сохраняем is_up для использования после освобождения мьютекса
-                        let current_is_up = *is_up;
-                        let current_accumulated = *accumulated_filled;
-                        let current_original_size = *original_size;
-                        let current_order_price = *order_price;
+                        // Получаем данные снова после обновления
+                        if let Some((order_price, is_up, original_size, accumulated_filled)) = orders_info.get_mut(&order_id) {
+                            // Если accumulated превышает original_size, засчитываем только до лимита
+                            let size_for_portfolio = if *accumulated_filled > *original_size {
+                                // Переполнение - берем только оставшееся до original_size
+                                (*original_size - previous_filled).max(0.0)
+                            } else {
+                                size
+                            };
+
+                            // Сохраняем is_up для использования после освобождения мьютекса
+                            let current_is_up = *is_up;
+                            let current_accumulated = *accumulated_filled;
+                            let current_original_size = *original_size;
+                            let current_order_price = *order_price;
 
                         info!("📊 MAKER PARTIAL FILL: {} {} @ {:.3} | Filled: {:.2}/{:.2}",
                             side_str, token_str, price, *accumulated_filled, *original_size);
@@ -856,8 +1006,9 @@ impl RealEngine {
                             // Обновляем UI
                             self.update_ui_portfolio();
                         }
-                    } else {
-                        drop(orders_info); // Освобождаем мьютекс если ордер не найден
+                        } else {
+                            drop(orders_info); // Освобождаем мьютекс если ордер не найден после повторного захвата
+                        }
                     }
                 }
             }
@@ -932,11 +1083,13 @@ impl RealEngine {
                         first_leg_is_up: filled_is_up,
                         first_leg_size: filled_size,
                         second_leg_order_id: None,
+                        second_leg_current_price: None,
+                        second_leg_filled: 0.0,
                     };
                     drop(state);
 
-                    // Размещаем лимитку второй ноги
-                    self.place_second_leg(filled_price, filled_is_up, filled_size);
+                    // Размещаем лимитку второй ноги по актуальному best_bid
+                    self.place_second_leg(filled_is_up, filled_size, trading_state);
                 }
             }
             TradingState::SearchingSecondLeg { second_leg_order_id: Some(second_order_id), first_leg_price, first_leg_is_up, .. } => {
@@ -994,7 +1147,7 @@ impl RealEngine {
                     *state = TradingState::Idle;
                 }
             }
-            TradingState::SearchingSecondLeg { second_leg_order_id: Some(second_order_id), first_leg_price, first_leg_is_up, first_leg_size } => {
+            TradingState::SearchingSecondLeg { second_leg_order_id: Some(second_order_id), first_leg_price, first_leg_is_up, first_leg_size, second_leg_filled, .. } => {
                 if order_id == second_order_id {
                     // Вторая нога отменена - сбрасываем second_leg_order_id
                     info!("⚠️ {} | Вторая нога отменена", stream_name);
@@ -1003,6 +1156,8 @@ impl RealEngine {
                         first_leg_is_up: *first_leg_is_up,
                         first_leg_size: *first_leg_size,
                         second_leg_order_id: None,
+                        second_leg_current_price: None,
+                        second_leg_filled: *second_leg_filled,  // Сохраняем filled при отмене
                     };
                 }
             }
