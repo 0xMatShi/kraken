@@ -355,7 +355,7 @@ impl RealEngine {
                     prices.up_bid    // Если первая нога DOWN, вторая нога UP
                 };
                 // Размещаем на 0.01 ниже best_bid
-                Self::round_price(bid - 0.01)
+                Self::round_price(bid)
             } else {    
                 warn!("⚠️ {} | Актуальные цены недоступны, пропускаем размещение второй ноги", stream_name);
                 return;
@@ -576,7 +576,7 @@ impl RealEngine {
                         };
 
                         // Размещаем новый ордер
-                        let price_dec: Decimal = format!("{:.2}", (second_leg_price - 0.01)).parse().unwrap();
+                        let price_dec: Decimal = format!("{:.2}", (second_leg_price)).parse().unwrap();
                         let size_dec: Decimal = format!("{:.2}", remaining_size).parse().unwrap();
 
                         let order = client.limit_order()
