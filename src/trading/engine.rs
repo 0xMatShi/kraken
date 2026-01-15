@@ -305,7 +305,7 @@ impl RealEngine {
 
             // Экспирация: now + 60 + n секунды (чтобы ордер не висел вечно если цена убежит)
             // n - нужное количество секунд для экспирации 
-            let expiration = Utc::now() + chrono::Duration::seconds(60 + 2);
+            let expiration = Utc::now() + chrono::Duration::seconds(60 + 3);
 
             let order = client.limit_order()
                 .token_id(token_id.as_ref())
