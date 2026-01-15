@@ -236,22 +236,22 @@ impl RealEngine {
 
         // Определяем цену первой ноги в зависимости от стороны
         let (first_leg_is_up, first_leg_price, bid_price) = if is_up_side {
-            // Покупаем UP только если up_bid < 0.50 (падающий тренд)
-            if prices.up_bid >= 0.50 {
+            // Покупаем UP только если up_bid > 0.55 и < 0.95 (растущий тренд)
+            if prices.up_bid <= 0.55 {
                 return;
             }
-            // Проверка минимальной цены: не выставляем биды ниже 0.03
-            if prices.up_bid < 0.03 {
+            // Проверка максимальной цены: не выставляем биды выше 0.95
+            if prices.up_bid >= 0.95 {
                 return;
             }
             (true, Self::round_price(prices.up_bid), prices.up_bid)
         } else {
-            // Покупаем DOWN только если down_bid < 0.50 (падающий тренд)
-            if prices.down_bid >= 0.50 {
+            // Покупаем DOWN только если down_bid > 0.55 и < 0.95 (растущий тренд)
+            if prices.down_bid <= 0.55 {
                 return;
             }
-            // Проверка минимальной цены: не выставляем биды ниже 0.03
-            if prices.down_bid < 0.03 {
+            // Проверка максимальной цены: не выставляем биды выше 0.95
+            if prices.down_bid >= 0.95 {
                 return;
             }
             (false, Self::round_price(prices.down_bid), prices.down_bid)
