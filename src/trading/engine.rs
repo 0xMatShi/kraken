@@ -244,7 +244,7 @@ impl RealEngine {
             if prices.up_bid >= 0.98 {
                 return;
             }
-            (true, Self::round_price(prices.up_bid), prices.up_bid)
+            (true, Self::round_price(prices.up_bid - 0.01), prices.up_bid)
         } else {
             // Покупаем DOWN только если down_bid > 0.55 и < 0.95 (растущий тренд)
             if prices.down_bid <= 0.51 {
@@ -254,7 +254,7 @@ impl RealEngine {
             if prices.down_bid >= 0.98 {
                 return;
             }
-            (false, Self::round_price(prices.down_bid), prices.down_bid)
+            (false, Self::round_price(prices.down_bid - 0.01), prices.down_bid)
         };
 
         if first_leg_price < 0.01 || first_leg_price > 0.99 {
@@ -576,7 +576,7 @@ impl RealEngine {
                         };
 
                         // Размещаем новый ордер
-                        let price_dec: Decimal = format!("{:.2}", (second_leg_price)).parse().unwrap();
+                        let price_dec: Decimal = format!("{:.2}", (second_leg_price - 0.01)).parse().unwrap();
                         let size_dec: Decimal = format!("{:.2}", remaining_size).parse().unwrap();
 
                         let order = client.limit_order()
