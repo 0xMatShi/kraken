@@ -244,7 +244,7 @@ impl RealEngine {
             if prices.up_bid >= 0.98 {
                 return;
             }
-            (true, Self::round_price(prices.up_bid - 0.01), prices.up_bid)
+            (true, Self::round_price(prices.up_bid), prices.up_bid)
         } else {
             // Покупаем DOWN только если down_bid > 0.55 и < 0.95 (растущий тренд)
             if prices.down_bid <= 0.51 {
@@ -254,7 +254,7 @@ impl RealEngine {
             if prices.down_bid >= 0.98 {
                 return;
             }
-            (false, Self::round_price(prices.down_bid - 0.01), prices.down_bid)
+            (false, Self::round_price(prices.down_bid), prices.down_bid)
         };
 
         if first_leg_price < 0.01 || first_leg_price > 0.99 {
@@ -355,7 +355,7 @@ impl RealEngine {
                     prices.up_bid    // Если первая нога DOWN, вторая нога UP
                 };
                 // Размещаем на 0.01 ниже best_bid
-                Self::round_price(bid)
+                Self::round_price(bid - 0.01)
             } else {    
                 warn!("⚠️ {} | Актуальные цены недоступны, пропускаем размещение второй ноги", stream_name);
                 return;
