@@ -184,14 +184,25 @@ impl RealEngine {
         };
 
         let orders = self.active_order_ids.lock().unwrap();
+        let total_count = orders.len();
 
-        if let Some(ref hedge_id) = hedge_order_id {
+        let result = if let Some(ref hedge_id) = hedge_order_id {
             // Есть активные ордера, если больше 1 (хедж) или если хедж еще не размещен
-            orders.len() > 1 || (orders.len() == 1 && !orders.contains(hedge_id))
+            let has_active = orders.len() > 1 || (orders.len() == 1 && !orders.contains(hedge_id));
+            if has_active {
+                info!("🔍 Проверка активных ордеров: total={}, hedge_id={}, result=true", total_count, hedge_id);
+            }
+            has_active
         } else {
             // Хеджа нет - любые ордера считаются активными
-            !orders.is_empty()
-        }
+            let has_active = !orders.is_empty();
+            if has_active {
+                info!("🔍 Проверка активных ордеров: total={}, hedge_id=None, result=true", total_count);
+            }
+            has_active
+        };
+
+        result
     }
 
     /// Проверяем нужен ли хедж и запускаем его размещение
@@ -1453,6 +1464,9 @@ impl RealEngine {
                             // Удаляем из HashMap
                             orders_info.remove(&order_id);
                             drop(orders_info); // Освобождаем мьютекс
+
+                            // КРИТИЧНО: Удаляем из active_order_ids
+                            self.remove_order_id(&order_id);
 
                             // Удаляем часики из UI
                             ui::remove_our_bid_price(&self.ui_state, final_is_up, final_price);
