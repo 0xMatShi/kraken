@@ -8,7 +8,10 @@ use time::macros::format_description;
 
 /// Инициализирует систему логирования
 /// Логи пишутся в файл ./logs/app.log и в UI
-pub fn init_logger() -> anyhow::Result<()> {
+///
+/// ВАЖНО: возвращает WorkerGuard, который ОБЯЗАТЕЛЬНО нужно сохранить
+/// на протяжении всей работы программы, иначе логирование в файл прекратится!
+pub fn init_logger() -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard> {
     // Настройка tracing логгера с кастомным форматом времени
     let timer = OffsetTime::new(
         time::UtcOffset::UTC,
@@ -23,7 +26,7 @@ pub fn init_logger() -> anyhow::Result<()> {
 
     // Создаем неблокирующий файловый appender (один файл без ротации)
     let file_appender = tracing_appender::rolling::never("./logs", "app.log");
-    let (non_blocking_file, _log_guard) = tracing_appender::non_blocking(file_appender);
+    let (non_blocking_file, log_guard) = tracing_appender::non_blocking(file_appender);
 
     // Слой для записи в файл (без цветов)
     let file_layer = fmt::layer()
@@ -47,5 +50,5 @@ pub fn init_logger() -> anyhow::Result<()> {
         .with(ui_log_layer)
         .init();
 
-    Ok(())
+    Ok(log_guard)
 }

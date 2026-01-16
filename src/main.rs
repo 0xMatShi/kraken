@@ -26,8 +26,8 @@ async fn main() -> anyhow::Result<()> {
     // Создаем UI state для захвата логов
     let ui_state = ui::new_ui_state();
 
-    // Инициализация логгера
-    utils::logger::init_logger()?;
+    // Инициализация логгера (сохраняем guard для поддержания записи в файл)
+    let _log_guard = utils::logger::init_logger()?;
 
     // Загружаем торговую конфигурацию
     let app_config = Config::load()?;
