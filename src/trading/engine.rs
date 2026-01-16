@@ -1029,6 +1029,7 @@ impl RealEngine {
                     // Размещение произойдет когда придет WebSocket CANCELLATION
                     if cancel_success {
                         // Устанавливаем pending_repricing - ждем WebSocket подтверждения
+                        // ВАЖНО: НЕ сбрасываем second_leg_order_id, чтобы handle_order_cancelled смог найти поток
                         {
                             let mut state = trading_state_clone.lock().unwrap();
                             if let TradingState::SearchingSecondLeg {
@@ -1043,7 +1044,7 @@ impl RealEngine {
                                     first_leg_price,
                                     first_leg_is_up,
                                     first_leg_size,
-                                    second_leg_order_id: None,  // Сбрасываем order_id
+                                    second_leg_order_id: Some(order_id_to_cancel),  // ОСТАВЛЯЕМ order_id для match в WebSocket
                                     second_leg_current_price: None,
                                     second_leg_filled,
                                     pending_repricing: Some(new_best_bid),  // Сохраняем новую цену
