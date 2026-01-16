@@ -1,30 +1,21 @@
-mod models; mod trading; mod websocket; mod config; pub mod ui; mod price_tracker;
+mod models;
+mod websocket;
+mod core;
+mod utils;
+pub mod ui;
+
 use std::io::{self, Write};
 use std::sync::Arc;
-use std::str::FromStr as _;
-use trading::scanner::AutoScanner;
+use utils::{AutoScanner, PriceTracker, Config};
 use websocket::market::DataStream;
 use websocket::user::UserStream;
 use websocket::coinbase::CoinbaseStream;
-use trading::engine::RealEngine;
+use core::RealEngine;
 use chrono::{DateTime, Utc};
 
-use alloy::signers::Signer as _;
-use alloy::signers::local::PrivateKeySigner;
-use alloy::primitives::Address;
-use polymarket_client_sdk::clob::{Client, Config};
+use polymarket_client_sdk::clob::{Client, Config as ClobConfig};
 use polymarket_client_sdk::clob::ws::{Client as WsClient};
-use polymarket_client_sdk::auth::Credentials;
-use polymarket_client_sdk::{POLYGON, PRIVATE_KEY_VAR};
-use uuid::Uuid;
 
-use tracing_subscriber::fmt;
-use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::fmt::time::OffsetTime;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
-use time::macros::format_description;
 use tokio::time::Duration;
 
 
@@ -35,84 +26,38 @@ async fn main() -> anyhow::Result<()> {
     // Создаем UI state для захвата логов
     let ui_state = ui::new_ui_state();
 
-    // Настройка tracing логгера с кастомным форматом времени
-    let timer = OffsetTime::new(
-        time::UtcOffset::UTC,
-        format_description!("[hour]:[minute]:[second].[subsecond digits:3]"),
-    );
-
-    // Фильтр логов: по умолчанию WARN для всех библиотек, INFO для нашего проекта
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| {
-            EnvFilter::new("warn,mmdnca=info")
-        });
-
-    // Создаем неблокирующий файловый appender (один файл без ротации)
-    let file_appender = tracing_appender::rolling::never("./logs", "app.log");
-    let (non_blocking_file, _log_guard) = tracing_appender::non_blocking(file_appender);
-
-    // Слой для записи в файл (без цветов)
-    let file_layer = fmt::layer()
-        .with_target(false)
-        .with_thread_ids(false)
-        .with_file(true)
-        .with_line_number(true)
-        .with_level(true)
-        .with_ansi(false)
-        .with_span_events(FmtSpan::NONE)
-        .with_timer(timer)
-        .with_writer(non_blocking_file);
-
-    // UI лог слой (логи записываются только в файл, не в UI)
-    let ui_log_layer = ui::UiLogLayer::new();
-
-    // Объединяем слои и инициализируем
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(file_layer)
-        .with(ui_log_layer)
-        .init();
+    // Инициализация логгера
+    utils::logger::init_logger()?;
 
     // Загружаем торговую конфигурацию
-    let app_config = config::Config::load()?;
+    let app_config = Config::load()?;
     tracing::info!("Конфигурация загружена: MAX_BALANCE={:.1}, SIZE={:.1}, HEDGE_SIZE={:.1}",
         app_config.trading.max_balance,
         app_config.trading.size,
         app_config.trading.hedge_size
     );
 
-    // 1. Инициализация аутентификации
-    let api_key = Uuid::parse_str(&std::env::var("POLYMARKET_API_KEY")?)?;
-    let api_secret = std::env::var("POLYMARKET_API_SECRET")?;
-    let api_passphrase = std::env::var("POLYMARKET_API_PASSPHRASE")?;
-    let private_key = std::env::var(PRIVATE_KEY_VAR).expect("Нужен PRIVATE_KEY_VAR в .env");
-    let funder_addr_str = std::env::var("FUNDER_ADDRESS").expect("Нужен FUNDER_ADDRESS в .env");
-    let funder_address: Address = funder_addr_str.parse()
-    .expect("Неверный формат адреса в FUNDER_ADDRESS (должен начинаться с 0x...)");
-    let ws_market_url = std::env::var("CLOB_WS_MARKET").expect("Нужен CLOB_WS_MARKET в .env");
-
-    let signer = PrivateKeySigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
-
-    let credentials = Credentials::new(api_key, api_secret, api_passphrase);
+    // Загружаем переменные окружения
+    let env_config = utils::load_env::load_env_config()?;
 
     // Создаем клиента Polymarket
-    let client = Client::new("https://clob.polymarket.com", Config::default())?
-        .authentication_builder(&signer)
-        .funder(funder_address)
+    let client = Client::new("https://clob.polymarket.com", ClobConfig::default())?
+        .authentication_builder(&env_config.signer)
+        .funder(env_config.funder_address)
         .signature_type(polymarket_client_sdk::clob::types::SignatureType::GnosisSafe)
         .authenticate()
         .await?;
 
     tracing::info!("Аутентификация CLOB успешна");
 
-    let ws_client = WsClient::default().authenticate(credentials, funder_address)?;
+    let ws_client = WsClient::default().authenticate(env_config.credentials, env_config.funder_address)?;
 
     tracing::info!("Аутентификация WsUser успешна");
 
     let scanner = AutoScanner::new();
 
     // Загружаем price tracker
-    let mut price_tracker = price_tracker::PriceTracker::load();
+    let mut price_tracker = PriceTracker::load();
 
     // Главный цикл выбора
     loop {
@@ -160,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
                 let total_seconds = 900; // Фиксированная длительность события: 15 минут
 
                 // Извлекаем timestamp из slug события
-                let event_timestamp = price_tracker::extract_timestamp_from_slug(&target.slug);
+                let event_timestamp = utils::price_tracker::extract_timestamp_from_slug(&target.slug);
 
                 // Получаем price to beat для этого события
                 let price_to_beat = if let Some(ts) = event_timestamp {
@@ -178,10 +123,10 @@ async fn main() -> anyhow::Result<()> {
                 // Создаем реальный движок
                 let engine = Arc::new(RealEngine::new(
                     client.clone(),
-                    signer.clone(),
+                    env_config.signer.clone(),
                     target.up_token.clone(),
                     target.down_token.clone(),
-                    api_key,
+                    env_config.api_key,
                     app_config.trading.clone(),
                     ui_state.clone(),
                     target.condition_id.clone(),
@@ -191,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
                     target.up_token.clone(),
                     target.down_token.clone(),
                     engine.clone(),
-                    ws_market_url.clone(),
+                    env_config.ws_market_url.clone(),
                     ui_state.clone(),
                 );
 

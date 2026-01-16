@@ -1,7 +1,7 @@
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use crate::models::{BookMessage, SubscribeMessage, MarketPrices};
-use crate::trading::engine::RealEngine;
+use crate::core::RealEngine;
 use crate::ui::{self, UiState, OrderLevel, ORDER_BOOK_DEPTH};
 use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};

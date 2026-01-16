@@ -4,7 +4,8 @@ use std::time::Duration;
 use polymarket_client_sdk::clob::ws::{Client, WsMessage};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::Normal;
-use crate::trading::engine::RealEngine;
+use crate::core::RealEngine;
+use crate::core::handle;
 use tracing::{info, warn};
 
 
@@ -68,7 +69,8 @@ impl UserStream {
                     let trade_owner = trade.trade_owner;
                     let taker_order_id = trade.taker_order_id.clone();
 
-                    self.engine.handle_ws_trade(
+                    handle::handle_ws_trade(
+                        &self.engine,
                         trade_id,
                         price,
                         size,
@@ -94,7 +96,7 @@ impl UserStream {
                     let original_size: Option<f64> = order.original_size
                         .and_then(|d| d.to_f64());
 
-                    self.engine.handle_ws_order(order_id, msg_type, price, order.side, &asset_id, size_matched, original_size);
+                    handle::handle_ws_order(&self.engine, order_id, msg_type, price, order.side, &asset_id, size_matched, original_size);
                 }
                 Ok(_) => {}
                 Err(e) => {

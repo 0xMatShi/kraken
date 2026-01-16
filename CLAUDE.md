@@ -45,10 +45,12 @@ CLOB_WS_USER=<user_ws_url>
 
 ### Module Structure
 
-The codebase is organized into 8 modules with clear separation of concerns:
+The codebase is organized with clear separation of concerns across core trading logic, utilities, WebSocket streams, UI, and models:
 
 **`main.rs`** (src/main.rs:1)
 - Entry point with Tokio async runtime
+- Uses `utils::load_env` to load environment variables
+- Uses `utils::logger` to initialize logging system
 - Authenticates with Polymarket CLOB REST API and WebSocket API
 - Interactive CLI menu: "1. Start | 2. Exit"
 - Trading mode defaults to OFF (dryrun) on startup
@@ -60,21 +62,73 @@ The codebase is organized into 8 modules with clear separation of concerns:
   - User event stream (trade fill confirmations)
   - Coinbase stream (BTC/ETH/SOL/XRP price tracking)
 
-**`engine.rs`** (src/trading/engine.rs:1)
-- Core trading logic in `RealEngine` struct
+### Core Trading Logic (`core/`)
+
+**`core/strat.rs`** (src/core/strat.rs:1)
+- Main trading engine structure `RealEngine`
 - Manages portfolio state via `Mutex<Portfolio>`
+- Entry point: `process_tick()` - called on each market data update
+- Pipeline logic: `run_logic()` - distributes work across UP/DOWN threads
 - Checks `ui_state.trading_enabled` flag before executing any trades
-- Trading behaviors (currently HEDGING DISABLED):
-  1. **Hedging** (DISABLED): Would execute taker orders when position skew exceeds `HEDGE_SIZE`
-  2. **Emergency cover** (DISABLED): Would close positions if cost basis risky
-  3. **Maker orders** (ACTIVE): Places paired limit orders on both sides
+- Delegates to specialized modules: first_leg, second_leg, hedge, handle
 - Configuration loaded from `config.toml`: `MAX_BALANCE`, `SIZE`, `HEDGE_SIZE`
 
-**`scanner.rs`** (src/trading/scanner.rs:1)
+**`core/first_leg.rs`** (src/core/first_leg.rs:1)
+- Logic for placing first leg of paired trades
+- `try_place_first_leg_for_thread()` - places GTC limit orders at best bid
+- Dynamic order sizing based on bid price (1.0625x to 1.25x multiplier)
+- Price reservation system prevents thread collision
+- Validates bid prices (must be 0.51-0.98 range)
+
+**`core/second_leg.rs`** (src/core/second_leg.rs:1)
+- Logic for placing second leg after first leg fills
+- `place_second_leg()` - places limit order at current best bid of opposite side
+- `check_second_leg_repricing()` - monitors bid changes and reprices if needed
+- `update_second_leg_filled()` - tracks partial fills
+- Reprices when best_bid rises by >= 0.01
+
+**`core/hedge.rs`** (src/core/hedge.rs:1)
+- Hedging logic to rebalance position skew
+- `check_and_start_hedge()` - activates when skew > 50 shares
+- `place_hedge_order()` - places GTC limit order to reduce skew
+- `check_hedge_repricing()` - reprices if best_bid rises by >= 0.01
+- Blocks new first-leg placements until hedge completes
+
+**`core/handle.rs`** (src/core/handle.rs:1)
+- WebSocket event handlers
+- `handle_ws_trade()` - processes TAKER fills (market orders)
+- `handle_ws_order()` - processes MAKER events (PLACEMENT/UPDATE/CANCELLATION)
+- Updates portfolio and UI on each fill
+- Transitions thread states (Idle → WaitingFirstLeg → SearchingSecondLeg)
+
+### Utilities (`utils/`)
+
+**`utils/scanner.rs`** (src/utils/scanner.rs:1)
 - `AutoScanner` polls Polymarket API for trading opportunities
 - Searches for events matching slug prefix and time window
 - Uses pagination (500 events per request) to traverse all active markets
 - Polls every 5 seconds until suitable market found
+
+**`utils/config.rs`** (src/utils/config.rs:1)
+- Loads `config.toml` with trading parameters
+- `TradingConfig`: max_balance, size, hedge_size, threads
+
+**`utils/price_tracker.rs`** (src/utils/price_tracker.rs:1)
+- Persists closing prices from previous events to `price_tracker.json`
+- Provides `price_to_beat` for next event of same coin
+- Extracts timestamp from event slug to match historical data
+
+**`utils/logger.rs`** (src/utils/logger.rs:1)
+- Initializes tracing-subscriber logging system
+- Writes logs to `./logs/app.log` (no rotation)
+- Integrates with UI log layer
+
+**`utils/load_env.rs`** (src/utils/load_env.rs:1)
+- Loads environment variables from `.env`
+- Creates authenticated signers and credentials
+- Returns `EnvConfig` struct with all required data
+
+### WebSocket Streams (`websocket/`)
 
 **`websocket/market.rs`** (src/websocket/market.rs:1)
 - `DataStream` subscribes to order book updates via WebSocket
@@ -86,8 +140,8 @@ The codebase is organized into 8 modules with clear separation of concerns:
 
 **`websocket/user.rs`** (src/websocket/user.rs:1)
 - `UserStream` receives authenticated trade fill events
-- Calls `engine.handle_ws_order()` for MAKER orders (PLACEMENT/UPDATE/CANCELLATION)
-- Calls `engine.handle_ws_trade()` for TAKER order fills
+- Calls `handle::handle_ws_order()` for MAKER orders (PLACEMENT/UPDATE/CANCELLATION)
+- Calls `handle::handle_ws_trade()` for TAKER order fills
 - Critical for tracking actual executed trades vs placed orders
 
 **`websocket/coinbase.rs`** (src/websocket/coinbase.rs:1)
