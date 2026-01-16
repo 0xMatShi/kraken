@@ -152,11 +152,6 @@ pub fn check_hedge_repricing(engine: &Arc<RealEngine>, prices: &MarketPrices) {
 
     if let Some(ref state) = *hedge {
         if let Some(ref order_id) = state.order_id {
-            // Защита: если уже есть активное pending_repricing - пропускаем новые попытки
-            if state.pending_repricing.is_some() {
-                return;
-            }
-
             let new_best_bid = if state.is_up_side {
                 prices.up_bid
             } else {
@@ -164,6 +159,38 @@ pub fn check_hedge_repricing(engine: &Arc<RealEngine>, prices: &MarketPrices) {
             };
 
             let new_best_bid = RealEngine::round_price(new_best_bid);
+
+            // Если уже есть pending_repricing, проверяем нужно ли обновить цену
+            if let Some((pending_price, _pending_size)) = state.pending_repricing {
+                let price_improvement = new_best_bid - pending_price;
+                if price_improvement >= 0.01 {
+                    // Пересчитываем размер для новой цены
+                    let (total_spent, shares_on_hand) = {
+                        let port = engine.portfolio.lock().unwrap();
+                        let total = port.up_spent + port.down_spent;
+                        let shares = if state.is_up_side {
+                            port.up_shares
+                        } else {
+                            port.down_shares
+                        };
+                        (total, shares)
+                    };
+
+                    let new_target_size = calculate_hedge_size(total_spent, shares_on_hand, new_best_bid);
+                    let new_remaining_size = new_target_size - state.filled_size;
+
+                    if new_remaining_size >= 5.0 {
+                        // Обновляем pending_repricing с новой ценой и размером
+                        if let Some(ref mut hedge_state) = *hedge {
+                            hedge_state.pending_repricing = Some((new_best_bid, new_remaining_size));
+                            info!("📈 ХЕДЖ | Обновляем pending_repricing: {:.2} → {:.2} | Size: {:.2}",
+                                pending_price, new_best_bid, new_remaining_size);
+                        }
+                    }
+                }
+                return; // Отмена уже запущена, ждём подтверждений
+            }
+
             let price_diff = new_best_bid - state.current_price;
 
             if price_diff >= 0.01 {
@@ -187,7 +214,6 @@ pub fn check_hedge_repricing(engine: &Arc<RealEngine>, prices: &MarketPrices) {
                 let remaining_size = new_target_size - state.filled_size;
 
                 if remaining_size < 5.0 {
-                    warn!("⚠️ ХЕДЖ | Оставшийся размер < 5.0 ({:.2}), пропускаем перевыставление", remaining_size);
                     return;
                 }
 
@@ -198,7 +224,6 @@ pub fn check_hedge_repricing(engine: &Arc<RealEngine>, prices: &MarketPrices) {
 
                 let order_id_to_cancel = order_id.clone();
                 let is_up_side = state.is_up_side;
-                let current_price = state.current_price;
                 let filled_size = state.filled_size;
 
                 // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: СРАЗУ обновляем состояние, сбрасываем order_id
@@ -279,16 +304,9 @@ pub fn check_hedge_repricing(engine: &Arc<RealEngine>, prices: &MarketPrices) {
                             place_hedge_order(&engine_clone, is_up_side, new_price, new_size);
                         }
                     } else {
-                        warn!("⚠️ ХЕДЖ | API отмена не удалась, откатываем состояние");
-                        // API отмена не удалась → откатываем состояние
-                        let mut hedge = engine_clone.hedge_state.lock().unwrap();
-                        if let Some(ref mut state) = *hedge {
-                            state.order_id = Some(order_id_to_cancel);  // Восстанавливаем order_id
-                            state.current_price = current_price;  // Восстанавливаем старую цену
-                            state.pending_repricing = None;
-                            state.api_cancel_confirmed = false;
-                            state.websocket_cancel_confirmed = false;
-                        }
+                        // API вернул false (ордер не найден) → значит другой тик уже отменил или ордер заполнен
+                        // Ничего не делаем, предыдущий тик уже обработал ситуацию
+                        warn!("⚠️ ХЕДЖ | API отмена не удалась (ордер не найден) - другой тик уже обработал");
                     }
                 });
             }

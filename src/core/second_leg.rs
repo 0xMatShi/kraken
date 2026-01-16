@@ -223,11 +223,6 @@ fn check_second_leg_repricing_for_stream(
         ..
     } = *state
     {
-        // Защита: если уже есть активное pending_repricing - пропускаем новые попытки
-        if pending_repricing.is_some() {
-            return;
-        }
-
         let new_best_bid = if first_leg_is_up {
             prices.down_bid
         } else {
@@ -235,12 +230,25 @@ fn check_second_leg_repricing_for_stream(
         };
 
         let new_best_bid = RealEngine::round_price(new_best_bid);
+
+        // Если уже есть pending_repricing, проверяем нужно ли обновить цену
+        if let Some(pending_price) = pending_repricing {
+            let price_improvement = new_best_bid - pending_price;
+            if price_improvement >= 0.01 {
+                // Цена выросла еще больше → обновляем pending_repricing
+                if let TradingState::SearchingSecondLeg { ref mut pending_repricing, .. } = *state {
+                    *pending_repricing = Some(new_best_bid);
+                }
+            }
+            return; // Отмена уже запущена, ждём подтверждений
+        }
+
         let price_diff = new_best_bid - current_price;
 
         if price_diff >= 0.01 {
             let remaining_size = engine.config.size - second_leg_filled;
 
-            if remaining_size < 0.01 {
+            if remaining_size < 5.00 {
                 return;
             }
 
@@ -343,21 +351,9 @@ fn check_second_leg_repricing_for_stream(
                         );
                     }
                 } else {
-                    warn!("⚠️ {} | API отмена не удалась, сбрасываем pending_repricing", stream_name_owned);
-                    // API отмена не удалась → откатываем состояние
-                    let mut state = trading_state_clone.lock().unwrap();
-                    if let TradingState::SearchingSecondLeg {
-                        ref mut pending_repricing,
-                        ref mut api_cancel_confirmed,
-                        ref mut websocket_cancel_confirmed,
-                        ref mut second_leg_current_price,
-                        ..
-                    } = *state {
-                        *pending_repricing = None;
-                        *api_cancel_confirmed = false;
-                        *websocket_cancel_confirmed = false;
-                        *second_leg_current_price = Some(current_price);  // Восстанавливаем цену
-                    }
+                    // API вернул false (ордер не найден) → значит другой тик уже отменил или ордер заполнен
+                    // Ничего не делаем, предыдущий тик уже обработал ситуацию
+                    warn!("⚠️ {} | API отмена не удалась (ордер не найден) - другой тик уже обработал", stream_name_owned);
                 }
             });
         }
