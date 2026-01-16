@@ -640,9 +640,16 @@ impl RealEngine {
             return;
         }
 
-        // Определяем размер ордера: если bid >= 0.75, увеличиваем size в 1.25 раза
+        // Определяем размер ордера в зависимости от цены:
+        // 0.55-0.65: size * 1.0625
+        // 0.65-0.75: size * 1.125
+        // 0.75+:     size * 1.25
         let order_size = if bid_price >= 0.75 {
             self.config.size * 1.25
+        } else if bid_price >= 0.65 {
+            self.config.size * 1.125
+        } else if bid_price >= 0.55 {
+            self.config.size * 1.0625
         } else {
             self.config.size
         };
