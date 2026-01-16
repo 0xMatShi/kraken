@@ -23,6 +23,16 @@ struct ClaimData {
     winning_outcome_index: u8,  // 0 = UP/YES, 1 = DOWN/NO
 }
 
+/// Состояние хеджирования
+#[derive(Debug, Clone)]
+struct HedgeState {
+    order_id: Option<String>,  // ID текущей лимитки хеджа
+    is_up_side: bool,          // Какую сторону хеджируем (true = покупаем UP)
+    current_price: f64,        // По какой цене размещен текущий ордер
+    target_size: f64,          // Целевое количество акций для хеджа
+    filled_size: f64,          // Сколько уже исполнено
+}
+
 /// Состояние торговой стратегии для одного потока
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -87,6 +97,10 @@ pub struct RealEngine {
     reserved_prices: Mutex<HashSet<ReservedPriceKey>>,
     // Последние актуальные цены из WebSocket для размещения второй ноги
     last_prices: Mutex<Option<MarketPrices>>,
+    // Состояние хеджирования
+    hedge_state: Mutex<Option<HedgeState>>,
+    // Флаг активного хеджирования (блокирует размещение лимиток потоками)
+    hedging_active: Mutex<bool>,
 }
 
 impl RealEngine {
@@ -133,6 +147,8 @@ impl RealEngine {
             down_threads,
             reserved_prices: Mutex::new(HashSet::new()),
             last_prices: Mutex::new(None),
+            hedge_state: Mutex::new(None),
+            hedging_active: Mutex::new(false),
         }
     }
 
@@ -147,6 +163,349 @@ impl RealEngine {
         (price * 100.0).round() / 100.0
     }
 
+    // === МЕТОДЫ ДЛЯ ХЕДЖИРОВАНИЯ ===
+
+    /// Расчет количества акций для хеджа по формуле:
+    /// Количество = (ПотраченоВсего - АкцийВНаличии) / (1 - ЦенаПокупки)
+    fn calculate_hedge_size(total_spent: f64, shares_on_hand: f64, price: f64) -> f64 {
+        if price >= 1.0 {
+            warn!("⚠️ Невозможно рассчитать хедж: цена >= 1.0 ({:.2})", price);
+            return 0.0;
+        }
+        let size = (total_spent - shares_on_hand) / (1.0 - price);
+        size.max(0.0)
+    }
+
+    /// Проверяем, есть ли активные ордера (кроме хеджа)
+    fn has_active_orders_except_hedge(&self) -> bool {
+        let hedge_order_id = {
+            let hedge = self.hedge_state.lock().unwrap();
+            hedge.as_ref().and_then(|h| h.order_id.clone())
+        };
+
+        let orders = self.active_order_ids.lock().unwrap();
+
+        if let Some(ref hedge_id) = hedge_order_id {
+            // Есть активные ордера, если больше 1 (хедж) или если хедж еще не размещен
+            orders.len() > 1 || (orders.len() == 1 && !orders.contains(hedge_id))
+        } else {
+            // Хеджа нет - любые ордера считаются активными
+            !orders.is_empty()
+        }
+    }
+
+    /// Проверяем нужен ли хедж и запускаем его размещение
+    fn check_and_start_hedge(self: &Arc<Self>, prices: &MarketPrices) {
+        // Если хедж уже активен, пропускаем
+        let hedging_active = *self.hedging_active.lock().unwrap();
+        if hedging_active {
+            return;
+        }
+
+        let (up_shares, down_shares, total_spent) = {
+            let port = self.portfolio.lock().unwrap();
+            (port.up_shares, port.down_shares, port.up_spent + port.down_spent)
+        };
+
+        let skew = up_shares - down_shares;
+
+        // ПОРОГ АКТИВАЦИИ: перекос > 50 акций
+        if skew.abs() <= 50.0 {
+            return;
+        }
+
+        info!("⚖️ ОБНАРУЖЕН ПЕРЕКОС: UP={:.1} DOWN={:.1} | Skew={:.1}",
+            up_shares, down_shares, skew);
+
+        // Проверяем, есть ли активные ордера (кроме хеджа)
+        if self.has_active_orders_except_hedge() {
+            info!("⏳ Есть активные лимитки - ждем их исполнения перед хеджем");
+            return;
+        }
+
+        // Определяем недостающую сторону
+        let (is_up_side, shares_on_hand, best_bid) = if skew > 0.0 {
+            // Много UP -> нужно купить DOWN
+            (false, down_shares, prices.down_bid)
+        } else {
+            // Много DOWN -> нужно купить UP
+            (true, up_shares, prices.up_bid)
+        };
+
+        // Расчет размера хеджа
+        let target_size = Self::calculate_hedge_size(total_spent, shares_on_hand, best_bid);
+
+        // Проверка минимального размера
+        if target_size < 5.0 {
+            warn!("⚠️ Размер хеджа < 5.0 ({:.2}), пропускаем", target_size);
+            return;
+        }
+
+        info!("🎯 ЗАПУСК ХЕДЖА | Сторона: {} | Best_bid: {:.2} | Целевой размер: {:.2}",
+            if is_up_side { "UP" } else { "DOWN" }, best_bid, target_size);
+
+        // Блокируем размещение лимиток потоками
+        *self.hedging_active.lock().unwrap() = true;
+
+        // Инициализируем состояние хеджа
+        *self.hedge_state.lock().unwrap() = Some(HedgeState {
+            order_id: None,
+            is_up_side,
+            current_price: best_bid,
+            target_size,
+            filled_size: 0.0,
+        });
+
+        // Размещаем лимитку хеджа
+        self.place_hedge_order(is_up_side, best_bid, target_size);
+    }
+
+    /// Размещаем лимитку хеджа
+    fn place_hedge_order(self: &Arc<Self>, is_up_side: bool, price: f64, size: f64) {
+        let token_id = if is_up_side {
+            Arc::clone(&self.up_token)
+        } else {
+            Arc::clone(&self.down_token)
+        };
+
+        let client = self.client.clone();
+        let signer = self.signer.clone();
+        let engine = Arc::clone(self);
+
+        info!("📝 ХЕДЖ | Размещаем лимитку: {} @ {:.2} | Size: {:.2}",
+            if is_up_side { "UP" } else { "DOWN" }, price, size);
+
+        tokio::spawn(async move {
+            let price_dec: Decimal = format!("{:.2}", price).parse().unwrap();
+            let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
+
+            let order = client.limit_order()
+                .token_id(token_id.as_ref())
+                .price(price_dec)
+                .size(size_dec)
+                .side(PolySide::Buy)
+                .order_type(OrderType::GTC)
+                .build().await.unwrap();
+
+            let signed = client.sign(&signer, order).await.unwrap();
+
+            match client.post_order(signed).await {
+                Ok(response) => {
+                    if !response.order_id.is_empty() {
+                        info!("✅ ХЕДЖ | Лимитка размещена: order_id={}", response.order_id);
+
+                        // Сохраняем order_id в состояние хеджа
+                        let mut hedge = engine.hedge_state.lock().unwrap();
+                        if let Some(ref mut state) = *hedge {
+                            state.order_id = Some(response.order_id);
+                        }
+                    }
+                },
+                Err(e) => {
+                    error!("❌ ХЕДЖ | Ошибка размещения: {}", e);
+                    // При ошибке сбрасываем состояние хеджа
+                    *engine.hedge_state.lock().unwrap() = None;
+                },
+            }
+        });
+    }
+
+    /// Проверяем нужно ли перевыставить хедж при изменении best_bid
+    fn check_hedge_repricing(self: &Arc<Self>, prices: &MarketPrices) {
+        let hedge = self.hedge_state.lock().unwrap();
+
+        if let Some(ref state) = *hedge {
+            // Проверяем только если ордер уже размещен
+            if let Some(ref order_id) = state.order_id {
+                // Получаем актуальный best_bid для нужной стороны
+                let new_best_bid = if state.is_up_side {
+                    prices.up_bid
+                } else {
+                    prices.down_bid
+                };
+
+                let new_best_bid = Self::round_price(new_best_bid);
+
+                // Проверяем ПОВЫСИЛСЯ ли best_bid на >= 0.01
+                let price_diff = new_best_bid - state.current_price;
+
+                if price_diff >= 0.01 {
+                    // Пересчитываем размер хеджа с новой ценой
+                    let (total_spent, shares_on_hand) = {
+                        let port = self.portfolio.lock().unwrap();
+                        let total = port.up_spent + port.down_spent;
+                        let shares = if state.is_up_side {
+                            port.up_shares
+                        } else {
+                            port.down_shares
+                        };
+                        (total, shares)
+                    };
+
+                    let new_target_size = Self::calculate_hedge_size(
+                        total_spent,
+                        shares_on_hand,
+                        new_best_bid
+                    );
+
+                    // Вычитаем уже исполненный объем
+                    let remaining_size = new_target_size - state.filled_size;
+
+                    if remaining_size < 5.0 {
+                        warn!("⚠️ ХЕДЖ | Оставшийся размер < 5.0 ({:.2}), пропускаем перевыставление", remaining_size);
+                        return;
+                    }
+
+                    info!("🔄 ХЕДЖ | Best_bid ПОВЫСИЛСЯ: {:.2} → {:.2} (+{:.2})",
+                        state.current_price, new_best_bid, price_diff);
+                    info!("   Новый целевой размер: {:.2} | Осталось разместить: {:.2}",
+                        new_target_size, remaining_size);
+
+                    // Клонируем данные для async task
+                    let order_id_to_cancel = order_id.clone();
+                    let is_up_side = state.is_up_side;
+
+                    drop(hedge);  // Освобождаем мьютекс
+
+                    let client = self.client.clone();
+                    let engine = Arc::clone(self);
+                    let up_token = Arc::clone(&self.up_token);
+                    let down_token = Arc::clone(&self.down_token);
+                    let signer = self.signer.clone();
+
+                    // Запускаем async task для отмены и перевыставления
+                    tokio::spawn(async move {
+                        // Отменяем текущий ордер
+                        info!("🚫 ХЕДЖ | Отменяем ордер: {}", order_id_to_cancel);
+
+                        let cancel_success = match client.cancel_order(&order_id_to_cancel).await {
+                            Ok(result) => {
+                                if !result.canceled.is_empty() {
+                                    info!("✅ ХЕДЖ | Ордер отменён");
+                                    true
+                                } else {
+                                    warn!("⚠️ ХЕДЖ | Ордер не был отменён");
+                                    false
+                                }
+                            },
+                            Err(e) => {
+                                error!("❌ ХЕДЖ | Ошибка отмены: {}", e);
+                                false
+                            }
+                        };
+
+                        if cancel_success {
+                            // Обновляем состояние - убираем order_id и обновляем цену
+                            {
+                                let mut hedge = engine.hedge_state.lock().unwrap();
+                                if let Some(ref mut state) = *hedge {
+                                    state.order_id = None;
+                                    state.current_price = new_best_bid;
+                                    state.target_size = new_target_size;
+                                }
+                            }
+
+                            // Размещаем новый ордер
+                            let token_id = if is_up_side {
+                                Arc::clone(&up_token)
+                            } else {
+                                Arc::clone(&down_token)
+                            };
+
+                            info!("📝 ХЕДЖ | Перевыставляем: {} @ {:.2} | Size: {:.2}",
+                                if is_up_side { "UP" } else { "DOWN" }, new_best_bid, remaining_size);
+
+                            let price_dec: Decimal = format!("{:.2}", new_best_bid).parse().unwrap();
+                            let size_dec: Decimal = format!("{:.2}", remaining_size).parse().unwrap();
+
+                            let order = client.limit_order()
+                                .token_id(token_id.as_ref())
+                                .price(price_dec)
+                                .size(size_dec)
+                                .side(PolySide::Buy)
+                                .order_type(OrderType::GTC)
+                                .build().await.unwrap();
+
+                            let signed = client.sign(&signer, order).await.unwrap();
+
+                            match client.post_order(signed).await {
+                                Ok(response) => {
+                                    if !response.order_id.is_empty() {
+                                        info!("✅ ХЕДЖ | Новая лимитка размещена: order_id={}", response.order_id);
+
+                                        let mut hedge = engine.hedge_state.lock().unwrap();
+                                        if let Some(ref mut state) = *hedge {
+                                            state.order_id = Some(response.order_id);
+                                        }
+                                    }
+                                },
+                                Err(e) => error!("❌ ХЕДЖ | Ошибка размещения: {}", e),
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    /// Обновляем filled_size хеджа при UPDATE события
+    fn update_hedge_filled(&self, order_id: &str, size: f64) {
+        let mut hedge = self.hedge_state.lock().unwrap();
+
+        if let Some(ref mut state) = *hedge {
+            if let Some(ref hedge_order_id) = state.order_id {
+                if order_id == hedge_order_id {
+                    state.filled_size += size;
+                    info!("📊 ХЕДЖ | Частичное исполнение: {:.2} | Всего: {:.2}/{:.2}",
+                        size, state.filled_size, state.target_size);
+                }
+            }
+        }
+    }
+
+    /// Завершаем хедж когда ордер полностью исполнен
+    fn complete_hedge(&self, order_id: &str) {
+        let mut hedge = self.hedge_state.lock().unwrap();
+
+        if let Some(ref state) = *hedge {
+            if let Some(ref hedge_order_id) = state.order_id {
+                if order_id == hedge_order_id {
+                    info!("✅ ХЕДЖ ЗАВЕРШЕН | Filled: {:.2}/{:.2}",
+                        state.filled_size, state.target_size);
+
+                    // Сбрасываем состояние хеджа
+                    *hedge = None;
+                    drop(hedge);
+
+                    // Снимаем блокировку размещения лимиток
+                    *self.hedging_active.lock().unwrap() = false;
+                    info!("🔓 Потоки разблокированы");
+                }
+            }
+        }
+    }
+
+    /// Отменяем хедж если ордер был отменен
+    fn cancel_hedge(&self, order_id: &str) {
+        let mut hedge = self.hedge_state.lock().unwrap();
+
+        if let Some(ref state) = *hedge {
+            if let Some(ref hedge_order_id) = state.order_id {
+                if order_id == hedge_order_id {
+                    warn!("⚠️ ХЕДЖ ОТМЕНЕН");
+
+                    // Сбрасываем состояние хеджа
+                    *hedge = None;
+                    drop(hedge);
+
+                    // Снимаем блокировку размещения лимиток
+                    *self.hedging_active.lock().unwrap() = false;
+                    info!("🔓 Потоки разблокированы");
+                }
+            }
+        }
+    }
+
     // Методы для работы с активными ордерами
     pub fn add_order_id(&self, order_id: String) {
         let mut orders = self.active_order_ids.lock().unwrap();
@@ -158,7 +517,7 @@ impl RealEngine {
         orders.remove(order_id);
     }
 
-    pub fn process_tick(&self, prices: MarketPrices) {
+    pub fn process_tick(self: &Arc<Self>, prices: MarketPrices) {
         // Сохраняем последние актуальные цены для размещения второй ноги
         *self.last_prices.lock().unwrap() = Some(prices.clone());
 
@@ -172,10 +531,19 @@ impl RealEngine {
             return;
         }
 
-        self.run_logic(prices.clone());
+        // ПРИОРИТЕТ 1: Проверяем необходимость хеджирования ПЕРЕД основным алгоритмом
+        self.check_and_start_hedge(&prices);
 
-        // Проверяем возможность перевыставления второй ноги
-        self.check_second_leg_repricing(&prices);
+        // ПРИОРИТЕТ 2: Основной алгоритм - только если хедж не активен
+        let hedging_active = *self.hedging_active.lock().unwrap();
+        if !hedging_active {
+            self.run_logic(prices.clone());
+            // Проверяем возможность перевыставления второй ноги
+            self.check_second_leg_repricing(&prices);
+        }
+
+        // ПРИОРИТЕТ 3: Проверяем перевыставление хеджа (если он активен)
+        self.check_hedge_repricing(&prices);
     }
 
     fn run_logic(&self, prices: MarketPrices) {
@@ -1022,6 +1390,8 @@ impl RealEngine {
                         // Обновляем second_leg_filled в состоянии потока (если это вторая нога)
                         drop(orders_info);  // Освобождаем мьютекс перед вызовом update
                         self.update_second_leg_filled(&order_id, size);
+                        // Обновляем filled_size хеджа (если это ордер хеджа)
+                        self.update_hedge_filled(&order_id, size);
                         let mut orders_info = self.active_orders_info.lock().unwrap();  // Захватываем снова
 
                         // Получаем данные снова после обновления
@@ -1066,6 +1436,8 @@ impl RealEngine {
 
                             // === ЛОГИКА СОСТОЯНИЯ СТРАТЕГИИ ===
                             self.handle_order_fully_filled(&order_id, final_price, final_is_up, current_original_size);
+                            // Проверяем, это ли хедж ордер
+                            self.complete_hedge(&order_id);
                         } else {
                             drop(orders_info); // Освобождаем мьютекс если ордер еще не полностью исполнен
                         }
@@ -1147,6 +1519,8 @@ impl RealEngine {
 
                 // === ЛОГИКА СОСТОЯНИЯ СТРАТЕГИИ ===
                 self.handle_order_cancelled(&order_id);
+                // Проверяем, это ли хедж ордер
+                self.cancel_hedge(&order_id);
             }
             _ => {
                 // Другие типы событий
