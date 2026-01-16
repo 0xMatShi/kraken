@@ -21,7 +21,7 @@ use crate::models::Portfolio;
 pub use log_capture::UiLogLayer;
 
 // Количество уровней стакана для отображения
-pub const ORDER_BOOK_DEPTH: usize = 11;
+pub const ORDER_BOOK_DEPTH: usize = 10;
 // Максимум записей в истории
 const MAX_HISTORY_ENTRIES: usize = 100;
 
