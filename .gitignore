@@ -9,6 +9,7 @@ __pycache__/
 price_tracker.json
 .claude
 /examples
+/examplle
 /analyze
 claim.json
 .venv

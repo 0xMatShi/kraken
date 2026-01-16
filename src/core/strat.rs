@@ -1,24 +1,15 @@
 use std::sync::{Arc, Mutex};
 use std::collections::{HashSet, HashMap};
-use std::fs;
-use std::path::Path;
 use crate::models::{Portfolio, Side, MarketPrices};
 use crate::utils::config::TradingConfig;
 use crate::ui::{self, UiState};
-use serde::{Serialize, Deserialize};
 
 use polymarket_client_sdk::clob::Client;
 use polymarket_client_sdk::auth::Normal;
 use polymarket_client_sdk::auth::state::Authenticated;
 use alloy::signers::local::PrivateKeySigner;
-use tracing::{info, warn, error};
+use tracing::info;
 use uuid::Uuid;
-
-#[derive(Serialize, Deserialize)]
-pub struct ClaimData {
-    pub condition_id: String,
-    pub winning_outcome_index: u8,  // 0 = UP/YES, 1 = DOWN/NO
-}
 
 /// Состояние хеджирования
 #[derive(Debug, Clone)]
@@ -84,7 +75,6 @@ pub struct RealEngine {
     pub our_api_key: Uuid,
     pub config: TradingConfig,
     pub ui_state: UiState,
-    pub condition_id: Option<String>,
     // Многопоточность: N потоков на каждую сторону (N = config.threads)
     pub up_threads: Vec<Arc<Mutex<TradingState>>>,
     pub down_threads: Vec<Arc<Mutex<TradingState>>>,
@@ -103,7 +93,6 @@ impl RealEngine {
         our_api_key: Uuid,
         config: TradingConfig,
         ui_state: UiState,
-        condition_id: Option<String>,
     ) -> Self {
         // Создаём N потоков на каждую сторону (N = config.threads)
         let num_threads = config.threads.max(1);
@@ -132,7 +121,6 @@ impl RealEngine {
             our_api_key,
             config,
             ui_state,
-            condition_id,
             up_threads,
             down_threads,
             reserved_prices: Mutex::new(HashSet::new()),
@@ -264,7 +252,7 @@ impl RealEngine {
         }
     }
 
-    /// Финализация сессии - генерация отчета и сохранение данных для клейма
+    /// Финализация сессии - генерация отчета
     pub fn finalize(&self, final_prices: &MarketPrices) {
         let port = self.portfolio.lock().unwrap();
         let winner = if final_prices.up_bid > 0.5 { Side::Up } else { Side::Down };
@@ -279,56 +267,5 @@ impl RealEngine {
         info!("PnL: ${:.2}", pnl);
         info!("Maker Trades: {}", port.maker_trades);
         info!("Taker Trades: {}", port.taker_trades);
-
-        // Сохраняем данные для клейма наград
-        if let Some(ref cond_id) = self.condition_id {
-            let winning_outcome_index = if winner == Side::Up { 0 } else { 1 };
-            let claim_data = ClaimData {
-                condition_id: cond_id.clone(),
-                winning_outcome_index,
-            };
-
-            let redeem_dir = Path::new("src/redeem");
-            if let Err(e) = fs::create_dir_all(redeem_dir) {
-                error!("❌ Ошибка создания директории src/redeem: {}", e);
-                return;
-            }
-
-            let claim_path = redeem_dir.join("claim.json");
-            let mut claim_events: Vec<ClaimData> = if claim_path.exists() {
-                match fs::read_to_string(&claim_path) {
-                    Ok(content) => {
-                        serde_json::from_str(&content).unwrap_or_else(|e| {
-                            warn!("⚠️ Ошибка парсинга claim.json: {}. Создаем новый массив", e);
-                            Vec::new()
-                        })
-                    },
-                    Err(e) => {
-                        warn!("⚠️ Ошибка чтения claim.json: {}. Создаем новый массив", e);
-                        Vec::new()
-                    }
-                }
-            } else {
-                Vec::new()
-            };
-
-            claim_events.push(claim_data);
-
-            match serde_json::to_string_pretty(&claim_events) {
-                Ok(json_str) => {
-                    if let Err(e) = fs::write(&claim_path, json_str) {
-                        error!("❌ Ошибка записи claim.json: {}", e);
-                    } else {
-                        info!("💾 Событие добавлено в claim.json ({:?})", claim_path);
-                        info!("   Condition ID: {}", cond_id);
-                        info!("   Winning Outcome: {} ({})", winning_outcome_index, if winning_outcome_index == 0 { "UP/YES" } else { "DOWN/NO" });
-                        info!("   Всего событий в очереди: {}", claim_events.len());
-                    }
-                },
-                Err(e) => error!("❌ Ошибка сериализации claim data: {}", e),
-            }
-        } else {
-            warn!("⚠️ Condition ID не найден, пропускаем сохранение claim.json");
-        }
     }
 }
