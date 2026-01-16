@@ -216,6 +216,14 @@ impl RealEngine {
 
         // ПОРОГ АКТИВАЦИИ: перекос > 50 акций
         if skew.abs() <= 50.0 {
+            // Перекос исчез - сбрасываем флаг если хедж еще не размещен
+            let hedging_was_active = *self.hedging_active.lock().unwrap();
+            if hedging_was_active {
+                info!("✅ Перекос устранен естественным образом (Skew={:.1})", skew);
+                *self.hedging_active.lock().unwrap() = false;
+                *self.hedge_state.lock().unwrap() = None;
+                info!("🔓 Потоки разблокированы");
+            }
             return;
         }
 
