@@ -291,9 +291,18 @@ fn update_placement_for_stream(
             first_leg_size,
             second_leg_order_id: Some(ref existing_order_id),
             second_leg_filled,
+            pending_repricing,
+            api_cancel_confirmed,
+            websocket_cancel_confirmed,
             ..
         } = *state {
             if existing_order_id == order_id {
+                // Если отмена уже в процессе (pending_repricing установлен) → игнорируем PLACEMENT
+                if pending_repricing.is_some() {
+                    info!("⚠️ Игнорируем PLACEMENT {} @ {:.2} - отмена уже в процессе", token_str, price);
+                    return false;
+                }
+
                 info!("📝 Вторая нога PLACEMENT подтверждён (order_id match): {} @ {:.2}", token_str, price);
                 *state = TradingState::SearchingSecondLeg {
                     first_leg_price,
@@ -302,9 +311,9 @@ fn update_placement_for_stream(
                     second_leg_order_id: Some(order_id.to_string()),
                     second_leg_current_price: Some(price),
                     second_leg_filled,
-                    pending_repricing: None,
-                    api_cancel_confirmed: false,
-                    websocket_cancel_confirmed: false,
+                    pending_repricing,              // Сохраняем!
+                    api_cancel_confirmed,           // Сохраняем!
+                    websocket_cancel_confirmed,     // Сохраняем!
                 };
                 return true;
             }
