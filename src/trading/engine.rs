@@ -196,10 +196,15 @@ impl RealEngine {
 
     /// Проверяем нужен ли хедж и запускаем его размещение
     fn check_and_start_hedge(self: &Arc<Self>, prices: &MarketPrices) {
-        // Если хедж уже активен, пропускаем
-        let hedging_active = *self.hedging_active.lock().unwrap();
-        if hedging_active {
-            return;
+        // Пропускаем только если хедж УЖЕ РАЗМЕЩЕН (есть order_id)
+        // Если hedging_active = true, но hedge_state = None, значит ждем освобождения ордеров
+        let hedge_order_placed = {
+            let hedge = self.hedge_state.lock().unwrap();
+            hedge.as_ref().and_then(|h| h.order_id.as_ref()).is_some()
+        };
+
+        if hedge_order_placed {
+            return; // Хедж уже размещен, ничего не делаем
         }
 
         let (up_shares, down_shares, total_spent) = {
@@ -217,9 +222,16 @@ impl RealEngine {
         info!("⚖️ ОБНАРУЖЕН ПЕРЕКОС: UP={:.1} DOWN={:.1} | Skew={:.1}",
             up_shares, down_shares, skew);
 
+        // КРИТИЧНО: Блокируем потоки СРАЗУ после обнаружения перекоса
+        // Это предотвращает размещение новых ордеров пока ждем освобождения
+        *self.hedging_active.lock().unwrap() = true;
+
         // Проверяем, есть ли активные ордера (кроме хеджа)
         if self.has_active_orders_except_hedge() {
             info!("⏳ Есть активные лимитки - ждем их исполнения перед хеджем");
+            info!("🔒 Потоки заблокированы до завершения хеджа");
+            // ВАЖНО: НЕ снимаем блокировку! Она останется до завершения хеджа
+            // Ордера отменятся по экспирации или исполнятся
             return;
         }
 
@@ -238,14 +250,13 @@ impl RealEngine {
         // Проверка минимального размера
         if target_size < 5.0 {
             warn!("⚠️ Размер хеджа < 5.0 ({:.2}), пропускаем", target_size);
+            // Снимаем блокировку если хедж не нужен
+            *self.hedging_active.lock().unwrap() = false;
             return;
         }
 
         info!("🎯 ЗАПУСК ХЕДЖА | Сторона: {} | Best_bid: {:.2} | Целевой размер: {:.2}",
             if is_up_side { "UP" } else { "DOWN" }, best_bid, target_size);
-
-        // Блокируем размещение лимиток потоками
-        *self.hedging_active.lock().unwrap() = true;
 
         // Инициализируем состояние хеджа
         *self.hedge_state.lock().unwrap() = Some(HedgeState {
