@@ -261,6 +261,13 @@ impl RealEngine {
             return;
         }
 
+        // Определяем размер ордера: если bid >= 0.75, увеличиваем size в 1.25 раза
+        let order_size = if bid_price >= 0.75 {
+            self.config.size * 1.25
+        } else {
+            self.config.size
+        };
+
         // Проверяем, не забронирована ли эта цена другим потоком
         let price_key: ReservedPriceKey = (first_leg_is_up, price_to_cents(first_leg_price));
         {
@@ -286,7 +293,7 @@ impl RealEngine {
             order_id: String::new(), // Заполнится при PLACEMENT
             is_up: first_leg_is_up,
             price: first_leg_price,
-            size: self.config.size,
+            size: order_size,
         };
 
         let trading_state_clone = Arc::clone(trading_state);
@@ -297,7 +304,7 @@ impl RealEngine {
         };
         let client = self.client.clone();
         let signer = self.signer.clone();
-        let size = self.config.size;
+        let size = order_size;
 
         tokio::spawn(async move {
             let price_dec: Decimal = format!("{:.2}", first_leg_price).parse().unwrap();
