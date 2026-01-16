@@ -208,7 +208,6 @@ impl RealEngine {
     /// Проверяем нужен ли хедж и запускаем его размещение
     fn check_and_start_hedge(self: &Arc<Self>, prices: &MarketPrices) {
         // Пропускаем только если хедж УЖЕ РАЗМЕЩЕН (есть order_id)
-        // Если hedging_active = true, но hedge_state = None, значит ждем освобождения ордеров
         let hedge_order_placed = {
             let hedge = self.hedge_state.lock().unwrap();
             hedge.as_ref().and_then(|h| h.order_id.as_ref()).is_some()
@@ -238,12 +237,21 @@ impl RealEngine {
             return;
         }
 
+        // КРИТИЧНО: Атомарно проверяем и устанавливаем флаг в одной критической секции
+        // Это предотвращает race condition когда несколько тиков в одну миллисекунду
+        let was_already_started = {
+            let mut active = self.hedging_active.lock().unwrap();
+            if *active {
+                // Хедж уже запущен другим тиком - выходим
+                return;
+            }
+            // Устанавливаем флаг атомарно
+            *active = true;
+            false
+        };
+
         info!("⚖️ ОБНАРУЖЕН ПЕРЕКОС: UP={:.1} DOWN={:.1} | Skew={:.1}",
             up_shares, down_shares, skew);
-
-        // КРИТИЧНО: Блокируем потоки СРАЗУ после обнаружения перекоса
-        // Это предотвращает размещение новых ордеров пока ждем освобождения
-        *self.hedging_active.lock().unwrap() = true;
 
         // Проверяем, есть ли активные ордера (кроме хеджа)
         if self.has_active_orders_except_hedge() {
@@ -567,10 +575,13 @@ impl RealEngine {
         // ПРИОРИТЕТ 2: Основной алгоритм - только если хедж не активен
         let hedging_active = *self.hedging_active.lock().unwrap();
         if !hedging_active {
+            // Размещение НОВЫХ первых ног - блокируется при хедже
             self.run_logic(prices.clone());
-            // Проверяем возможность перевыставления второй ноги
-            self.check_second_leg_repricing(&prices);
         }
+
+        // ПРИОРИТЕТ 2.5: Перевыставление СУЩЕСТВУЮЩИХ вторых ног - работает ВСЕГДА
+        // Вторая нога должна догонять best_bid даже во время хеджирования
+        self.check_second_leg_repricing(&prices);
 
         // ПРИОРИТЕТ 3: Проверяем перевыставление хеджа (если он активен)
         self.check_hedge_repricing(&prices);
