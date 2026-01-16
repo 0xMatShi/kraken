@@ -343,8 +343,19 @@ impl RealEngine {
     }
 
     /// Размещаем лимитку второй ноги по актуальному best_bid
-    /// remaining_size - размер который нужно разместить (first_leg_size - second_leg_filled)
-    fn place_second_leg(&self, first_leg_is_up: bool, remaining_size: f64, trading_state: &Arc<Mutex<TradingState>>, stream_name: &str) {
+    /// Вторая нога всегда размещается с размером из конфига (self.config.size)
+    /// за вычетом уже исполненного объема (second_leg_filled)
+    fn place_second_leg(&self, first_leg_is_up: bool, trading_state: &Arc<Mutex<TradingState>>, stream_name: &str) {
+        // Вычисляем размер второй ноги: config.size - second_leg_filled
+        let remaining_size = {
+            let state = trading_state.lock().unwrap();
+            if let TradingState::SearchingSecondLeg { second_leg_filled, .. } = *state {
+                self.config.size - second_leg_filled
+            } else {
+                self.config.size
+            }
+        };
+
         // ПРОВЕРКА 1: Минимальный размер ордера должен быть >= 5.0
         if remaining_size < 5.0 {
             warn!("⚠️ {} | Размер второй ноги < 5.0 ({:.2}), пропускаем размещение", stream_name, remaining_size);
@@ -469,7 +480,6 @@ impl RealEngine {
         // Проверяем только потоки в состоянии SearchingSecondLeg с размещенным ордером
         if let TradingState::SearchingSecondLeg {
             first_leg_is_up,
-            first_leg_size,
             second_leg_order_id: Some(ref order_id),
             second_leg_current_price: Some(current_price),
             second_leg_filled,
@@ -489,7 +499,7 @@ impl RealEngine {
             // ВАЖНО: Реагируем ТОЛЬКО на повышение цены, игнорируем понижение
             let price_diff = new_best_bid - current_price;
             if price_diff >= 0.01 {
-                let remaining_size = first_leg_size - second_leg_filled;
+                let remaining_size = self.config.size - second_leg_filled;
 
                 if remaining_size < 0.01 {
                     // Вся вторая нога уже исполнена, но ордер еще не отменен
@@ -819,7 +829,7 @@ impl RealEngine {
                     drop(state);
 
                     // Размещаем вторую ногу по актуальному best_bid
-                    self.place_second_leg(first_leg_is_up, first_leg_size, trading_state, stream_name);
+                    self.place_second_leg(first_leg_is_up, trading_state, stream_name);
                 }
             }
             _ => {}
@@ -1191,7 +1201,7 @@ impl RealEngine {
                     drop(state);
 
                     // Размещаем лимитку второй ноги по актуальному best_bid
-                    self.place_second_leg(filled_is_up, filled_size, trading_state, stream_name);
+                    self.place_second_leg(filled_is_up, trading_state, stream_name);
                 }
             }
             TradingState::SearchingSecondLeg { second_leg_order_id: Some(second_order_id), first_leg_price, first_leg_is_up, .. } => {
