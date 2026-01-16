@@ -266,6 +266,32 @@ fn check_hedge_taker_fill(
     }
 }
 
+/// Обновляем PLACEMENT для хеджа
+fn update_hedge_placement(
+    engine: &RealEngine,
+    order_id: &str,
+    is_up: bool,
+    price: f64,
+    token_str: &str,
+) {
+    let hedge = engine.hedge_state.lock().unwrap();
+
+    if let Some(ref state) = *hedge {
+        if let Some(ref hedge_order_id) = state.order_id {
+            if hedge_order_id == order_id && is_up == state.is_up_side {
+                // Если отмена уже в процессе (pending_repricing установлен) → игнорируем PLACEMENT
+                if state.pending_repricing.is_some() {
+                    info!("⚠️ ХЕДЖ | Игнорируем PLACEMENT {} @ {:.2} - отмена уже в процессе", token_str, price);
+                    return;
+                }
+
+                info!("📝 ХЕДЖ | PLACEMENT подтверждён: {} @ {:.2}", token_str, price);
+                // НЕ перезаписываем state, так как pending_repricing = None (нет активной отмены)
+            }
+        }
+    }
+}
+
 /// Обновляем placement для конкретного потока
 fn update_placement_for_stream(
     trading_state: &Arc<Mutex<TradingState>>,
@@ -433,6 +459,11 @@ pub fn handle_ws_order(
                         _ => {}
                     }
                 }
+            }
+
+            // Проверяем PLACEMENT для хеджа
+            if !placement_handled {
+                update_hedge_placement(engine, &order_id, is_up, price, token_str);
             }
         }
         Some("UPDATE") => {

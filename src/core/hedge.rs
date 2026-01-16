@@ -47,14 +47,13 @@ pub fn check_and_start_hedge(engine: &Arc<RealEngine>, prices: &MarketPrices) {
         return;
     }
 
-    // КРИТИЧНО: Атомарно проверяем и устанавливаем флаг
+    // Проверяем, активен ли уже хедж
     {
-        let mut active = engine.hedging_active.lock().unwrap();
+        let active = engine.hedging_active.lock().unwrap();
         if *active {
             return;
         }
-        *active = true;
-    };
+    }
 
     info!("⚖️ ОБНАРУЖЕН ПЕРЕКОС: UP={:.1} DOWN={:.1} | Skew={:.1}",
         up_shares, down_shares, skew);
@@ -64,6 +63,15 @@ pub fn check_and_start_hedge(engine: &Arc<RealEngine>, prices: &MarketPrices) {
         info!("⏳ Есть активные потоки - ждем их возврата в Idle перед хеджем");
         info!("🔒 Новые потоки заблокированы до завершения хеджа");
         return;
+    }
+
+    // КРИТИЧНО: Устанавливаем флаг ТОЛЬКО если нет активных потоков
+    {
+        let mut active = engine.hedging_active.lock().unwrap();
+        if *active {
+            return; // Double-check на случай race condition
+        }
+        *active = true;
     }
 
     // Определяем недостающую сторону
