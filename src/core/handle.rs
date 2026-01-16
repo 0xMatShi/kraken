@@ -104,6 +104,9 @@ fn handle_taker_fill_for_strategy(engine: &RealEngine, taker_order_id: &str, is_
         let stream_name = format!("DOWN-поток #{}", thread_idx + 1);
         check_second_leg_taker_fill_for_stream(engine, trading_state, taker_order_id, is_up, price, size, &stream_name);
     }
+
+    // Проверяем хедж (может исполниться как TAKER если пересекает спред)
+    check_hedge_taker_fill(engine, taker_order_id, is_up, price, size);
 }
 
 /// Проверяем заполнение первой ноги для конкретного потока
@@ -214,6 +217,50 @@ fn check_second_leg_taker_fill_for_stream(
             } else {
                 info!("📊 {} | Вторая нога частично заполнена: {:.2}/{:.2}",
                     stream_name, new_filled, target_size);
+            }
+        }
+    }
+}
+
+/// Проверяем заполнение хеджа как TAKER
+fn check_hedge_taker_fill(
+    engine: &RealEngine,
+    taker_order_id: &str,
+    is_up: bool,
+    price: f64,
+    size: f64,
+) {
+    let mut hedge = engine.hedge_state.lock().unwrap();
+
+    if let Some(ref state) = *hedge {
+        if let Some(ref hedge_order_id) = state.order_id {
+            // Проверяем: это наш хедж?
+            let is_our_hedge = taker_order_id == hedge_order_id && is_up == state.is_up_side;
+
+            if is_our_hedge {
+                info!("🔄 ХЕДЖ | TAKER FILL! order_id={}", taker_order_id);
+                info!("   {} @ {:.2} size={:.2}",
+                    if is_up { "UP" } else { "DOWN" }, price, size);
+
+                let new_filled = state.filled_size + size;
+                let target_size = state.target_size;
+
+                // Обновляем filled_size
+                if let Some(ref mut hedge_state) = *hedge {
+                    hedge_state.filled_size = new_filled;
+                }
+
+                // Проверяем: заполнен ли хедж полностью?
+                if (target_size - new_filled).abs() < 0.01 || new_filled >= target_size {
+                    info!("✅ ХЕДЖ | ПОЛНОСТЬЮ ЗАПОЛНЕН через TAKER ({:.2}/{:.2}) → сбрасываем состояние",
+                        new_filled, target_size);
+                    *hedge = None;
+                    *engine.hedging_active.lock().unwrap() = false;
+                    info!("🔓 Потоки разблокированы");
+                } else {
+                    info!("📊 ХЕДЖ | Частично заполнен: {:.2}/{:.2}",
+                        new_filled, target_size);
+                }
             }
         }
     }
