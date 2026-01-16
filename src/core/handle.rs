@@ -85,6 +85,7 @@ pub fn handle_ws_trade(
 
 /// Обработка taker fill в контексте стратегии
 fn handle_taker_fill_for_strategy(engine: &RealEngine, taker_order_id: &str, is_up: bool, price: f64, size: f64) {
+    // Проверяем первую ногу
     for (thread_idx, trading_state) in engine.up_threads.iter().enumerate() {
         let stream_name = format!("UP-поток #{}", thread_idx + 1);
         check_first_leg_fill_for_stream(engine, trading_state, taker_order_id, is_up, price, size, &stream_name);
@@ -92,6 +93,16 @@ fn handle_taker_fill_for_strategy(engine: &RealEngine, taker_order_id: &str, is_
     for (thread_idx, trading_state) in engine.down_threads.iter().enumerate() {
         let stream_name = format!("DOWN-поток #{}", thread_idx + 1);
         check_first_leg_fill_for_stream(engine, trading_state, taker_order_id, is_up, price, size, &stream_name);
+    }
+
+    // Проверяем вторую ногу (может исполниться как TAKER если пересекает спред)
+    for (thread_idx, trading_state) in engine.up_threads.iter().enumerate() {
+        let stream_name = format!("UP-поток #{}", thread_idx + 1);
+        check_second_leg_taker_fill_for_stream(engine, trading_state, taker_order_id, is_up, price, size, &stream_name);
+    }
+    for (thread_idx, trading_state) in engine.down_threads.iter().enumerate() {
+        let stream_name = format!("DOWN-поток #{}", thread_idx + 1);
+        check_second_leg_taker_fill_for_stream(engine, trading_state, taker_order_id, is_up, price, size, &stream_name);
     }
 }
 
@@ -147,6 +158,64 @@ fn check_first_leg_fill_for_stream(
             }
         }
         _ => {}
+    }
+}
+
+/// Проверяем заполнение второй ноги как TAKER для конкретного потока
+fn check_second_leg_taker_fill_for_stream(
+    engine: &RealEngine,
+    trading_state: &Arc<Mutex<TradingState>>,
+    taker_order_id: &str,
+    is_up: bool,
+    price: f64,
+    size: f64,
+    stream_name: &str,
+) {
+    let mut state = trading_state.lock().unwrap();
+
+    if let TradingState::SearchingSecondLeg {
+        first_leg_is_up,
+        second_leg_order_id,
+        second_leg_filled,
+        ..
+    } = &*state {
+        // Вторая нога должна быть на противоположной стороне от первой
+        let expected_second_leg_is_up = !first_leg_is_up;
+
+        let is_our_second_leg = if let Some(second_order_id) = second_leg_order_id {
+            // Если есть order_id - проверяем по нему
+            taker_order_id == second_order_id
+        } else {
+            // Если нет order_id - распознаем по стороне (противоположной первой)
+            is_up == expected_second_leg_is_up
+        };
+
+        if is_our_second_leg {
+            info!("🔄 {} | TAKER FILL = ВТОРАЯ НОГА! order_id={}", stream_name, taker_order_id);
+            info!("   {} @ {:.2} size={:.2}",
+                if is_up { "UP" } else { "DOWN" }, price, size);
+
+            let new_filled = second_leg_filled + size;
+            let target_size = engine.config.size;
+
+            // Обновляем second_leg_filled
+            if let TradingState::SearchingSecondLeg {
+                ref mut second_leg_filled,
+                ..
+            } = *state {
+                *second_leg_filled = new_filled;
+            }
+
+            // Проверяем: заполнена ли вторая нога полностью?
+            if (target_size - new_filled).abs() < 0.01 || new_filled >= target_size {
+                info!("✅ {} | Вторая нога ПОЛНОСТЬЮ ЗАПОЛНЕНА через TAKER ({:.2}/{:.2}) → возвращаемся в Idle",
+                    stream_name, new_filled, target_size);
+                *state = TradingState::Idle;
+            } else {
+                info!("📊 {} | Вторая нога частично заполнена: {:.2}/{:.2}",
+                    stream_name, new_filled, target_size);
+            }
+        }
     }
 }
 
