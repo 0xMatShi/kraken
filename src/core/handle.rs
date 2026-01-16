@@ -138,6 +138,8 @@ fn check_first_leg_fill_for_stream(
                     second_leg_current_price: None,
                     second_leg_filled: 0.0,
                     pending_repricing: None,
+                    api_cancel_confirmed: false,
+                    websocket_cancel_confirmed: false,
                 };
                 drop(state);
 
@@ -185,6 +187,8 @@ fn update_placement_for_stream(
                     second_leg_current_price: Some(price),
                     second_leg_filled,
                     pending_repricing: None,
+                    api_cancel_confirmed: false,
+                    websocket_cancel_confirmed: false,
                 };
                 return true;
             }
@@ -471,6 +475,8 @@ fn handle_order_fully_filled_for_stream(
                     second_leg_current_price: None,
                     second_leg_filled: 0.0,
                     pending_repricing: None,
+                    api_cancel_confirmed: false,
+                    websocket_cancel_confirmed: false,
                 };
                 drop(state);
 
@@ -527,7 +533,16 @@ fn handle_order_cancelled_for_stream(
                 *state = TradingState::Idle;
             }
         }
-        TradingState::SearchingSecondLeg { second_leg_order_id: Some(second_order_id), first_leg_price, first_leg_is_up, first_leg_size, second_leg_filled, pending_repricing, .. } => {
+        TradingState::SearchingSecondLeg {
+            second_leg_order_id: Some(second_order_id),
+            first_leg_price,
+            first_leg_is_up,
+            first_leg_size,
+            second_leg_filled,
+            pending_repricing,
+            api_cancel_confirmed,
+            ..
+        } => {
             if order_id == second_order_id {
                 info!("⚠️ {} | Вторая нога отменена (WebSocket CANCELLATION)", stream_name);
 
@@ -536,19 +551,43 @@ fn handle_order_cancelled_for_stream(
                 let first_leg_is_up_val = *first_leg_is_up;
                 let first_leg_size_val = *first_leg_size;
                 let second_leg_filled_val = *second_leg_filled;
+                let api_already_confirmed = *api_cancel_confirmed;
 
-                *state = TradingState::SearchingSecondLeg {
-                    first_leg_price: first_leg_price_val,
-                    first_leg_is_up: first_leg_is_up_val,
-                    first_leg_size: first_leg_size_val,
-                    second_leg_order_id: None,
-                    second_leg_current_price: None,
-                    second_leg_filled: second_leg_filled_val,
-                    pending_repricing: None,
+                // КЛЮЧ 2: WebSocket подтвердил отмену
+                // Проверяем: если API уже подтвердил (Ключ 1) → размещаем новый ордер
+                let should_place_new_order = if let Some(_new_price) = pending_price {
+                    if api_already_confirmed {
+                        info!("🔑 {} | КЛЮЧ 2/2 ПОВЕРНУТ (WebSocket)", stream_name);
+                        info!("🔓 {} | ОБА КЛЮЧА ПОВЕРНУТЫ! Размещаем новый ордер", stream_name);
+                        true
+                    } else {
+                        info!("🔑 {} | КЛЮЧ 2/2 ПОВЕРНУТ (WebSocket)", stream_name);
+                        info!("⏳ {} | Ждём КЛЮЧ 1/2 (API confirmation)", stream_name);
+                        false
+                    }
+                } else {
+                    // Нет pending_repricing → это обычная отмена (не перевыставление)
+                    info!("⚠️ {} | Обычная отмена (не перевыставление), возвращаемся в Idle", stream_name);
+                    *state = TradingState::Idle;
+                    return;
                 };
-                drop(state);
 
-                if let Some(new_price) = pending_price {
+                if should_place_new_order {
+                    // Оба ключа повернуты → сбрасываем pending и размещаем новый ордер
+                    *state = TradingState::SearchingSecondLeg {
+                        first_leg_price: first_leg_price_val,
+                        first_leg_is_up: first_leg_is_up_val,
+                        first_leg_size: first_leg_size_val,
+                        second_leg_order_id: None,
+                        second_leg_current_price: None,
+                        second_leg_filled: second_leg_filled_val,
+                        pending_repricing: None,
+                        api_cancel_confirmed: false,
+                        websocket_cancel_confirmed: false,
+                    };
+                    drop(state);
+
+                    let new_price = pending_price.unwrap();
                     let remaining_size = engine.config.size - second_leg_filled_val;
 
                     if remaining_size < 5.0 {
@@ -556,10 +595,23 @@ fn handle_order_cancelled_for_stream(
                         return;
                     }
 
-                    info!("✅ {} | WebSocket CANCELLATION подтвержден, размещаем вторую ногу @ {:.2} | Size: {:.2}",
+                    info!("✅ {} | Размещаем новый ордер @ {:.2} | Size: {:.2}",
                         stream_name, new_price, remaining_size);
 
                     super::second_leg::place_second_leg_with_price(engine, first_leg_is_up_val, trading_state, stream_name, new_price, remaining_size);
+                } else {
+                    // WebSocket подтвердил, но API ещё нет → обновляем флаг и ждём
+                    *state = TradingState::SearchingSecondLeg {
+                        first_leg_price: first_leg_price_val,
+                        first_leg_is_up: first_leg_is_up_val,
+                        first_leg_size: first_leg_size_val,
+                        second_leg_order_id: None,
+                        second_leg_current_price: None,
+                        second_leg_filled: second_leg_filled_val,
+                        pending_repricing: pending_price,
+                        api_cancel_confirmed: api_already_confirmed,
+                        websocket_cancel_confirmed: true,  // Устанавливаем флаг
+                    };
                 }
                 return;
             }

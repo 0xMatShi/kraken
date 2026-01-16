@@ -91,6 +91,8 @@ pub fn check_and_start_hedge(engine: &Arc<RealEngine>, prices: &MarketPrices) {
         target_size,
         filled_size: 0.0,
         pending_repricing: None,
+        api_cancel_confirmed: false,
+        websocket_cancel_confirmed: false,
     });
 
     place_hedge_order(engine, is_up_side, best_bid, target_size);
@@ -146,10 +148,15 @@ pub fn place_hedge_order(engine: &Arc<RealEngine>, is_up_side: bool, price: f64,
 
 /// Проверяем нужно ли перевыставить хедж при изменении best_bid
 pub fn check_hedge_repricing(engine: &Arc<RealEngine>, prices: &MarketPrices) {
-    let hedge = engine.hedge_state.lock().unwrap();
+    let mut hedge = engine.hedge_state.lock().unwrap();
 
     if let Some(ref state) = *hedge {
         if let Some(ref order_id) = state.order_id {
+            // Защита: если уже есть активное pending_repricing - пропускаем новые попытки
+            if state.pending_repricing.is_some() {
+                return;
+            }
+
             let new_best_bid = if state.is_up_side {
                 prices.up_bid
             } else {
@@ -190,21 +197,41 @@ pub fn check_hedge_repricing(engine: &Arc<RealEngine>, prices: &MarketPrices) {
                     new_target_size, remaining_size);
 
                 let order_id_to_cancel = order_id.clone();
+                let is_up_side = state.is_up_side;
+                let current_price = state.current_price;
+                let filled_size = state.filled_size;
+
+                // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: СРАЗУ обновляем состояние, сбрасываем order_id
+                // и устанавливаем pending_repricing. Это предотвращает повторные попытки отмены.
+                *hedge = Some(HedgeState {
+                    order_id: Some(order_id_to_cancel.clone()),  // Сохраняем для WebSocket matching
+                    is_up_side,
+                    current_price: new_best_bid,  // Уже обновляем цену
+                    target_size: new_target_size,
+                    filled_size,
+                    pending_repricing: Some((new_best_bid, remaining_size)),
+                    api_cancel_confirmed: false,        // Ждём подтверждение от API
+                    websocket_cancel_confirmed: false,  // Ждём подтверждение от WebSocket
+                });
+
+                info!("🔑 ХЕДЖ | Состояние обновлено: ожидаем 2 ключа (API + WebSocket) для подтверждения отмены");
+
                 drop(hedge);
 
                 let client = engine.client.clone();
-                let engine = Arc::clone(engine);
+                let engine_clone = Arc::clone(engine);
 
+                // Асинхронно запрашиваем отмену через API
                 tokio::spawn(async move {
-                    info!("🚫 ХЕДЖ | Отменяем ордер: {}", order_id_to_cancel);
+                    info!("🚫 ХЕДЖ | Отправляем запрос на отмену ордера: {}", order_id_to_cancel);
 
                     let cancel_success = match client.cancel_order(&order_id_to_cancel).await {
                         Ok(result) => {
                             if !result.canceled.is_empty() {
-                                info!("✅ ХЕДЖ | Ордер отменён");
+                                info!("✅ ХЕДЖ | API подтвердил отмену ордера: {}", order_id_to_cancel);
                                 true
                             } else {
-                                warn!("⚠️ ХЕДЖ | Ордер не был отменён");
+                                warn!("⚠️ ХЕДЖ | API НЕ подтвердил отмену: {}", order_id_to_cancel);
                                 false
                             }
                         },
@@ -215,15 +242,52 @@ pub fn check_hedge_repricing(engine: &Arc<RealEngine>, prices: &MarketPrices) {
                     };
 
                     if cancel_success {
-                        {
-                            let mut hedge = engine.hedge_state.lock().unwrap();
+                        // КЛЮЧ 1: API подтвердил отмену
+                        let should_place_new_order = {
+                            let mut hedge = engine_clone.hedge_state.lock().unwrap();
                             if let Some(ref mut state) = *hedge {
-                                info!("⏳ ХЕДЖ | Ордер отменен API, ждем WebSocket CANCELLATION для перевыставления @ {:.2}", new_best_bid);
-                                state.order_id = None;
-                                state.current_price = new_best_bid;
-                                state.target_size = new_target_size;
-                                state.pending_repricing = Some((new_best_bid, remaining_size));
+                                state.api_cancel_confirmed = true;
+                                info!("🔑 ХЕДЖ | КЛЮЧ 1/2 ПОВЕРНУТ (API)");
+
+                                // Проверяем: если оба ключа повернуты → размещаем новый ордер
+                                if state.websocket_cancel_confirmed && state.pending_repricing.is_some() {
+                                    info!("🔓 ХЕДЖ | ОБА КЛЮЧА ПОВЕРНУТЫ! Размещаем новый ордер");
+                                    true
+                                } else {
+                                    info!("⏳ ХЕДЖ | Ждём КЛЮЧ 2/2 (WebSocket CANCELLATION)");
+                                    false
+                                }
+                            } else {
+                                false
                             }
+                        };
+
+                        if should_place_new_order {
+                            let (is_up_side, new_price, new_size) = {
+                                let hedge = engine_clone.hedge_state.lock().unwrap();
+                                if let Some(ref state) = *hedge {
+                                    if let Some((price, size)) = state.pending_repricing {
+                                        (state.is_up_side, price, size)
+                                    } else {
+                                        return;
+                                    }
+                                } else {
+                                    return;
+                                }
+                            };
+
+                            place_hedge_order(&engine_clone, is_up_side, new_price, new_size);
+                        }
+                    } else {
+                        warn!("⚠️ ХЕДЖ | API отмена не удалась, откатываем состояние");
+                        // API отмена не удалась → откатываем состояние
+                        let mut hedge = engine_clone.hedge_state.lock().unwrap();
+                        if let Some(ref mut state) = *hedge {
+                            state.order_id = Some(order_id_to_cancel);  // Восстанавливаем order_id
+                            state.current_price = current_price;  // Восстанавливаем старую цену
+                            state.pending_repricing = None;
+                            state.api_cancel_confirmed = false;
+                            state.websocket_cancel_confirmed = false;
                         }
                     }
                 });
@@ -278,24 +342,51 @@ pub fn cancel_hedge(engine: &Arc<RealEngine>, order_id: &str) {
 
                 let pending = state.pending_repricing;
                 let is_up_side = state.is_up_side;
+                let api_already_confirmed = state.api_cancel_confirmed;
 
-                if let Some((new_price, new_size)) = pending {
-                    info!("✅ WebSocket CANCELLATION подтвержден, размещаем новый хедж @ {:.2} | Size: {:.2}",
-                        new_price, new_size);
+                // КЛЮЧ 2: WebSocket подтвердил отмену
+                // Проверяем: если API уже подтвердил (Ключ 1) → размещаем новый ордер
+                let should_place_new_order = if let Some((_new_price, _new_size)) = pending {
+                    if api_already_confirmed {
+                        info!("🔑 ХЕДЖ | КЛЮЧ 2/2 ПОВЕРНУТ (WebSocket)");
+                        info!("🔓 ХЕДЖ | ОБА КЛЮЧА ПОВЕРНУТЫ! Размещаем новый ордер");
+                        true
+                    } else {
+                        info!("🔑 ХЕДЖ | КЛЮЧ 2/2 ПОВЕРНУТ (WebSocket)");
+                        info!("⏳ ХЕДЖ | Ждём КЛЮЧ 1/2 (API confirmation)");
+                        false
+                    }
+                } else {
+                    // Нет pending_repricing → это обычная отмена (не перевыставление)
+                    info!("⚠️ ХЕДЖ | Обычная отмена (не перевыставление), завершаем хедж");
+                    *hedge = None;
+                    drop(hedge);
+                    *engine.hedging_active.lock().unwrap() = false;
+                    info!("🔓 Потоки разблокированы");
+                    return;
+                };
+
+                if should_place_new_order {
+                    // Оба ключа повернуты → сбрасываем pending и размещаем новый ордер
+                    let (new_price, new_size) = pending.unwrap();
 
                     if let Some(ref mut s) = *hedge {
                         s.order_id = None;
                         s.pending_repricing = None;
+                        s.api_cancel_confirmed = false;
+                        s.websocket_cancel_confirmed = false;
                     }
                     drop(hedge);
 
+                    info!("✅ ХЕДЖ | Размещаем новый ордер @ {:.2} | Size: {:.2}",
+                        new_price, new_size);
                     place_hedge_order(engine, is_up_side, new_price, new_size);
                 } else {
-                    *hedge = None;
-                    drop(hedge);
-
-                    *engine.hedging_active.lock().unwrap() = false;
-                    info!("🔓 Потоки разблокированы");
+                    // WebSocket подтвердил, но API ещё нет → обновляем флаг и ждём
+                    if let Some(ref mut s) = *hedge {
+                        s.websocket_cancel_confirmed = true;  // Устанавливаем флаг
+                        s.order_id = None;  // Сбрасываем order_id чтобы не обрабатывать CANCELLATION повторно
+                    }
                 }
             }
         }

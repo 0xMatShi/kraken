@@ -98,6 +98,8 @@ pub fn place_second_leg(engine: &RealEngine, first_leg_is_up: bool, trading_stat
                             second_leg_current_price,
                             second_leg_filled,
                             pending_repricing: None,
+                            api_cancel_confirmed: false,
+                            websocket_cancel_confirmed: false,
                         };
                     }
                 }
@@ -178,6 +180,8 @@ pub fn place_second_leg_with_price(
                             second_leg_current_price,
                             second_leg_filled,
                             pending_repricing: None,
+                            api_cancel_confirmed: false,
+                            websocket_cancel_confirmed: false,
                         };
                     }
                 }
@@ -208,16 +212,22 @@ fn check_second_leg_repricing_for_stream(
     prices: &MarketPrices,
     stream_name: &str,
 ) {
-    let state = trading_state.lock().unwrap();
+    let mut state = trading_state.lock().unwrap();
 
     if let TradingState::SearchingSecondLeg {
         first_leg_is_up,
         second_leg_order_id: Some(ref order_id),
         second_leg_current_price: Some(current_price),
         second_leg_filled,
+        pending_repricing,
         ..
     } = *state
     {
+        // Защита: если уже есть активное pending_repricing - пропускаем новые попытки
+        if pending_repricing.is_some() {
+            return;
+        }
+
         let new_best_bid = if first_leg_is_up {
             prices.down_bid
         } else {
@@ -239,55 +249,115 @@ fn check_second_leg_repricing_for_stream(
             info!("   Отменяем текущий ордер и перевыставляем с size={:.2}", remaining_size);
 
             let order_id_to_cancel = order_id.clone();
+            let (first_leg_price, first_leg_is_up, first_leg_size, second_leg_filled) = {
+                if let TradingState::SearchingSecondLeg {
+                    first_leg_price,
+                    first_leg_is_up,
+                    first_leg_size,
+                    second_leg_filled,
+                    ..
+                } = *state {
+                    (first_leg_price, first_leg_is_up, first_leg_size, second_leg_filled)
+                } else {
+                    return;
+                }
+            };
+
+            // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: СРАЗУ сбрасываем second_leg_current_price и устанавливаем pending_repricing
+            // Это предотвращает повторные попытки отмены при следующих тиках
+            *state = TradingState::SearchingSecondLeg {
+                first_leg_price,
+                first_leg_is_up,
+                first_leg_size,
+                second_leg_order_id: Some(order_id_to_cancel.clone()),
+                second_leg_current_price: None,  // Сбрасываем цену → следующие тики не пройдут pattern matching
+                second_leg_filled,
+                pending_repricing: Some(new_best_bid),
+                api_cancel_confirmed: false,        // Ждём подтверждение от API
+                websocket_cancel_confirmed: false,  // Ждём подтверждение от WebSocket
+            };
+
+            info!("🔑 {} | Состояние обновлено: ожидаем 2 ключа (API + WebSocket) для подтверждения отмены", stream_name);
+
             let stream_name_owned = stream_name.to_string();
             let trading_state_clone = Arc::clone(trading_state);
             let client = engine.client.clone();
+            let engine_clone = Arc::clone(engine);
 
             drop(state);
 
+            // Асинхронно запрашиваем отмену через API
             tokio::spawn(async move {
-                info!("🚫 {} | Отменяем ордер для перевыставления: {}", stream_name_owned, order_id_to_cancel);
+                info!("🚫 {} | Отправляем запрос на отмену ордера: {}", stream_name_owned, order_id_to_cancel);
 
                 let cancel_success = match client.cancel_order(&order_id_to_cancel).await {
                     Ok(result) => {
                         if !result.canceled.is_empty() {
-                            info!("✅ Ордер отменён: {}", order_id_to_cancel);
+                            info!("✅ {} | API подтвердил отмену ордера: {}", stream_name_owned, order_id_to_cancel);
                             true
                         } else {
-                            warn!("⚠️ Ордер не был отменён: {}", order_id_to_cancel);
+                            warn!("⚠️ {} | API НЕ подтвердил отмену: {}", stream_name_owned, order_id_to_cancel);
                             false
                         }
                     },
                     Err(e) => {
-                        error!("❌ Ошибка отмены ордера {}: {}", order_id_to_cancel, e);
+                        error!("❌ {} | Ошибка отмены ордера {}: {}", stream_name_owned, order_id_to_cancel, e);
                         false
                     }
                 };
 
                 if cancel_success {
-                    {
+                    // КЛЮЧ 1: API подтвердил отмену
+                    let should_place_new_order = {
                         let mut state = trading_state_clone.lock().unwrap();
                         if let TradingState::SearchingSecondLeg {
-                            first_leg_price,
-                            first_leg_is_up,
-                            first_leg_size,
-                            second_leg_filled,
+                            ref mut api_cancel_confirmed,
+                            websocket_cancel_confirmed,
+                            pending_repricing,
                             ..
                         } = *state {
-                            info!("⏳ {} | Ордер отменен API, ждем WebSocket CANCELLATION для перевыставления @ {:.2}", stream_name_owned, new_best_bid);
-                            *state = TradingState::SearchingSecondLeg {
-                                first_leg_price,
-                                first_leg_is_up,
-                                first_leg_size,
-                                second_leg_order_id: Some(order_id_to_cancel),
-                                second_leg_current_price: None,
-                                second_leg_filled,
-                                pending_repricing: Some(new_best_bid),
-                            };
+                            *api_cancel_confirmed = true;
+                            info!("🔑 {} | КЛЮЧ 1/2 ПОВЕРНУТ (API)", stream_name_owned);
+
+                            // Проверяем: если оба ключа повернуты → размещаем новый ордер
+                            if websocket_cancel_confirmed && pending_repricing.is_some() {
+                                info!("🔓 {} | ОБА КЛЮЧА ПОВЕРНУТЫ! Размещаем новый ордер", stream_name_owned);
+                                true
+                            } else {
+                                info!("⏳ {} | Ждём КЛЮЧ 2/2 (WebSocket CANCELLATION)", stream_name_owned);
+                                false
+                            }
+                        } else {
+                            false
                         }
+                    };
+
+                    if should_place_new_order {
+                        place_second_leg_with_price(
+                            &engine_clone,
+                            first_leg_is_up,
+                            &trading_state_clone,
+                            &stream_name_owned,
+                            new_best_bid,
+                            remaining_size
+                        );
                     }
                 } else {
-                    warn!("⚠️ {} | Отмена не удалась, пропускаем перевыставление", stream_name_owned);
+                    warn!("⚠️ {} | API отмена не удалась, сбрасываем pending_repricing", stream_name_owned);
+                    // API отмена не удалась → откатываем состояние
+                    let mut state = trading_state_clone.lock().unwrap();
+                    if let TradingState::SearchingSecondLeg {
+                        ref mut pending_repricing,
+                        ref mut api_cancel_confirmed,
+                        ref mut websocket_cancel_confirmed,
+                        ref mut second_leg_current_price,
+                        ..
+                    } = *state {
+                        *pending_repricing = None;
+                        *api_cancel_confirmed = false;
+                        *websocket_cancel_confirmed = false;
+                        *second_leg_current_price = Some(current_price);  // Восстанавливаем цену
+                    }
                 }
             });
         }

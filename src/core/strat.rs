@@ -19,7 +19,9 @@ pub struct HedgeState {
     pub current_price: f64,              // По какой цене размещен текущий ордер
     pub target_size: f64,                // Целевое количество акций для хеджа
     pub filled_size: f64,                // Сколько уже исполнено
-    pub pending_repricing: Option<(f64, f64)>,  // Ожидающее перевыставление: (new_price, new_size) после WebSocket CANCELLATION
+    pub pending_repricing: Option<(f64, f64)>,  // Ожидающее перевыставление: (new_price, new_size) после получения ОБОИХ подтверждений
+    pub api_cancel_confirmed: bool,      // API подтвердил отмену
+    pub websocket_cancel_confirmed: bool, // WebSocket подтвердил отмену (CANCELLATION событие)
 }
 
 /// Состояние торговой стратегии для одного потока
@@ -44,7 +46,9 @@ pub enum TradingState {
         second_leg_order_id: Option<String>,
         second_leg_current_price: Option<f64>,   // Цена по которой размещен текущий ордер второй ноги
         second_leg_filled: f64,                  // Сколько уже исполнено из второй ноги
-        pending_repricing: Option<f64>,          // Ожидающее перевыставление: new_price после WebSocket CANCELLATION
+        pending_repricing: Option<f64>,          // Ожидающее перевыставление: new_price после получения ОБОИХ подтверждений
+        api_cancel_confirmed: bool,              // API подтвердил отмену
+        websocket_cancel_confirmed: bool,        // WebSocket подтвердил отмену (CANCELLATION событие)
     },
 }
 
