@@ -239,7 +239,7 @@ impl RealEngine {
 
         // КРИТИЧНО: Атомарно проверяем и устанавливаем флаг в одной критической секции
         // Это предотвращает race condition когда несколько тиков в одну миллисекунду
-        let was_already_started = {
+        {
             let mut active = self.hedging_active.lock().unwrap();
             if *active {
                 // Хедж уже запущен другим тиком - выходим
@@ -247,7 +247,6 @@ impl RealEngine {
             }
             // Устанавливаем флаг атомарно
             *active = true;
-            false
         };
 
         info!("⚖️ ОБНАРУЖЕН ПЕРЕКОС: UP={:.1} DOWN={:.1} | Skew={:.1}",
