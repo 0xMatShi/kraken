@@ -26,11 +26,12 @@ struct ClaimData {
 /// Состояние хеджирования
 #[derive(Debug, Clone)]
 struct HedgeState {
-    order_id: Option<String>,  // ID текущей лимитки хеджа
-    is_up_side: bool,          // Какую сторону хеджируем (true = покупаем UP)
-    current_price: f64,        // По какой цене размещен текущий ордер
-    target_size: f64,          // Целевое количество акций для хеджа
-    filled_size: f64,          // Сколько уже исполнено
+    order_id: Option<String>,        // ID текущей лимитки хеджа
+    is_up_side: bool,                // Какую сторону хеджируем (true = покупаем UP)
+    current_price: f64,              // По какой цене размещен текущий ордер
+    target_size: f64,                // Целевое количество акций для хеджа
+    filled_size: f64,                // Сколько уже исполнено
+    pending_repricing: Option<(f64, f64)>,  // Ожидающее перевыставление: (new_price, new_size) после WebSocket CANCELLATION
 }
 
 /// Состояние торговой стратегии для одного потока
@@ -53,8 +54,9 @@ pub enum TradingState {
         first_leg_is_up: bool,
         first_leg_size: f64,
         second_leg_order_id: Option<String>,
-        second_leg_current_price: Option<f64>,  // Цена по которой размещен текущий ордер второй ноги
-        second_leg_filled: f64,  // Сколько уже исполнено из второй ноги
+        second_leg_current_price: Option<f64>,   // Цена по которой размещен текущий ордер второй ноги
+        second_leg_filled: f64,                  // Сколько уже исполнено из второй ноги
+        pending_repricing: Option<f64>,          // Ожидающее перевыставление: new_price после WebSocket CANCELLATION
     },
 }
 
@@ -176,33 +178,35 @@ impl RealEngine {
         size.max(0.0)
     }
 
-    /// Проверяем, есть ли активные ордера (кроме хеджа)
-    fn has_active_orders_except_hedge(&self) -> bool {
-        let hedge_order_id = {
-            let hedge = self.hedge_state.lock().unwrap();
-            hedge.as_ref().and_then(|h| h.order_id.clone())
-        };
+    /// Проверяем, есть ли активные потоки (НЕ в состоянии Idle)
+    /// Это надежнее чем проверка active_order_ids, так как при перевыставлении
+    /// ордеров есть "окно" когда список пустой, но поток еще активен
+    fn has_active_threads(&self) -> bool {
+        let mut active_count = 0;
 
-        let orders = self.active_order_ids.lock().unwrap();
-        let total_count = orders.len();
-
-        let result = if let Some(ref hedge_id) = hedge_order_id {
-            // Есть активные ордера, если больше 1 (хедж) или если хедж еще не размещен
-            let has_active = orders.len() > 1 || (orders.len() == 1 && !orders.contains(hedge_id));
-            if has_active {
-                info!("🔍 Проверка активных ордеров: total={}, hedge_id={}, result=true", total_count, hedge_id);
+        // Проверяем UP-потоки
+        for (idx, thread) in self.up_threads.iter().enumerate() {
+            let state = thread.lock().unwrap();
+            if !matches!(*state, TradingState::Idle) {
+                active_count += 1;
+                info!("🔍 UP-поток #{} НЕ в Idle", idx + 1);
             }
-            has_active
-        } else {
-            // Хеджа нет - любые ордера считаются активными
-            let has_active = !orders.is_empty();
-            if has_active {
-                info!("🔍 Проверка активных ордеров: total={}, hedge_id=None, result=true", total_count);
-            }
-            has_active
-        };
+        }
 
-        result
+        // Проверяем DOWN-потоки
+        for (idx, thread) in self.down_threads.iter().enumerate() {
+            let state = thread.lock().unwrap();
+            if !matches!(*state, TradingState::Idle) {
+                active_count += 1;
+                info!("🔍 DOWN-поток #{} НЕ в Idle", idx + 1);
+            }
+        }
+
+        if active_count > 0 {
+            info!("🔍 Всего активных потоков: {}", active_count);
+        }
+
+        active_count > 0
     }
 
     /// Проверяем нужен ли хедж и запускаем его размещение
@@ -252,12 +256,12 @@ impl RealEngine {
         info!("⚖️ ОБНАРУЖЕН ПЕРЕКОС: UP={:.1} DOWN={:.1} | Skew={:.1}",
             up_shares, down_shares, skew);
 
-        // Проверяем, есть ли активные ордера (кроме хеджа)
-        if self.has_active_orders_except_hedge() {
-            info!("⏳ Есть активные лимитки - ждем их исполнения перед хеджем");
-            info!("🔒 Потоки заблокированы до завершения хеджа");
+        // Проверяем, есть ли активные потоки (НЕ в Idle)
+        if self.has_active_threads() {
+            info!("⏳ Есть активные потоки - ждем их возврата в Idle перед хеджем");
+            info!("🔒 Новые потоки заблокированы до завершения хеджа");
             // ВАЖНО: НЕ снимаем блокировку! Она останется до завершения хеджа
-            // Ордера отменятся по экспирации или исполнятся
+            // Активные потоки завершат свою работу (исполнят ордера или отменятся)
             return;
         }
 
@@ -291,6 +295,7 @@ impl RealEngine {
             current_price: best_bid,
             target_size,
             filled_size: 0.0,
+            pending_repricing: None,
         });
 
         // Размещаем лимитку хеджа
@@ -400,17 +405,13 @@ impl RealEngine {
 
                     // Клонируем данные для async task
                     let order_id_to_cancel = order_id.clone();
-                    let is_up_side = state.is_up_side;
 
                     drop(hedge);  // Освобождаем мьютекс
 
                     let client = self.client.clone();
                     let engine = Arc::clone(self);
-                    let up_token = Arc::clone(&self.up_token);
-                    let down_token = Arc::clone(&self.down_token);
-                    let signer = self.signer.clone();
 
-                    // Запускаем async task для отмены и перевыставления
+                    // Запускаем async task для отмены
                     tokio::spawn(async move {
                         // Отменяем текущий ордер
                         info!("🚫 ХЕДЖ | Отменяем ордер: {}", order_id_to_cancel);
@@ -432,52 +433,18 @@ impl RealEngine {
                         };
 
                         if cancel_success {
-                            // Обновляем состояние - убираем order_id и обновляем цену
+                            // Устанавливаем pending_repricing - ждем WebSocket CANCELLATION
                             {
                                 let mut hedge = engine.hedge_state.lock().unwrap();
                                 if let Some(ref mut state) = *hedge {
+                                    info!("⏳ ХЕДЖ | Ордер отменен API, ждем WebSocket CANCELLATION для перевыставления @ {:.2}", new_best_bid);
                                     state.order_id = None;
                                     state.current_price = new_best_bid;
                                     state.target_size = new_target_size;
+                                    state.pending_repricing = Some((new_best_bid, remaining_size));
                                 }
                             }
-
-                            // Размещаем новый ордер
-                            let token_id = if is_up_side {
-                                Arc::clone(&up_token)
-                            } else {
-                                Arc::clone(&down_token)
-                            };
-
-                            info!("📝 ХЕДЖ | Перевыставляем: {} @ {:.2} | Size: {:.2}",
-                                if is_up_side { "UP" } else { "DOWN" }, new_best_bid, remaining_size);
-
-                            let price_dec: Decimal = format!("{:.2}", new_best_bid).parse().unwrap();
-                            let size_dec: Decimal = format!("{:.2}", remaining_size).parse().unwrap();
-
-                            let order = client.limit_order()
-                                .token_id(token_id.as_ref())
-                                .price(price_dec)
-                                .size(size_dec)
-                                .side(PolySide::Buy)
-                                .order_type(OrderType::GTC)
-                                .build().await.unwrap();
-
-                            let signed = client.sign(&signer, order).await.unwrap();
-
-                            match client.post_order(signed).await {
-                                Ok(response) => {
-                                    if !response.order_id.is_empty() {
-                                        info!("✅ ХЕДЖ | Новая лимитка размещена: order_id={}", response.order_id);
-
-                                        let mut hedge = engine.hedge_state.lock().unwrap();
-                                        if let Some(ref mut state) = *hedge {
-                                            state.order_id = Some(response.order_id);
-                                        }
-                                    }
-                                },
-                                Err(e) => error!("❌ ХЕДЖ | Ошибка размещения: {}", e),
-                            }
+                            // Размещение произойдет в cancel_hedge когда придет WebSocket CANCELLATION
                         }
                     });
                 }
@@ -523,21 +490,41 @@ impl RealEngine {
     }
 
     /// Отменяем хедж если ордер был отменен
-    fn cancel_hedge(&self, order_id: &str) {
+    fn cancel_hedge(self: &Arc<Self>, order_id: &str) {
         let mut hedge = self.hedge_state.lock().unwrap();
 
         if let Some(ref state) = *hedge {
             if let Some(ref hedge_order_id) = state.order_id {
                 if order_id == hedge_order_id {
-                    warn!("⚠️ ХЕДЖ ОТМЕНЕН");
+                    warn!("⚠️ ХЕДЖ ОТМЕНЕН (WebSocket CANCELLATION)");
 
-                    // Сбрасываем состояние хеджа
-                    *hedge = None;
-                    drop(hedge);
+                    let pending = state.pending_repricing;
+                    let is_up_side = state.is_up_side;
 
-                    // Снимаем блокировку размещения лимиток
-                    *self.hedging_active.lock().unwrap() = false;
-                    info!("🔓 Потоки разблокированы");
+                    // Проверяем есть ли pending_repricing
+                    if let Some((new_price, new_size)) = pending {
+                        // Есть pending - размещаем новый хедж
+                        info!("✅ WebSocket CANCELLATION подтвержден, размещаем новый хедж @ {:.2} | Size: {:.2}",
+                            new_price, new_size);
+
+                        // Обновляем состояние - очищаем pending и order_id
+                        if let Some(ref mut s) = *hedge {
+                            s.order_id = None;
+                            s.pending_repricing = None;
+                        }
+                        drop(hedge);
+
+                        // Размещаем новый хедж
+                        self.place_hedge_order(is_up_side, new_price, new_size);
+                    } else {
+                        // Нет pending - это обычная отмена, сбрасываем все
+                        *hedge = None;
+                        drop(hedge);
+
+                        // Снимаем блокировку размещения лимиток
+                        *self.hedging_active.lock().unwrap() = false;
+                        info!("🔓 Потоки разблокированы");
+                    }
                 }
             }
         }
@@ -859,11 +846,95 @@ impl RealEngine {
                                 second_leg_order_id: Some(response.order_id),
                                 second_leg_current_price,
                                 second_leg_filled,
+                                pending_repricing: None,
                             };
                         }
                     }
                 },
                 Err(e) => error!("❌ Ошибка размещения второй ноги: {}", e),
+            }
+        });
+    }
+
+    /// Размещает вторую ногу с указанными ценой и размером
+    /// Используется при перевыставлении после WebSocket CANCELLATION
+    fn place_second_leg_with_price(
+        &self,
+        first_leg_is_up: bool,
+        trading_state: &Arc<Mutex<TradingState>>,
+        stream_name: &str,
+        price: f64,
+        size: f64
+    ) {
+        let second_leg_is_up = !first_leg_is_up;
+
+        if price < 0.01 || price > 0.99 {
+            warn!("⚠️ {} | Некорректная цена второй ноги: {:.2}", stream_name, price);
+            return;
+        }
+
+        info!("📝 {} | Размещаем вторую ногу: {} @ {:.2} | Size: {:.2}",
+            stream_name, if second_leg_is_up { "UP" } else { "DOWN" }, price, size);
+
+        // Обновляем second_leg_current_price в состоянии потока
+        {
+            let mut state = trading_state.lock().unwrap();
+            if let TradingState::SearchingSecondLeg { ref mut second_leg_current_price, .. } = *state {
+                *second_leg_current_price = Some(price);
+            }
+        }
+
+        let token_id = if second_leg_is_up {
+            Arc::clone(&self.up_token)
+        } else {
+            Arc::clone(&self.down_token)
+        };
+        let client = self.client.clone();
+        let signer = self.signer.clone();
+        let trading_state_clone = Arc::clone(trading_state);
+
+        tokio::spawn(async move {
+            let price_dec: Decimal = format!("{:.2}", price).parse().unwrap();
+            let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
+
+            let order = client.limit_order()
+                .token_id(token_id.as_ref())
+                .price(price_dec)
+                .size(size_dec)
+                .side(PolySide::Buy)
+                .order_type(OrderType::GTC)
+                .build().await.unwrap();
+
+            let signed = client.sign(&signer, order).await.unwrap();
+
+            match client.post_order(signed).await {
+                Ok(response) => {
+                    if !response.order_id.is_empty() {
+                        info!("📝 Вторая нога размещена после WebSocket CANCELLATION: order_id={}", response.order_id);
+
+                        // Сохраняем новый order_id
+                        let mut state = trading_state_clone.lock().unwrap();
+                        if let TradingState::SearchingSecondLeg {
+                            first_leg_price,
+                            first_leg_is_up,
+                            first_leg_size,
+                            second_leg_current_price,
+                            second_leg_filled,
+                            ..
+                        } = *state {
+                            *state = TradingState::SearchingSecondLeg {
+                                first_leg_price,
+                                first_leg_is_up,
+                                first_leg_size,
+                                second_leg_order_id: Some(response.order_id),
+                                second_leg_current_price,
+                                second_leg_filled,
+                                pending_repricing: None,
+                            };
+                        }
+                    }
+                },
+                Err(e) => error!("❌ Ошибка размещения второй ноги после CANCELLATION: {}", e),
             }
         });
     }
@@ -930,9 +1001,6 @@ impl RealEngine {
                 let stream_name_owned = stream_name.to_string();
                 let trading_state_clone = Arc::clone(trading_state);
                 let client = self.client.clone();
-                let up_token = Arc::clone(&self.up_token);
-                let down_token = Arc::clone(&self.down_token);
-                let signer = self.signer.clone();
 
                 drop(state);  // Освобождаем мьютекс перед асинхронными операциями
 
@@ -957,9 +1025,10 @@ impl RealEngine {
                         }
                     };
 
-                    // ШАГ 2: Только если отмена успешна - размещаем новую ногу
+                    // ШАГ 2: Только если отмена успешна - устанавливаем pending_repricing
+                    // Размещение произойдет когда придет WebSocket CANCELLATION
                     if cancel_success {
-                        // Обновляем состояние - убираем старый order_id
+                        // Устанавливаем pending_repricing - ждем WebSocket подтверждения
                         {
                             let mut state = trading_state_clone.lock().unwrap();
                             if let TradingState::SearchingSecondLeg {
@@ -969,6 +1038,7 @@ impl RealEngine {
                                 second_leg_filled,
                                 ..
                             } = *state {
+                                info!("⏳ {} | Ордер отменен API, ждем WebSocket CANCELLATION для перевыставления @ {:.2}", stream_name_owned, new_best_bid);
                                 *state = TradingState::SearchingSecondLeg {
                                     first_leg_price,
                                     first_leg_is_up,
@@ -976,79 +1046,11 @@ impl RealEngine {
                                     second_leg_order_id: None,  // Сбрасываем order_id
                                     second_leg_current_price: None,
                                     second_leg_filled,
+                                    pending_repricing: Some(new_best_bid),  // Сохраняем новую цену
                                 };
                             }
                         }
-
-                        // Проверяем минимальный размер
-                        if remaining_size < 5.0 {
-                            warn!("⚠️ {} | Размер второй ноги < 5.0 ({:.2}), пропускаем размещение", stream_name_owned, remaining_size);
-                            return;
-                        }
-
-                        // Получаем актуальные цены из состояния
-                        let second_leg_is_up = !first_leg_is_up;
-                        let second_leg_price = new_best_bid;  // Используем уже вычисленный best_bid
-
-                        info!("📝 {} | Размещаем вторую ногу после отмены: {} @ {:.2} | Size: {:.2}",
-                            stream_name_owned, if second_leg_is_up { "UP" } else { "DOWN" }, second_leg_price, remaining_size);
-
-                        // Обновляем second_leg_current_price
-                        {
-                            let mut state = trading_state_clone.lock().unwrap();
-                            if let TradingState::SearchingSecondLeg { ref mut second_leg_current_price, .. } = *state {
-                                *second_leg_current_price = Some(second_leg_price);
-                            }
-                        }
-
-                        let token_id = if second_leg_is_up {
-                            Arc::clone(&up_token)
-                        } else {
-                            Arc::clone(&down_token)
-                        };
-
-                        // Размещаем новый ордер
-                        let price_dec: Decimal = format!("{:.2}", (second_leg_price)).parse().unwrap();
-                        let size_dec: Decimal = format!("{:.2}", remaining_size).parse().unwrap();
-
-                        let order = client.limit_order()
-                            .token_id(token_id.as_ref())
-                            .price(price_dec)
-                            .size(size_dec)
-                            .side(PolySide::Buy)
-                            .order_type(OrderType::GTC)
-                            .build().await.unwrap();
-
-                        let signed = client.sign(&signer, order).await.unwrap();
-
-                        match client.post_order(signed).await {
-                            Ok(response) => {
-                                if !response.order_id.is_empty() {
-                                    info!("📝 Новая вторая нога размещена: order_id={}", response.order_id);
-
-                                    // Сохраняем новый order_id
-                                    let mut state = trading_state_clone.lock().unwrap();
-                                    if let TradingState::SearchingSecondLeg {
-                                        first_leg_price,
-                                        first_leg_is_up,
-                                        first_leg_size,
-                                        second_leg_current_price,
-                                        second_leg_filled,
-                                        ..
-                                    } = *state {
-                                        *state = TradingState::SearchingSecondLeg {
-                                            first_leg_price,
-                                            first_leg_is_up,
-                                            first_leg_size,
-                                            second_leg_order_id: Some(response.order_id),
-                                            second_leg_current_price,
-                                            second_leg_filled,
-                                        };
-                                    }
-                                }
-                            },
-                            Err(e) => error!("❌ Ошибка размещения новой второй ноги: {}", e),
-                        }
+                        // Размещение произойдет в handle_order_cancelled когда придет WebSocket CANCELLATION
                     } else {
                         warn!("⚠️ {} | Отмена не удалась, пропускаем перевыставление", stream_name_owned);
                     }
@@ -1240,6 +1242,7 @@ impl RealEngine {
                         second_leg_order_id: None,
                         second_leg_current_price: None,
                         second_leg_filled: 0.0,
+                        pending_repricing: None,
                     };
                     drop(state);
 
@@ -1294,6 +1297,7 @@ impl RealEngine {
                         second_leg_order_id: Some(order_id.to_string()),
                         second_leg_current_price: Some(price),
                         second_leg_filled,
+                        pending_repricing: None,
                     };
                     return true;
                 }
@@ -1307,7 +1311,7 @@ impl RealEngine {
     // PLACEMENT - ордер размещён
     // UPDATE - ордер частично/полностью исполнен (some of it is matched)
     // CANCELLATION - ордер отменён
-    pub fn handle_ws_order(&self, order_id: String, msg_type: Option<String>, price: f64, side: PolySide, asset_id: &str, size_matched: Option<f64>, original_size: Option<f64>) {
+    pub fn handle_ws_order(self: &Arc<Self>, order_id: String, msg_type: Option<String>, price: f64, side: PolySide, asset_id: &str, size_matched: Option<f64>, original_size: Option<f64>) {
         // Дедупликация только для PLACEMENT и CANCELLATION
         // UPDATE события НЕ дедуплицируются, так как ордер может исполняться частями
         if msg_type.as_deref() != Some("UPDATE") {
@@ -1621,6 +1625,7 @@ impl RealEngine {
                         second_leg_order_id: None,
                         second_leg_current_price: None,
                         second_leg_filled: 0.0,
+                        pending_repricing: None,
                     };
                     drop(state);
 
@@ -1683,18 +1688,45 @@ impl RealEngine {
                     *state = TradingState::Idle;
                 }
             }
-            TradingState::SearchingSecondLeg { second_leg_order_id: Some(second_order_id), first_leg_price, first_leg_is_up, first_leg_size, second_leg_filled, .. } => {
+            TradingState::SearchingSecondLeg { second_leg_order_id: Some(second_order_id), first_leg_price, first_leg_is_up, first_leg_size, second_leg_filled, pending_repricing, .. } => {
                 if order_id == second_order_id {
-                    // Вторая нога отменена - сбрасываем second_leg_order_id
-                    info!("⚠️ {} | Вторая нога отменена", stream_name);
+                    // Вторая нога отменена - проверяем pending_repricing
+                    info!("⚠️ {} | Вторая нога отменена (WebSocket CANCELLATION)", stream_name);
+
+                    let pending_price = *pending_repricing;
+                    let first_leg_price_val = *first_leg_price;
+                    let first_leg_is_up_val = *first_leg_is_up;
+                    let first_leg_size_val = *first_leg_size;
+                    let second_leg_filled_val = *second_leg_filled;
+
+                    // Сбрасываем состояние
                     *state = TradingState::SearchingSecondLeg {
-                        first_leg_price: *first_leg_price,
-                        first_leg_is_up: *first_leg_is_up,
-                        first_leg_size: *first_leg_size,
+                        first_leg_price: first_leg_price_val,
+                        first_leg_is_up: first_leg_is_up_val,
+                        first_leg_size: first_leg_size_val,
                         second_leg_order_id: None,
                         second_leg_current_price: None,
-                        second_leg_filled: *second_leg_filled,  // Сохраняем filled при отмене
+                        second_leg_filled: second_leg_filled_val,
+                        pending_repricing: None,  // Очищаем pending
                     };
+                    drop(state);
+
+                    // Если есть pending_repricing - размещаем новую ногу
+                    if let Some(new_price) = pending_price {
+                        let remaining_size = self.config.size - second_leg_filled_val;
+
+                        if remaining_size < 5.0 {
+                            warn!("⚠️ {} | Размер второй ноги < 5.0 ({:.2}), пропускаем перевыставление", stream_name, remaining_size);
+                            return;
+                        }
+
+                        info!("✅ {} | WebSocket CANCELLATION подтвержден, размещаем вторую ногу @ {:.2} | Size: {:.2}",
+                            stream_name, new_price, remaining_size);
+
+                        // Размещаем вторую ногу
+                        self.place_second_leg_with_price(first_leg_is_up_val, trading_state, stream_name, new_price, remaining_size);
+                    }
+                    return;
                 }
             }
             _ => {}
