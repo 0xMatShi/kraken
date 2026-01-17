@@ -63,7 +63,7 @@ pub fn place_second_leg(engine: &RealEngine, first_leg_is_up: bool, trading_stat
     let trading_state_clone = Arc::clone(trading_state);
 
     tokio::spawn(async move {
-        let price_dec: Decimal = format!("{:.2}", second_leg_price).parse().unwrap();
+        let price_dec: Decimal = format!("{:.2}", (second_leg_price - 0.01)).parse().unwrap();
         let size_dec: Decimal = format!("{:.2}", remaining_size).parse().unwrap();
 
         let order = client.limit_order()
@@ -104,7 +104,13 @@ pub fn place_second_leg(engine: &RealEngine, first_leg_is_up: bool, trading_stat
                     }
                 }
             },
-            Err(e) => error!("❌ Ошибка размещения второй ноги: {}", e),
+            Err(e) => {
+                error!("❌ Ошибка размещения второй ноги: {}", e);
+                // Возвращаем поток в Idle чтобы он не застрял навсегда
+                let mut state = trading_state_clone.lock().unwrap();
+                *state = TradingState::Idle;
+                warn!("⚠️ Поток возвращён в Idle из-за ошибки размещения второй ноги");
+            }
         }
     });
 }
@@ -145,7 +151,7 @@ pub fn place_second_leg_with_price(
     let trading_state_clone = Arc::clone(trading_state);
 
     tokio::spawn(async move {
-        let price_dec: Decimal = format!("{:.2}", price).parse().unwrap();
+        let price_dec: Decimal = format!("{:.2}", (price - 0.01)).parse().unwrap();
         let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
         let order = client.limit_order()
@@ -186,7 +192,13 @@ pub fn place_second_leg_with_price(
                     }
                 }
             },
-            Err(e) => error!("❌ Ошибка размещения второй ноги после CANCELLATION: {}", e),
+            Err(e) => {
+                error!("❌ Ошибка размещения второй ноги после CANCELLATION: {}", e);
+                // Возвращаем поток в Idle чтобы он не застрял навсегда
+                let mut state = trading_state_clone.lock().unwrap();
+                *state = TradingState::Idle;
+                warn!("⚠️ Поток возвращён в Idle из-за ошибки размещения второй ноги");
+            }
         }
     });
 }
