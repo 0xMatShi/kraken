@@ -26,13 +26,13 @@ pub fn try_place_first_leg_for_thread(
     // Определяем цену первой ноги в зависимости от стороны
     let (first_leg_is_up, first_leg_price, bid_price) = if is_up_side {
         // Покупаем UP только если up_bid > 0.51 и < 0.98
-        if prices.up_bid <= 0.59 || prices.up_bid >= 0.98 {
+        if prices.up_bid <= 0.51 || prices.up_bid >= 0.98 {
             return;
         }
         (true, RealEngine::round_price(prices.up_bid), prices.up_bid)
     } else {
         // Покупаем DOWN только если down_bid > 0.51 и < 0.98
-        if prices.down_bid <= 0.59 || prices.down_bid >= 0.98 {
+        if prices.down_bid <= 0.51 || prices.down_bid >= 0.98 {
             return;
         }
         (false, RealEngine::round_price(prices.down_bid), prices.down_bid)
@@ -44,10 +44,6 @@ pub fn try_place_first_leg_for_thread(
 
     // Определяем размер ордера в зависимости от цены
     let order_size = if bid_price >= 0.75 {
-        engine.config.size * 1.25
-    } else if bid_price >= 0.65 {
-        engine.config.size * 1.5
-    } else if bid_price >= 0.60 {
         engine.config.size * 1.25
     } else {
         engine.config.size

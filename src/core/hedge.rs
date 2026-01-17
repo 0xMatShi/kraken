@@ -107,7 +107,7 @@ pub fn check_and_start_hedge(engine: &Arc<RealEngine>, prices: &MarketPrices) {
     // ПОРОГ АКТИВАЦИИ: динамический расчет
     // Минимум: 15 акций
     // Максимум: 3% от total_spent
-    let threshold = (total_shares * 0.01).max(20.0);
+    let threshold = (total_shares * 0.01).max(15.0);
 
     if skew.abs() <= threshold {
         let hedging_was_active = *engine.hedging_active.lock().unwrap();
