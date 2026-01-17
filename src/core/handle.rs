@@ -206,20 +206,16 @@ fn check_second_leg_taker_fill_for_stream(
     let mut state = trading_state.lock().unwrap();
 
     if let TradingState::SearchingSecondLeg {
-        first_leg_is_up,
         second_leg_order_id,
         second_leg_filled,
         ..
     } = &*state {
-        // Вторая нога должна быть на противоположной стороне от первой
-        let expected_second_leg_is_up = !first_leg_is_up;
 
         let is_our_second_leg = if let Some(second_order_id) = second_leg_order_id {
             // Если есть order_id - проверяем по нему
             taker_order_id == second_order_id
         } else {
-            // Если нет order_id - распознаем по стороне (противоположной первой)
-            is_up == expected_second_leg_is_up
+            false
         };
 
         if is_our_second_leg {
