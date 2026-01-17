@@ -8,7 +8,7 @@ use super::strat::{RealEngine, TradingState, price_to_cents, ReservedPriceKey};
 
 /// Обработка TAKER сделок (market orders FAK)
 pub fn handle_ws_trade(
-    engine: &RealEngine,
+    engine: &Arc<RealEngine>,
     trade_id: String,
     price: f64,
     size: f64,
@@ -77,36 +77,63 @@ pub fn handle_ws_trade(
     engine.update_ui_portfolio();
 
     if is_buy {
-        if let Some(ref order_id) = taker_order_id {
-            handle_taker_fill_for_strategy(engine, order_id, is_up, price, size);
+        if let Some(order_id) = taker_order_id {
+            let engine_clone = Arc::clone(engine);
+            tokio::spawn(async move {
+                handle_taker_fill_for_strategy(&engine_clone, &order_id, is_up, price, size).await;
+            });
         }
     }
 }
 
 /// Обработка taker fill в контексте стратегии
-fn handle_taker_fill_for_strategy(engine: &RealEngine, taker_order_id: &str, is_up: bool, price: f64, size: f64) {
-    // Проверяем первую ногу
-    for (thread_idx, trading_state) in engine.up_threads.iter().enumerate() {
-        let stream_name = format!("UP-поток #{}", thread_idx + 1);
-        check_first_leg_fill_for_stream(engine, trading_state, taker_order_id, is_up, price, size, &stream_name);
-    }
-    for (thread_idx, trading_state) in engine.down_threads.iter().enumerate() {
-        let stream_name = format!("DOWN-поток #{}", thread_idx + 1);
-        check_first_leg_fill_for_stream(engine, trading_state, taker_order_id, is_up, price, size, &stream_name);
-    }
+async fn handle_taker_fill_for_strategy(engine: &RealEngine, taker_order_id: &str, is_up: bool, price: f64, size: f64) {
+    loop {
+        let mut matched = false;
 
-    // Проверяем вторую ногу (может исполниться как TAKER если пересекает спред)
-    for (thread_idx, trading_state) in engine.up_threads.iter().enumerate() {
-        let stream_name = format!("UP-поток #{}", thread_idx + 1);
-        check_second_leg_taker_fill_for_stream(engine, trading_state, taker_order_id, is_up, price, size, &stream_name);
-    }
-    for (thread_idx, trading_state) in engine.down_threads.iter().enumerate() {
-        let stream_name = format!("DOWN-поток #{}", thread_idx + 1);
-        check_second_leg_taker_fill_for_stream(engine, trading_state, taker_order_id, is_up, price, size, &stream_name);
-    }
+        // Проверяем первую ногу
+        for (thread_idx, trading_state) in engine.up_threads.iter().enumerate() {
+            if matched { break; }
+            let stream_name = format!("UP-поток #{}", thread_idx + 1);
+            matched = check_first_leg_fill_for_stream(engine, trading_state, taker_order_id, is_up, price, size, &stream_name);
+        }
+        if !matched {
+            for (thread_idx, trading_state) in engine.down_threads.iter().enumerate() {
+                if matched { break; }
+                let stream_name = format!("DOWN-поток #{}", thread_idx + 1);
+                matched = check_first_leg_fill_for_stream(engine, trading_state, taker_order_id, is_up, price, size, &stream_name);
+            }
+        }
 
-    // Проверяем хедж (может исполниться как TAKER если пересекает спред)
-    check_hedge_taker_fill(engine, taker_order_id, is_up, price, size);
+        // Проверяем вторую ногу (может исполниться как TAKER если пересекает спред)
+        if !matched {
+            for (thread_idx, trading_state) in engine.up_threads.iter().enumerate() {
+                if matched { break; }
+                let stream_name = format!("UP-поток #{}", thread_idx + 1);
+                matched = check_second_leg_taker_fill_for_stream(engine, trading_state, taker_order_id, is_up, price, size, &stream_name);
+            }
+        }
+        if !matched {
+            for (thread_idx, trading_state) in engine.down_threads.iter().enumerate() {
+                if matched { break; }
+                let stream_name = format!("DOWN-поток #{}", thread_idx + 1);
+                matched = check_second_leg_taker_fill_for_stream(engine, trading_state, taker_order_id, is_up, price, size, &stream_name);
+            }
+        }
+
+        // Проверяем хедж (может исполниться как TAKER если пересекает спред)
+        if !matched {
+            matched = check_hedge_taker_fill(engine, taker_order_id, is_up, price, size);
+        }
+
+        // Если нашли match → выходим из loop
+        if matched {
+            break;
+        }
+
+        // Не нашли match → ждем 5ms и пытаемся снова
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+    }
 }
 
 /// Проверяем заполнение первой ноги для конкретного потока
@@ -118,7 +145,7 @@ fn check_first_leg_fill_for_stream(
     price: f64,
     size: f64,
     stream_name: &str,
-) {
+) -> bool {
     let mut state = trading_state.lock().unwrap();
 
     match &*state {
@@ -158,10 +185,12 @@ fn check_first_leg_fill_for_stream(
                 drop(state);
 
                 super::second_leg::place_second_leg(engine, first_leg_is_up, trading_state, stream_name);
+                return true;
             }
         }
         _ => {}
     }
+    false
 }
 
 /// Проверяем заполнение второй ноги как TAKER для конкретного потока
@@ -173,7 +202,7 @@ fn check_second_leg_taker_fill_for_stream(
     price: f64,
     size: f64,
     stream_name: &str,
-) {
+) -> bool {
     let mut state = trading_state.lock().unwrap();
 
     if let TradingState::SearchingSecondLeg {
@@ -218,8 +247,10 @@ fn check_second_leg_taker_fill_for_stream(
                 info!("📊 {} | Вторая нога частично заполнена: {:.2}/{:.2}",
                     stream_name, new_filled, target_size);
             }
+            return true;
         }
     }
+    false
 }
 
 /// Проверяем заполнение хеджа как TAKER
@@ -229,7 +260,7 @@ fn check_hedge_taker_fill(
     is_up: bool,
     price: f64,
     size: f64,
-) {
+) -> bool {
     let mut hedge = engine.hedge_state.lock().unwrap();
 
     if let Some(ref state) = *hedge {
@@ -261,9 +292,11 @@ fn check_hedge_taker_fill(
                     info!("📊 ХЕДЖ | Частично заполнен: {:.2}/{:.2}",
                         new_filled, target_size);
                 }
+                return true;
             }
         }
     }
+    false
 }
 
 /// Обновляем PLACEMENT для хеджа
