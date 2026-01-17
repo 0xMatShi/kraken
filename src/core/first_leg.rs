@@ -46,9 +46,9 @@ pub fn try_place_first_leg_for_thread(
     let order_size = if bid_price >= 0.75 {
         engine.config.size * 1.25
     } else if bid_price >= 0.65 {
-        engine.config.size * 1.125
+        engine.config.size * 1.5
     } else if bid_price >= 0.60 {
-        engine.config.size * 1.0625
+        engine.config.size * 1.25
     } else {
         engine.config.size
     };
