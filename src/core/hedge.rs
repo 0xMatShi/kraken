@@ -5,15 +5,83 @@ use polymarket_client_sdk::types::Decimal;
 use crate::models::MarketPrices;
 use super::strat::{RealEngine, HedgeState};
 
-/// Расчет количества акций для хеджа по формуле:
-/// Количество = (ПотраченоВсего - АкцийВНаличии) / (1 - ЦенаПокупки)
-pub fn calculate_hedge_size(total_spent: f64, shares_on_hand: f64, price: f64) -> f64 {
+/// Расчет количества акций для хеджа с ограничением по бюджету (75% от прибыли)
+///
+/// Логика:
+/// 1. Определяем выигрывающую сторону (best_bid > 0.5)
+/// 2. Прибыль = shares_on_winning_side - total_spent
+/// 3. Максимальный бюджет хеджа = прибыль * 0.75
+/// 4. Рассчитываем полный размер хеджа: (total_spent - shares_on_hand) / (1 - price)
+/// 5. Если стоимость хеджа > max_budget → ограничиваем размер
+pub fn calculate_hedge_size(
+    total_spent: f64,
+    shares_on_hand: f64,
+    price: f64,
+    up_shares: f64,
+    down_shares: f64,
+    up_bid: f64,
+    down_bid: f64
+) -> f64 {
     if price >= 1.0 {
         warn!("⚠️ Невозможно рассчитать хедж: цена >= 1.0 ({:.2})", price);
         return 0.0;
     }
-    let size = (total_spent - shares_on_hand) / (1.0 - price);
-    size.max(0.0)
+
+    // Определяем выигрывающую сторону
+    let (winning_side_shares, winning_side_name) = if up_bid > 0.5 {
+        (up_shares, "UP")
+    } else if down_bid > 0.5 {
+        (down_shares, "DOWN")
+    } else {
+        // Нет явного победителя → используем старую логику без ограничений
+        let size = (total_spent - shares_on_hand) / (1.0 - price);
+        return size.max(0.0);
+    };
+
+    // Рассчитываем полный размер хеджа (без ограничений)
+    let full_hedge_size = (total_spent - shares_on_hand) / (1.0 - price);
+    let full_hedge_size = full_hedge_size.max(0.0);
+
+    // Рассчитываем текущую прибыль
+    let current_profit = winning_side_shares - total_spent;
+
+    if current_profit <= 0.0 {
+        // Прибыли нет → хеджимся на 50% от полного размера
+        let half_size = full_hedge_size * 0.5;
+        let half_cost = half_size * price;
+        warn!("⚠️ Текущая прибыль <= 0 ({:.2}$)", current_profit);
+        info!("   Хеджимся на 50% от полного размера: {:.2} акций за {:.2}$",
+            half_size, half_cost);
+        return half_size;
+    }
+
+    // Максимальный бюджет = 75% от прибыли
+    let max_budget = current_profit * 0.75;
+
+    info!("💰 Прибыль на стороне {}: {:.2}$ | Макс бюджет хеджа (75%): {:.2}$",
+        winning_side_name, current_profit, max_budget);
+
+    // Стоимость полного хеджа
+    let full_hedge_cost = full_hedge_size * price;
+
+    if full_hedge_cost <= max_budget {
+        // Полный хедж укладывается в бюджет → используем его
+        info!("✅ Полный хедж ({:.2} акций за {:.2}$) укладывается в бюджет",
+            full_hedge_size, full_hedge_cost);
+        return full_hedge_size;
+    }
+
+    // Полный хедж превышает бюджет → ограничиваем размер
+    let limited_size = max_budget / price;
+    let budget_usage_percent = (full_hedge_cost / current_profit) * 100.0;
+
+    info!("⚠️ Полный хедж ({:.2} акций за {:.2}$) превышает бюджет",
+        full_hedge_size, full_hedge_cost);
+    info!("   Это {:.1}% от прибыли (лимит: 75%)", budget_usage_percent);
+    info!("   Ограничиваем размер до {:.2} акций за {:.2}$",
+        limited_size, max_budget);
+
+    limited_size
 }
 
 /// Проверяем нужен ли хедж и запускаем его размещение
@@ -34,12 +102,17 @@ pub fn check_and_start_hedge(engine: &Arc<RealEngine>, prices: &MarketPrices) {
     };
 
     let skew = up_shares - down_shares;
+    let total_shares = up_shares + down_shares;
 
-    // ПОРОГ АКТИВАЦИИ: перекос > 50 акций
-    if skew.abs() <= 50.0 {
+    // ПОРОГ АКТИВАЦИИ: динамический расчет
+    // Минимум: 15 акций
+    // Максимум: 3% от total_spent
+    let threshold = (total_shares * 0.03).max(30.0);
+
+    if skew.abs() <= threshold {
         let hedging_was_active = *engine.hedging_active.lock().unwrap();
         if hedging_was_active {
-            info!("✅ Перекос устранен естественным образом (Skew={:.1})", skew);
+            info!("✅ Перекос устранен естественным образом (Skew={:.1}, Threshold={:.1})", skew, threshold);
             *engine.hedging_active.lock().unwrap() = false;
             *engine.hedge_state.lock().unwrap() = None;
             info!("🔓 Потоки разблокированы");
@@ -55,8 +128,8 @@ pub fn check_and_start_hedge(engine: &Arc<RealEngine>, prices: &MarketPrices) {
         }
     }
 
-    info!("⚖️ ОБНАРУЖЕН ПЕРЕКОС: UP={:.1} DOWN={:.1} | Skew={:.1}",
-        up_shares, down_shares, skew);
+    info!("⚖️ ОБНАРУЖЕН ПЕРЕКОС: UP={:.1} DOWN={:.1} | Skew={:.1} (Threshold={:.1})",
+        up_shares, down_shares, skew, threshold);
 
     // Проверяем, есть ли активные потоки
     if engine.has_active_threads() {
@@ -81,7 +154,15 @@ pub fn check_and_start_hedge(engine: &Arc<RealEngine>, prices: &MarketPrices) {
         (true, up_shares, prices.up_bid)
     };
 
-    let target_size = calculate_hedge_size(total_spent, shares_on_hand, best_bid);
+    let target_size = calculate_hedge_size(
+        total_spent,
+        shares_on_hand,
+        best_bid,
+        up_shares,
+        down_shares,
+        prices.up_bid,
+        prices.down_bid
+    );
 
     if target_size < 5.0 {
         warn!("⚠️ Размер хеджа < 5.0 ({:.2}), пропускаем", target_size);
@@ -173,7 +254,7 @@ pub fn check_hedge_repricing(engine: &Arc<RealEngine>, prices: &MarketPrices) {
                 let price_improvement = new_best_bid - pending_price;
                 if price_improvement >= 0.01 {
                     // Пересчитываем размер для новой цены
-                    let (total_spent, shares_on_hand) = {
+                    let (total_spent, shares_on_hand, up_shares, down_shares) = {
                         let port = engine.portfolio.lock().unwrap();
                         let total = port.up_spent + port.down_spent;
                         let shares = if state.is_up_side {
@@ -181,10 +262,18 @@ pub fn check_hedge_repricing(engine: &Arc<RealEngine>, prices: &MarketPrices) {
                         } else {
                             port.down_shares
                         };
-                        (total, shares)
+                        (total, shares, port.up_shares, port.down_shares)
                     };
 
-                    let new_target_size = calculate_hedge_size(total_spent, shares_on_hand, new_best_bid);
+                    let new_target_size = calculate_hedge_size(
+                        total_spent,
+                        shares_on_hand,
+                        new_best_bid,
+                        up_shares,
+                        down_shares,
+                        prices.up_bid,
+                        prices.down_bid
+                    );
                     let new_remaining_size = new_target_size - state.filled_size;
 
                     if new_remaining_size >= 5.0 {
@@ -202,7 +291,7 @@ pub fn check_hedge_repricing(engine: &Arc<RealEngine>, prices: &MarketPrices) {
             let price_diff = new_best_bid - state.current_price;
 
             if price_diff >= 0.01 {
-                let (total_spent, shares_on_hand) = {
+                let (total_spent, shares_on_hand, up_shares, down_shares) = {
                     let port = engine.portfolio.lock().unwrap();
                     let total = port.up_spent + port.down_spent;
                     let shares = if state.is_up_side {
@@ -210,13 +299,17 @@ pub fn check_hedge_repricing(engine: &Arc<RealEngine>, prices: &MarketPrices) {
                     } else {
                         port.down_shares
                     };
-                    (total, shares)
+                    (total, shares, port.up_shares, port.down_shares)
                 };
 
                 let new_target_size = calculate_hedge_size(
                     total_spent,
                     shares_on_hand,
-                    new_best_bid
+                    new_best_bid,
+                    up_shares,
+                    down_shares,
+                    prices.up_bid,
+                    prices.down_bid
                 );
 
                 let remaining_size = new_target_size - state.filled_size;
