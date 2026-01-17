@@ -55,8 +55,8 @@ pub fn calculate_hedge_size(
         return half_size;
     }
 
-    // Максимальный бюджет = 75% от прибыли
-    let max_budget = current_profit * 0.75;
+    // Максимальный бюджет = 50% от прибыли
+    let max_budget = current_profit * 0.50;
 
     info!("💰 Прибыль на стороне {}: {:.2}$ | Макс бюджет хеджа (75%): {:.2}$",
         winning_side_name, current_profit, max_budget);
@@ -77,7 +77,7 @@ pub fn calculate_hedge_size(
 
     info!("⚠️ Полный хедж ({:.2} акций за {:.2}$) превышает бюджет",
         full_hedge_size, full_hedge_cost);
-    info!("   Это {:.1}% от прибыли (лимит: 75%)", budget_usage_percent);
+    info!("   Это {:.1}% от прибыли (лимит: 50%)", budget_usage_percent);
     info!("   Ограничиваем размер до {:.2} акций за {:.2}$",
         limited_size, max_budget);
 
@@ -107,7 +107,7 @@ pub fn check_and_start_hedge(engine: &Arc<RealEngine>, prices: &MarketPrices) {
     // ПОРОГ АКТИВАЦИИ: динамический расчет
     // Минимум: 15 акций
     // Максимум: 3% от total_spent
-    let threshold = (total_shares * 0.03).max(30.0);
+    let threshold = (total_shares * 0.02).max(30.0);
 
     if skew.abs() <= threshold {
         let hedging_was_active = *engine.hedging_active.lock().unwrap();
