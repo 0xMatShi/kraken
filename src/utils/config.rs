@@ -16,11 +16,21 @@ pub struct TradingConfig {
     /// Размер одного ордера (количество акций)
     pub size: f64,
 
-    /// Порог перекоса для хеджирования (количество акций)
-    pub hedge_size: f64,
+    /// Виртуальный лимит для cheap side (максимум акций)
+    #[serde(default = "default_cheap_limit")]
+    pub cheap_limit: f64,
 
-    /// Количество одновременных потоков (максимум активных первых ног)
-    pub threads: usize,
+    /// Время экспирации GTD ордеров (секунды)
+    #[serde(default = "default_expiration_seconds")]
+    pub expiration_seconds: u64,
+}
+
+fn default_cheap_limit() -> f64 {
+    150.0
+}
+
+fn default_expiration_seconds() -> u64 {
+    2
 }
 
 impl Config {

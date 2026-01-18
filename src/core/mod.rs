@@ -1,7 +1,5 @@
 pub mod strat;
-pub mod first_leg;
-pub mod second_leg;
-pub mod hedge;
+pub mod streams;
 pub mod handle;
 
 pub use strat::RealEngine;

@@ -121,6 +121,30 @@ impl Portfolio {
     pub fn up_avg(&self) -> f64 { if self.up_shares > 0.0 { self.up_spent / self.up_shares } else { 0.0 } }
     pub fn down_avg(&self) -> f64 { if self.down_shares > 0.0 { self.down_spent / self.down_shares } else { 0.0 } }
     pub fn total_avg(&self) -> f64 { self.up_avg() + self.down_avg() }
+
+    /// Возвращает абсолютный перекос портфеля (разницу между UP и DOWN акциями)
+    pub fn skew(&self) -> f64 {
+        (self.up_shares - self.down_shares).abs()
+    }
+
+    /// Возвращает информацию о "дешёвой" стороне (стороне с большим количеством акций)
+    /// Returns (Side, avg_price) для стороны с большим количеством акций
+    pub fn cheap_side_info(&self) -> (Side, f64) {
+        if self.up_shares >= self.down_shares {
+            (Side::Up, self.up_avg())
+        } else {
+            (Side::Down, self.down_avg())
+        }
+    }
+
+    /// Возвращает сторону с меньшим количеством акций (expensive side)
+    pub fn expensive_side(&self) -> Side {
+        if self.up_shares >= self.down_shares {
+            Side::Down
+        } else {
+            Side::Up
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]

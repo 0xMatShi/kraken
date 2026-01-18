@@ -11,63 +11,41 @@ use alloy::signers::local::PrivateKeySigner;
 use tracing::info;
 use uuid::Uuid;
 
-/// Состояние хеджирования
+/// Трекер виртуального лимита для cheap side
 #[derive(Debug, Clone)]
-pub struct HedgeState {
-    pub order_id: Option<String>,        // ID текущей лимитки хеджа
-    pub is_up_side: bool,                // Какую сторону хеджируем (true = покупаем UP)
-    pub current_price: f64,              // По какой цене размещен текущий ордер
-    pub target_size: f64,                // Целевое количество акций для хеджа
-    pub filled_size: f64,                // Сколько уже исполнено
-    pub pending_repricing: Option<(f64, f64)>,  // Ожидающее перевыставление: (new_price, new_size) после получения ОБОИХ подтверждений
-    pub api_cancel_confirmed: bool,      // API подтвердил отмену
-    pub websocket_cancel_confirmed: bool, // WebSocket подтвердил отмену (CANCELLATION событие)
+pub struct VirtualLimitTracker {
+    pub used_shares: f64,
 }
 
-/// Состояние торговой стратегии для одного потока
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub enum TradingState {
-    /// Ждём спред 2с (up_bid + down_bid == 0.98)
-    Idle,
-    /// Первая нога размещена, ждём заполнения
-    WaitingFirstLeg {
-        order_id: String,
-        is_up: bool,
-        price: f64,
-        size: f64,
-    },
-    /// Первая нога заполнена, ищем вторую ногу
-    /// Мониторим ask для хеджа + размещена лимитка второй ноги
-    SearchingSecondLeg {
-        first_leg_price: f64,
-        first_leg_is_up: bool,
-        first_leg_size: f64,
-        second_leg_order_id: Option<String>,
-        second_leg_current_price: Option<f64>,   // Цена по которой размещен текущий ордер второй ноги
-        second_leg_filled: f64,                  // Сколько уже исполнено из второй ноги
-        pending_repricing: Option<f64>,          // Ожидающее перевыставление: new_price после получения ОБОИХ подтверждений
-        api_cancel_confirmed: bool,              // API подтвердил отмену
-        websocket_cancel_confirmed: bool,        // WebSocket подтвердил отмену (CANCELLATION событие)
-    },
-}
-
-impl Default for TradingState {
+impl Default for VirtualLimitTracker {
     fn default() -> Self {
-        TradingState::Idle
+        Self { used_shares: 0.0 }
     }
 }
 
-/// Ключ для бронирования цены (is_up, price_cents)
-/// price_cents = (price * 100).round() as i32
-pub type ReservedPriceKey = (bool, i32);
+/// Тип потока для отслеживания ордеров
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StreamType {
+    CheapSide,
+    ExpensiveSide,
+}
 
-pub fn price_to_cents(price: f64) -> i32 {
-    (price * 100.0).round() as i32
+/// Информация об активном ордере
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ActiveOrder {
+    pub order_id: String,
+    pub is_up: bool,
+    pub price: f64,
+    pub size: f64,
+    pub filled: f64,
+    pub stream_type: StreamType,
 }
 
 pub struct RealEngine {
     pub portfolio: Mutex<Portfolio>,
+    pub virtual_limit: Mutex<VirtualLimitTracker>,
+    pub active_orders: Mutex<HashMap<String, ActiveOrder>>,
     pub client: Client<Authenticated<Normal>>,
     pub signer: PrivateKeySigner,
     pub up_token: Arc<str>,
@@ -79,13 +57,7 @@ pub struct RealEngine {
     pub our_api_key: Uuid,
     pub config: TradingConfig,
     pub ui_state: UiState,
-    // Многопоточность: N потоков на каждую сторону (N = config.threads)
-    pub up_threads: Vec<Arc<Mutex<TradingState>>>,
-    pub down_threads: Vec<Arc<Mutex<TradingState>>>,
-    pub reserved_prices: Mutex<HashSet<ReservedPriceKey>>,
     pub last_prices: Mutex<Option<MarketPrices>>,
-    pub hedge_state: Mutex<Option<HedgeState>>,
-    pub hedging_active: Mutex<bool>,
 }
 
 impl RealEngine {
@@ -98,22 +70,14 @@ impl RealEngine {
         config: TradingConfig,
         ui_state: UiState,
     ) -> Self {
-        // Создаём N потоков на каждую сторону (N = config.threads)
-        let num_threads = config.threads.max(1);
-
-        let up_threads: Vec<Arc<Mutex<TradingState>>> = (0..num_threads)
-            .map(|_| Arc::new(Mutex::new(TradingState::Idle)))
-            .collect();
-
-        let down_threads: Vec<Arc<Mutex<TradingState>>> = (0..num_threads)
-            .map(|_| Arc::new(Mutex::new(TradingState::Idle)))
-            .collect();
-
-        info!("🔧 Инициализация движка: {} UP-потоков + {} DOWN-потоков = {} всего",
-            num_threads, num_threads, num_threads * 2);
+        info!("🔧 Инициализация движка: Two-Stream Architecture");
+        info!("   Cheap limit: {:.1} | Order size: {:.1} | Expiration: {}s",
+            config.cheap_limit, config.size, config.expiration_seconds);
 
         Self {
             portfolio: Mutex::new(Portfolio::default()),
+            virtual_limit: Mutex::new(VirtualLimitTracker::default()),
+            active_orders: Mutex::new(HashMap::new()),
             client,
             signer,
             up_token: Arc::from(up_token.as_str()),
@@ -125,12 +89,7 @@ impl RealEngine {
             our_api_key,
             config,
             ui_state,
-            up_threads,
-            down_threads,
-            reserved_prices: Mutex::new(HashSet::new()),
             last_prices: Mutex::new(None),
-            hedge_state: Mutex::new(None),
-            hedging_active: Mutex::new(false),
         }
     }
 
@@ -143,33 +102,6 @@ impl RealEngine {
     // Округление до 2 знаков (минимальный тик-размер 0.01)
     pub fn round_price(price: f64) -> f64 {
         (price * 100.0).round() / 100.0
-    }
-
-    /// Проверяем, есть ли активные потоки (НЕ в состоянии Idle)
-    pub fn has_active_threads(&self) -> bool {
-        let mut active_count = 0;
-
-        for (idx, thread) in self.up_threads.iter().enumerate() {
-            let state = thread.lock().unwrap();
-            if !matches!(*state, TradingState::Idle) {
-                active_count += 1;
-                info!("🔍 UP-поток #{} НЕ в Idle", idx + 1);
-            }
-        }
-
-        for (idx, thread) in self.down_threads.iter().enumerate() {
-            let state = thread.lock().unwrap();
-            if !matches!(*state, TradingState::Idle) {
-                active_count += 1;
-                info!("🔍 DOWN-поток #{} НЕ в Idle", idx + 1);
-            }
-        }
-
-        if active_count > 0 {
-            info!("🔍 Всего активных потоков: {}", active_count);
-        }
-
-        active_count > 0
     }
 
     // Методы для работы с активными ордерами
@@ -185,7 +117,7 @@ impl RealEngine {
 
     /// Основной метод стратегии - точка входа для каждого тика рынка
     pub fn process_tick(self: &Arc<Self>, prices: MarketPrices) {
-        // Сохраняем последние актуальные цены для размещения второй ноги
+        // Сохраняем последние актуальные цены
         *self.last_prices.lock().unwrap() = Some(prices.clone());
 
         // Проверяем режим торговли
@@ -198,60 +130,49 @@ impl RealEngine {
             return;
         }
 
-        // ПРИОРИТЕТ 1: Проверяем необходимость хеджирования ПЕРЕД основным алгоритмом
-        super::hedge::check_and_start_hedge(self, &prices);
+        // Определяем cheap и expensive sides по bid цене
+        let (cheap_side, cheap_bid, expensive_side, expensive_bid) =
+            self.detect_sides(&prices);
 
-        // ПРИОРИТЕТ 2: Основной алгоритм - только если хедж не активен
-        let hedging_active = *self.hedging_active.lock().unwrap();
-        if !hedging_active {
-            self.run_logic(prices.clone());
-        }
-
-        // ПРИОРИТЕТ 2.5: Перевыставление СУЩЕСТВУЮЩИХ вторых ног - работает ВСЕГДА
-        super::second_leg::check_second_leg_repricing(self, &prices);
-
-        // ПРИОРИТЕТ 3: Проверяем перевыставление хеджа (если он активен)
-        super::hedge::check_hedge_repricing(self, &prices);
-    }
-
-    /// Основная логика стратегии - размещение первых ног для свободных потоков
-    fn run_logic(&self, prices: MarketPrices) {
-        let (up_spent, down_spent) = {
-            let port = self.portfolio.lock().unwrap();
-            (port.up_spent, port.down_spent)
-        };
-
-        if (up_spent + down_spent) >= self.config.max_balance {
+        // Edge case: если обе стороны cheap или обе expensive - ничего не делаем
+        if cheap_side == expensive_side {
             return;
         }
 
-        // === UP-потоки: первая нога всегда UP ===
-        for (thread_idx, trading_state) in self.up_threads.iter().enumerate() {
-            let state = trading_state.lock().unwrap().clone();
+        // Stream 1: Cheap Side (bid < 0.5)
+        super::streams::run_cheap_side_stream(self, cheap_side, cheap_bid);
 
-            if let TradingState::Idle = state {
-                super::first_leg::try_place_first_leg_for_thread(
-                    self,
-                    thread_idx,
-                    &prices,
-                    true,
-                    trading_state
-                );
+        // Stream 2: Expensive Side (bid > 0.5)
+        super::streams::run_expensive_side_stream(
+            self,
+            cheap_side,
+            cheap_bid,
+            expensive_side,
+            expensive_bid,
+        );
+    }
+
+    /// Определяет cheap и expensive sides по bid ценам
+    fn detect_sides(&self, prices: &MarketPrices) -> (Side, f64, Side, f64) {
+        // cheap side = bid < 0.5
+        // expensive side = bid > 0.5
+        if prices.up_bid < 0.5 && prices.down_bid > 0.5 {
+            (Side::Up, prices.up_bid, Side::Down, prices.down_bid)
+        } else if prices.down_bid < 0.5 && prices.up_bid > 0.5 {
+            (Side::Down, prices.down_bid, Side::Up, prices.up_bid)
+        } else if prices.up_bid < 0.5 && prices.down_bid < 0.5 {
+            // Обе стороны cheap - выбираем более дешёвую
+            if prices.up_bid <= prices.down_bid {
+                (Side::Up, prices.up_bid, Side::Up, prices.up_bid)
+            } else {
+                (Side::Down, prices.down_bid, Side::Down, prices.down_bid)
             }
-        }
-
-        // === DOWN-потоки: первая нога всегда DOWN ===
-        for (thread_idx, trading_state) in self.down_threads.iter().enumerate() {
-            let state = trading_state.lock().unwrap().clone();
-
-            if let TradingState::Idle = state {
-                super::first_leg::try_place_first_leg_for_thread(
-                    self,
-                    thread_idx,
-                    &prices,
-                    false,
-                    trading_state
-                );
+        } else {
+            // Обе стороны expensive - выбираем менее дорогую как expensive
+            if prices.up_bid <= prices.down_bid {
+                (Side::Down, prices.down_bid, Side::Up, prices.up_bid)
+            } else {
+                (Side::Up, prices.up_bid, Side::Down, prices.down_bid)
             }
         }
     }
