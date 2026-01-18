@@ -127,13 +127,30 @@ impl Portfolio {
         (self.up_shares - self.down_shares).abs()
     }
 
-    /// Возвращает информацию о "дешёвой" стороне (стороне с большим количеством акций)
-    /// Returns (Side, avg_price) для стороны с большим количеством акций
-    pub fn cheap_side_info(&self) -> (Side, f64) {
-        if self.up_shares >= self.down_shares {
-            (Side::Up, self.up_avg())
+    /// Возвращает направленный перекос относительно cheap стороны
+    /// Положительный = больше cheap акций (нормально)
+    /// Отрицательный = больше expensive акций (нужно увеличить лимит)
+    pub fn directed_skew(&self, cheap_side: Side) -> f64 {
+        match cheap_side {
+            Side::Up => self.up_shares - self.down_shares,
+            Side::Down => self.down_shares - self.up_shares,
+        }
+    }
+
+    /// Возвращает информацию о cheap стороне для расчета ratio
+    /// Если перекос положительный (больше cheap) - возвращает avg цену cheap стороны
+    /// Если перекос отрицательный (больше expensive) - возвращает 0.0
+    pub fn cheap_side_info(&self, cheap_side: Side) -> (Side, f64) {
+        let directed_skew = self.directed_skew(cheap_side);
+        if directed_skew > 0.0 {
+            // Больше cheap акций - возвращаем avg цену
+            match cheap_side {
+                Side::Up => (Side::Up, self.up_avg()),
+                Side::Down => (Side::Down, self.down_avg()),
+            }
         } else {
-            (Side::Down, self.down_avg())
+            // Больше expensive акций или равно - avg = 0
+            (cheap_side, 0.0)
         }
     }
 
