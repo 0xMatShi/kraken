@@ -147,7 +147,7 @@ pub fn run_expensive_side_stream(
     } else if ratio >= 0.99 {
         // Deadband: 0.99 <= ratio <= 1.00
         info!("⏸️ Stream 2 | Deadband (0.99-1.00): ничего не делаем");
-    } else {
+    } else if ratio <= 0.95{
         // ratio < 0.99 - накапливаем на expensive side
         info!("📊 Stream 2 | Ratio < 0.99 → накапливаем expensive side");
 
