@@ -185,7 +185,7 @@ fn place_gtd_order(
         let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
         // Экспирация: now + expiration_seconds
-        let expiration = Utc::now() + chrono::Duration::seconds(expiration_seconds as i64);
+        let expiration = Utc::now() + chrono::Duration::seconds(60 + expiration_seconds as i64);
 
         let order = client.limit_order()
             .token_id(token_id.as_ref())
