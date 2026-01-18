@@ -84,21 +84,23 @@ pub fn run_expensive_side_stream(
 
     let size = engine.config.size;
 
-    // Получаем информацию о портфеле с учетом направления перекоса
-    let (directed_skew, cheap_avg) = {
+    // Рассчитываем эффективный перекос с учетом виртуального резервирования
+    let effective_skew = engine.effective_directed_skew(cheap_side);
+
+    // Получаем cheap_avg для расчета ratio
+    let cheap_avg = {
         let port = engine.portfolio.lock().unwrap();
-        let skew = port.directed_skew(cheap_side);
         let (_, avg) = port.cheap_side_info(cheap_side);
-        (skew, avg)
+        avg
     };
 
-    // Stream 2 работает ТОЛЬКО если перекос положительный (больше cheap акций)
-    if directed_skew <= 0.0 {
-        return; // Больше expensive акций или равно - Stream 2 не работает
+    // Stream 2 работает ТОЛЬКО если эффективный перекос положительный (больше cheap акций)
+    if effective_skew <= 0.0 {
+        return; // Больше expensive или уже зарезервировано - Stream 2 не работает
     }
 
-    // Если перекос меньше size - слишком мал для закрытия
-    if directed_skew < size {
+    // Если эффективный перекос меньше size - слишком мал для закрытия
+    if effective_skew < size {
         return; // Не размещаем ничего
     }
 
@@ -110,13 +112,13 @@ pub fn run_expensive_side_stream(
         0.0
     };
 
-    info!("📊 Stream 2 | Ratio: {:.4} = (1 - {:.2}) / {:.2} | Skew: {:.1}",
-        ratio, cheap_avg, expensive_bid, directed_skew);
+    info!("📊 Stream 2 | Ratio: {:.4} = (1 - {:.2}) / {:.2} | Effective Skew: {:.1}",
+        ratio, cheap_avg, expensive_bid, effective_skew);
 
     if ratio > 1.00 {
         // Profitable to close skew
         info!("✅ Stream 2 | Ratio > 1.00 → Закрываем skew {:.1}",
-            directed_skew);
+            effective_skew);
 
         // Проверяем max_balance
         {
@@ -129,26 +131,50 @@ pub fn run_expensive_side_stream(
 
         let rounded_price = RealEngine::round_price(expensive_bid);
 
+        // Резервируем виртуальное закрытие перекоса
+        {
+            let mut limit = engine.virtual_limit.lock().unwrap();
+            limit.used_skew_close += size;
+            info!("📊 Stream 2 | Зарезервировано для закрытия skew: {:.1} | Всего: {:.1}",
+                size, limit.used_skew_close);
+        }
+
         // Размещаем только 1 ордер за тик (остальные при следующих тиках)
         info!("🎯 Stream 2 (Close Skew) | Размещаем {} @ {:.2} | Size: {:.2}",
             if expensive_side == Side::Up { "UP" } else { "DOWN" }, rounded_price, size);
-
-        // Освобождаем виртуальный лимит при закрытии skew
-        {
-            let mut limit = engine.virtual_limit.lock().unwrap();
-            let release = size.min(limit.used_shares);
-            limit.used_shares -= release;
-            info!("📊 Stream 2 | Освобождено из лимита: {:.1} | Осталось: {:.1}/{:.1}",
-                release, limit.used_shares, engine.config.cheap_limit);
-        }
 
         place_gtd_order(engine, expensive_side, rounded_price, size, StreamType::ExpensiveSide);
     } else if ratio >= 0.99 {
         // Deadband: 0.99 <= ratio <= 1.00
         info!("⏸️ Stream 2 | Deadband (0.99-1.00): ничего не делаем");
     } else {
-        // ratio < 0.99 - не выгодно закрывать перекос
-        info!("📊 Stream 2 | Ratio < 0.99 → ждем роста цены expensive side");
+        // ratio < 0.99 - накапливаем на expensive side
+        info!("📊 Stream 2 | Ratio < 0.99 → накапливаем expensive side");
+
+        // Проверяем max_balance
+        {
+            let port = engine.portfolio.lock().unwrap();
+            let total_spent = port.up_spent + port.down_spent;
+            if total_spent + (expensive_bid * size) > engine.config.max_balance {
+                return;
+            }
+        }
+
+        let rounded_price = RealEngine::round_price(expensive_bid);
+
+        // Резервируем виртуальное закрытие перекоса
+        {
+            let mut limit = engine.virtual_limit.lock().unwrap();
+            limit.used_skew_close += size;
+            info!("📊 Stream 2 | Зарезервировано для accumulate: {:.1} | Всего: {:.1}",
+                size, limit.used_skew_close);
+        }
+
+        // Размещаем ордер
+        info!("🎯 Stream 2 (Accumulate) | Размещаем {} @ {:.2} | Size: {:.2}",
+            if expensive_side == Side::Up { "UP" } else { "DOWN" }, rounded_price, size);
+
+        place_gtd_order(engine, expensive_side, rounded_price, size, StreamType::ExpensiveSide);
     }
 }
 

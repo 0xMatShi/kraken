@@ -11,15 +11,21 @@ use alloy::signers::local::PrivateKeySigner;
 use tracing::info;
 use uuid::Uuid;
 
-/// Трекер виртуального лимита для cheap side
+/// Трекер виртуального лимита для cheap side и закрытия перекоса
 #[derive(Debug, Clone)]
 pub struct VirtualLimitTracker {
+    /// Shares зарезервированные для размещения на cheap side
     pub used_shares: f64,
+    /// Shares зарезервированные для закрытия перекоса на expensive side
+    pub used_skew_close: f64,
 }
 
 impl Default for VirtualLimitTracker {
     fn default() -> Self {
-        Self { used_shares: 0.0 }
+        Self {
+            used_shares: 0.0,
+            used_skew_close: 0.0,
+        }
     }
 }
 
@@ -102,6 +108,17 @@ impl RealEngine {
     // Округление до 2 знаков (минимальный тик-размер 0.01)
     pub fn round_price(price: f64) -> f64 {
         (price * 100.0).round() / 100.0
+    }
+
+    /// Рассчитывает эффективный перекос с учетом виртуального резервирования
+    /// Вычитает виртуально зарезервированные shares для закрытия перекоса
+    pub fn effective_directed_skew(&self, cheap_side: Side) -> f64 {
+        let port = self.portfolio.lock().unwrap();
+        let limit = self.virtual_limit.lock().unwrap();
+
+        let real_skew = port.directed_skew(cheap_side);
+        // Вычитаем виртуально зарезервированные shares
+        real_skew - limit.used_skew_close
     }
 
     // Методы для работы с активными ордерами
