@@ -115,7 +115,7 @@ pub fn run_expensive_side_stream(
     info!("📊 Stream 2 | Ratio: {:.4} = (1 - {:.2}) / {:.2} | Effective Skew: {:.1}",
         ratio, cheap_avg, expensive_bid, effective_skew);
 
-    if ratio > 1.00 {
+    if ratio > 1.01 {
         // Profitable to close skew
         info!("✅ Stream 2 | Ratio > 1.00 → Закрываем skew {:.1}",
             effective_skew);
@@ -147,7 +147,7 @@ pub fn run_expensive_side_stream(
     } else if ratio >= 0.99 {
         // Deadband: 0.99 <= ratio <= 1.00
         info!("⏸️ Stream 2 | Deadband (0.99-1.00): ничего не делаем");
-    } else if ratio <= 0.95{
+    } else if ratio <= 0.97{
         // ratio < 0.99 - накапливаем на expensive side
         info!("📊 Stream 2 | Ratio < 0.99 → накапливаем expensive side");
 
