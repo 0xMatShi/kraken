@@ -239,7 +239,7 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
         let (is_up_expensive, is_down_expensive) = (!up_is_cheap, !down_is_cheap);
 
         // Проверяем UP expensive в дефиците
-        if is_up_expensive && up_shares < down_shares && up_bid > p_max + 0.05 {
+        if is_up_expensive && up_shares < down_shares && up_bid > p_max + 0.03 {
             let s_exp = up_shares;
             let p_exp = up_bid;
 
@@ -279,11 +279,11 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
                 }
             }
         } else if is_up_expensive && up_shares < down_shares {
-            info!("⏸️ UP expensive убыток: bid {:.3} <= p_max + 0.05 ({:.3})", up_bid, p_max + 0.03);
+            info!("⏸️ UP expensive убыток: bid {:.3} <= p_max + 0.03 ({:.3})", up_bid, p_max + 0.03);
         }
 
         // Проверяем DOWN expensive в дефиците
-        if is_down_expensive && down_shares < up_shares && down_bid > p_max + 0.05 {
+        if is_down_expensive && down_shares < up_shares && down_bid > p_max + 0.03 {
             let s_exp = down_shares;
             let p_exp = down_bid;
 
@@ -323,7 +323,7 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
                 }
             }
         } else if is_down_expensive && down_shares < up_shares {
-            info!("⏸️ DOWN expensive убыток: bid {:.3} <= p_max + 0.05 ({:.3})", down_bid, p_max + 0.03);
+            info!("⏸️ DOWN expensive убыток: bid {:.3} <= p_max + 0.03 ({:.3})", down_bid, p_max + 0.03);
         }
     }
 
