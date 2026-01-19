@@ -138,13 +138,19 @@ impl RealEngine {
         *self.last_prices.lock().unwrap() = Some(prices.clone());
 
         // Проверяем режим торговли
-        let trading_enabled = {
+        let trading_mode = {
             let state = self.ui_state.lock().unwrap();
-            state.trading_enabled
+            state.trading_mode
         };
 
-        if !trading_enabled {
-            return;
+        match trading_mode {
+            ui::TradingMode::Stop => {
+                // Stop режим: ничего не делаем, софт стоит афк
+                return;
+            }
+            ui::TradingMode::RealRun => {
+                // RealRun режим: реальная торговля
+            }
         }
 
         // Определяем cheap и expensive sides по bid цене
@@ -168,6 +174,7 @@ impl RealEngine {
             expensive_bid,
         );
     }
+
 
     /// Определяет cheap и expensive sides по bid ценам
     fn detect_sides(&self, prices: &MarketPrices) -> (Side, f64, Side, f64) {

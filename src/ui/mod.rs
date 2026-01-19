@@ -103,6 +103,19 @@ impl EventInfo {
     }
 }
 
+/// Режим работы бота
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TradingMode {
+    Stop,    // Софт стоит афк
+    RealRun, // Реальная торговля за деньги
+}
+
+impl Default for TradingMode {
+    fn default() -> Self {
+        TradingMode::Stop  // По умолчанию Stop
+    }
+}
+
 /// Состояние UI - безопасно для многопоточного доступа
 #[derive(Debug, Default)]
 pub struct UiStateInner {
@@ -111,7 +124,7 @@ pub struct UiStateInner {
     pub up_book: SideOrderBook,
     pub down_book: SideOrderBook,
     pub is_running: bool,
-    pub trading_enabled: bool,  // false = dryrun, true = real trading
+    pub trading_mode: TradingMode,  // Текущий режим работы
     pub price_to_beat: Option<f64>,
     pub current_price: Option<f64>,
     pub our_up_bid_prices: HashSet<u32>,   // Цены в центах, где размещены наши UP ордера
@@ -194,17 +207,43 @@ pub fn set_event_info(state: &UiState, title: String, slug: String, end_date: Da
 }
 
 /// Установить режим торговли (вызывается при инициализации)
-pub fn set_trading_enabled(state: &UiState, enabled: bool) {
+pub fn set_trading_mode(state: &UiState, mode: TradingMode) {
     if let Ok(mut s) = state.lock() {
-        s.trading_enabled = enabled;
+        s.trading_mode = mode;
     }
 }
 
-/// Переключить режим торговли (вызывается при нажатии 'r')
-pub fn toggle_trading(state: &UiState) {
+/// Получить текущий режим торговли
+pub fn get_trading_mode(state: &UiState) -> TradingMode {
+    state.lock().map(|s| s.trading_mode).unwrap_or_default()
+}
+
+/// Переключить режим торговли (вызывается при нажатии 'r', 's')
+/// Возвращает true если нужно сбросить портфель (всегда false теперь)
+pub fn switch_trading_mode(state: &UiState, action: KeyAction) -> bool {
     if let Ok(mut s) = state.lock() {
-        s.trading_enabled = !s.trading_enabled;
+        match action {
+            KeyAction::ActivateRealRun => {
+                if s.trading_mode == TradingMode::RealRun {
+                    // Повторное нажатие r - переходим в Stop
+                    s.trading_mode = TradingMode::Stop;
+                    tracing::info!("⏸️ Режим: STOP (софт стоит афк)");
+                } else {
+                    s.trading_mode = TradingMode::RealRun;
+                    tracing::info!("🟢 Режим: REAL RUN (реальная торговля)");
+                }
+            }
+            KeyAction::ActivateStop => {
+                s.trading_mode = TradingMode::Stop;
+                tracing::info!("⏸️ Режим: STOP (софт стоит афк)");
+            }
+            _ => return false,
+        }
+
+        // Портфель сохраняется при переключении между Stop и RealRun
+        return false;
     }
+    false
 }
 
 /// Обновить портфолио
@@ -327,12 +366,12 @@ pub fn render(frame: &mut Frame, state: &UiState) {
         Constraint::Fill(1),      // History
     ]).areas(left_area);
 
-    render_event_info(frame, event_area, &state.event_info, state.trading_enabled, state.price_to_beat, state.current_price);
+    render_event_info(frame, event_area, &state.event_info, state.trading_mode, state.price_to_beat, state.current_price);
 
     // Получаем best_bid для расчета PnL
     let up_best_bid = state.up_book.bids.first().map(|l| l.price).unwrap_or(0.0);
     let down_best_bid = state.down_book.bids.first().map(|l| l.price).unwrap_or(0.0);
-    render_portfolio(frame, portfolio_area, &state.portfolio, state.trading_enabled, up_best_bid, down_best_bid);
+    render_portfolio(frame, portfolio_area, &state.portfolio, state.trading_mode, up_best_bid, down_best_bid);
     render_open_orders(frame, open_orders_area, &state.open_orders);
     render_history(frame, history_area, &state.trade_history, state.history_scroll_offset);
 
@@ -347,15 +386,17 @@ pub fn render(frame: &mut Frame, state: &UiState) {
 }
 
 /// Рендер информации о событии
-fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, trading_enabled: bool, price_to_beat: Option<f64>, current_price: Option<f64>) {
+fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, trading_mode: TradingMode, price_to_beat: Option<f64>, current_price: Option<f64>) {
     // Заголовок с индикатором режима
-    let title = if !trading_enabled {
-        " MARKET [DRY RUN] "
-    } else {
-        " MARKET "
+    let title = match trading_mode {
+        TradingMode::Stop => " MARKET [STOP] ",
+        TradingMode::RealRun => " MARKET [REAL RUN] ",
     };
 
-    let title_color = if !trading_enabled { Color::Yellow } else { Color::Cyan };
+    let title_color = match trading_mode {
+        TradingMode::Stop => Color::DarkGray,
+        TradingMode::RealRun => Color::Green,
+    };
 
     let block = Block::default()
         .title(title)
@@ -460,7 +501,7 @@ fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, trading_en
 }
 
 /// Рендер портфолио
-fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio, trading_enabled: bool, up_best_bid: f64, down_best_bid: f64) {
+fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio, trading_mode: TradingMode, up_best_bid: f64, down_best_bid: f64) {
     let block = Block::default()
         .title(" PORTFOLIO ")
         .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
@@ -552,13 +593,19 @@ fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio, tradin
             Span::raw(format!("{}", portfolio.taker_trades)),
         ]),
         Line::from(""),
-        // Добавляем строку с индикатором Trading: ON/OFF
+        // Добавляем строку с индикатором режима
         Line::from(vec![
-            Span::styled("Trading: ", Style::default().fg(Color::White)),
+            Span::styled("Mode: ", Style::default().fg(Color::White)),
             Span::styled(
-                if trading_enabled { "ON" } else { "OFF" },
+                match trading_mode {
+                    TradingMode::Stop => "STOP",
+                    TradingMode::RealRun => "REAL RUN",
+                },
                 Style::default()
-                    .fg(if trading_enabled { Color::Green } else { Color::Red })
+                    .fg(match trading_mode {
+                        TradingMode::Stop => Color::DarkGray,
+                        TradingMode::RealRun => Color::Green,
+                    })
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
@@ -790,22 +837,25 @@ fn render_history(frame: &mut Frame, area: Rect, history: &VecDeque<TradeHistory
 }
 
 /// Результат проверки нажатых клавиш
+#[derive(Clone, Copy)]
 pub enum KeyAction {
     None,
     Exit,
-    ToggleTrading,
+    ActivateRealRun,    // 'r' - включить RealRun или Stop если уже включен
+    ActivateStop,       // 's' - включить Stop
     ScrollHistoryUp,
     ScrollHistoryDown,
 }
 
-/// Проверка нажатия клавиш: 'q' для выхода, 'r' для переключения торговли, 'c'/'x' для скролла истории
+/// Проверка нажатия клавиш: 'q' для выхода, 'r'/'s' для режимов, 'c'/'x' для скролла истории
 pub fn check_key_action() -> KeyAction {
     if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
         if let Ok(Event::Key(key)) = event::read() {
             if key.kind == KeyEventKind::Press {
                 match key.code {
                     KeyCode::Char('q') => return KeyAction::Exit,
-                    KeyCode::Char('r') => return KeyAction::ToggleTrading,
+                    KeyCode::Char('r') => return KeyAction::ActivateRealRun,
+                    KeyCode::Char('s') => return KeyAction::ActivateStop,
                     KeyCode::Char('c') => return KeyAction::ScrollHistoryUp,
                     KeyCode::Char('x') => return KeyAction::ScrollHistoryDown,
                     _ => {}

@@ -174,24 +174,16 @@ async fn main() -> anyhow::Result<()> {
                 let ui_task = async {
                     loop {
                         // Проверка нажатых клавиш
-                        match ui::check_key_action() {
+                        let key_action = ui::check_key_action();
+                        match key_action {
                             ui::KeyAction::Exit => {
                                 user_exit_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                                 ui::stop_ui(&ui_state_clone);
                                 break;
                             }
-                            ui::KeyAction::ToggleTrading => {
-                                ui::toggle_trading(&ui_state_clone);
-                                // Логируем изменение состояния
-                                let trading_enabled = {
-                                    let state = ui_state_clone.lock().unwrap();
-                                    state.trading_enabled
-                                };
-                                if trading_enabled {
-                                    tracing::info!("🟢 ТОРГОВЛЯ ВКЛЮЧЕНА - режим реальной торговли");
-                                } else {
-                                    tracing::info!("🔴 ТОРГОВЛЯ ВЫКЛЮЧЕНА - режим наблюдения (DRY RUN)");
-                                }
+                            ui::KeyAction::ActivateRealRun | ui::KeyAction::ActivateStop => {
+                                // Переключаем режим
+                                ui::switch_trading_mode(&ui_state_clone, key_action);
                             }
                             ui::KeyAction::ScrollHistoryUp => {
                                 ui::scroll_history_up(&ui_state_clone);
@@ -251,22 +243,22 @@ async fn main() -> anyhow::Result<()> {
                 // Проверяем, запросил ли пользователь выход
                 if user_exit_requested.load(std::sync::atomic::Ordering::SeqCst) {
                     tracing::info!("Пользователь запросил выход в меню");
-                    // Сбрасываем состояние UI, но сохраняем trading_enabled
+                    // Сбрасываем состояние UI, но сохраняем trading_mode
                     {
                         let mut state = ui_state.lock().unwrap();
-                        let trading_enabled = state.trading_enabled;
+                        let trading_mode = state.trading_mode;
                         *state = ui::UiStateInner::default();
-                        state.trading_enabled = trading_enabled;
+                        state.trading_mode = trading_mode;
                     }
                     break; // Выход в главное меню
                 }
 
-                // Сбрасываем состояние UI для следующей сессии, но сохраняем trading_enabled
+                // Сбрасываем состояние UI для следующей сессии, но сохраняем trading_mode
                 {
                     let mut state = ui_state.lock().unwrap();
-                    let trading_enabled = state.trading_enabled;
+                    let trading_mode = state.trading_mode;
                     *state = ui::UiStateInner::default();
-                    state.trading_enabled = trading_enabled;
+                    state.trading_mode = trading_mode;
                 }
 
                 tracing::info!("Событие завершено, ищем следующее...");
