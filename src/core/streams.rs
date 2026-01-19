@@ -181,7 +181,7 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
     let expensive_profitable = expensive_side_shares >= total_spent;
 
     // ПРАВИЛО 1: avg <= 0.98 → режим BuyExpensive (покупаем пока не выйдем в плюс)
-    if total_avg <= 0.98 {
+    if total_avg <= 0.99 {
         *mode = TradingMode::BuyExpensive;
         info!("✅ ПРАВИЛО 1: Avg <= 0.98 ({:.3}) → Режим: BuyExpensive (до выхода в плюс)", total_avg);
     }
