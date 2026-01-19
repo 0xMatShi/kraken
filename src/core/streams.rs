@@ -166,14 +166,34 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
     let mut mode = engine.trading_mode.lock().unwrap();
     let skew_threshold = engine.config.size; // Порог перекоса = размер ордера из конфига
 
+    // Определяем expensive сторону и проверяем ее прибыльность
+    let expensive_side_shares = if !up_is_cheap {
+        up_shares
+    } else if !down_is_cheap {
+        down_shares
+    } else {
+        0.0 // Обе стороны cheap - нет expensive
+    };
+
+    let total_spent = {
+        let port = engine.portfolio.lock().unwrap();
+        port.up_spent + port.down_spent
+    };
+    let expensive_profitable = expensive_side_shares >= total_spent;
+
     // Проверяем условия переключения режима
     if total_avg <= 0.98 {
         *mode = TradingMode::BuyExpensive;
-        info!("✅ Avg <= 0.99 ({:.3}) → Режим: BuyExpensive (до закрытия перекоса)", total_avg);
-    } else if *mode == TradingMode::BuyExpensive && skew_abs < skew_threshold {
-        // В режиме BuyExpensive: переключаемся на BuyCheap когда перекос закрыт
+        info!("✅ Avg <= 0.98 ({:.3}) → Режим: BuyExpensive (до закрытия перекоса + прибыль)", total_avg);
+    } else if *mode == TradingMode::BuyExpensive && skew_abs < skew_threshold && expensive_profitable {
+        // В режиме BuyExpensive: переключаемся на BuyCheap когда перекос закрыт И expensive в плюсе
         *mode = TradingMode::BuyCheap;
-        info!("✅ Перекос закрыт ({:.1} < {:.1}) → Переключаемся на BuyCheap", skew_abs, skew_threshold);
+        info!("✅ Перекос закрыт ({:.1} < {:.1}) И expensive в плюсе ({:.1} >= {:.1}) → Переключаемся на BuyCheap",
+            skew_abs, skew_threshold, expensive_side_shares, total_spent);
+    } else if *mode == TradingMode::BuyExpensive && skew_abs < skew_threshold && !expensive_profitable {
+        // Перекос закрыт, но expensive еще не в плюсе - продолжаем покупать expensive
+        info!("📊 Перекос закрыт, но expensive еще не в плюсе ({:.1} < {:.1}) → Продолжаем BuyExpensive",
+            expensive_side_shares, total_spent);
     } else if total_avg >= 1.00 {
         *mode = TradingMode::BuyCheap;
         info!("✅ Avg >= 1.00 ({:.3}) → Режим: BuyCheap", total_avg);
