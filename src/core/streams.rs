@@ -181,34 +181,27 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
     };
     let expensive_profitable = expensive_side_shares >= total_spent;
 
-    // Проверяем условия переключения режима
+    // УПРОЩЕННАЯ ЛОГИКА: 3 правила
+
+    // Правило 1: avg <= 0.98 → BuyExpensive (до восстановления перекоса + выход в плюс)
     if total_avg <= 0.98 {
         *mode = TradingMode::BuyExpensive;
-        info!("✅ Avg <= 0.98 ({:.3}) → Режим: BuyExpensive (до закрытия перекоса + прибыль)", total_avg);
-    } else if *mode == TradingMode::BuyExpensive && skew_abs < skew_threshold && expensive_profitable {
-        // В режиме BuyExpensive: переключаемся на BuyCheap когда перекос закрыт И expensive в плюсе
+        info!("✅ ПРАВИЛО 1: Avg <= 0.98 ({:.3}) → Режим: BuyExpensive", total_avg);
+    }
+    // Правило 2: После отработки expensive → BuyCheap (накапливаем cheap пока avg > 0.98)
+    else if *mode == TradingMode::BuyExpensive && skew_abs < skew_threshold && expensive_profitable {
         *mode = TradingMode::BuyCheap;
-        info!("✅ Перекос закрыт ({:.1} < {:.1}) И expensive в плюсе ({:.1} >= {:.1}) → Переключаемся на BuyCheap",
+        info!("✅ ПРАВИЛО 2: Expensive отработала (perекос {:.1} < {:.1}, прибыль {:.1} >= {:.1}) → BuyCheap",
             skew_abs, skew_threshold, expensive_side_shares, total_spent);
-    } else if *mode == TradingMode::BuyExpensive && skew_abs < skew_threshold && !expensive_profitable {
-        // Перекос закрыт, но expensive еще не в плюсе - продолжаем покупать expensive
-        info!("📊 Перекос закрыт, но expensive еще не в плюсе ({:.1} < {:.1}) → Продолжаем BuyExpensive",
-            expensive_side_shares, total_spent);
-    } else if *mode == TradingMode::BuyExpensive {
-        // В режиме BuyExpensive продолжаем, пока не закроется перекос
-        info!("📊 Avg: {:.3} | Skew: {:.1} > {:.1} → Продолжаем BuyExpensive (закрываем перекос)",
-            total_avg, skew_abs, skew_threshold);
-    } else if total_avg >= 1.00 && skew_abs < skew_threshold {
-        // Переключаемся на BuyCheap только если перекос небольшой
-        *mode = TradingMode::BuyCheap;
-        info!("✅ Avg >= 1.00 ({:.3}) И перекос < {:.1} → Режим: BuyCheap", total_avg, skew_threshold);
-    } else if total_avg >= 1.00 {
-        // Avg высокий, но перекос большой - переключаемся на BuyExpensive
-        *mode = TradingMode::BuyExpensive;
-        info!("⚠️ Avg >= 1.00 ({:.3}), но большой перекос {:.1} → Переключаемся на BuyExpensive для закрытия",
-            total_avg, skew_abs);
-    } else {
-        info!("📊 Avg: {:.3} | Skew: {:.1} | Режим: {:?}", total_avg, skew_abs, *mode);
+    }
+    // Правило 2 продолжение: продолжаем BuyExpensive пока не выполнены условия
+    else if *mode == TradingMode::BuyExpensive {
+        info!("📊 ПРАВИЛО 2: BuyExpensive продолжается (skew: {:.1}, profit: {:.1} < {:.1})",
+            skew_abs, expensive_side_shares, total_spent);
+    }
+    // Правило 3: обрабатывается выше в коде (перекос не в пользу cheap)
+    else {
+        info!("📊 Режим BuyCheap: Avg {:.3} | Накапливаем cheap пока avg > 0.98", total_avg);
     }
 
     // Выполняем действия согласно текущему режиму
