@@ -4,7 +4,7 @@ use polymarket_client_sdk::clob::types::{OrderType, Side as PolySide};
 use polymarket_client_sdk::types::Decimal;
 use chrono::Utc;
 use crate::models::Side;
-use super::strat::{RealEngine, TradingMode};
+use super::strat::RealEngine;
 
 /// Новая логика размещения ордеров
 /// Размещает ордера на обе стороны каждые 0.5 секунды
@@ -95,36 +95,38 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
     //     return;
     // }
 
-    // Определяем cheap и expensive стороны
-    let up_is_cheap = is_cheap_side(Side::Up, up_bid, up_avg);
-    let down_is_cheap = is_cheap_side(Side::Down, down_bid, down_avg);
+    // Определяем cheap и expensive стороны по новым правилам:
+    // cheap: best_bid < 0.5
+    // expensive: best_bid >= 0.5
+    let up_is_cheap = up_bid < 0.5;
+    let down_is_cheap = down_bid < 0.5;
 
     info!("📊 Sides: UP {} | DOWN {}",
         if up_is_cheap { "CHEAP" } else { "EXPENSIVE" },
         if down_is_cheap { "CHEAP" } else { "EXPENSIVE" });
 
-    // ДОПОЛНИТЕЛЬНОЕ ПРАВИЛО: Если перекос > size НЕ В ПОЛЬЗУ cheap стороны - закрыть полностью
-    // Т.е. если cheap стороны у нас меньше
+    // ДОПОЛНИТЕЛЬНОЕ ПРАВИЛО: Если перекос > size И сторона с меньшим количеством имеет bid < avg - закрыть перекос
+    // Логика: если можно купить дешевле текущего avg И это закроет перекос - делаем это
     let order_size = engine.config.size;
-    if skew_abs > (order_size * 2.0) {
-        // Проверяем: является ли сторона с МЕНЬШИМ количеством акций cheap?
+    if skew_abs > order_size {
+        // Определяем сторону с меньшим количеством акций и проверяем, дешевая ли она (bid < avg)
         let skew_against_cheap = if up_shares < down_shares {
-            // UP меньше - проверяем, является ли UP cheap
-            up_is_cheap
+            // UP меньше - проверяем, дешевая ли UP (bid < avg)
+            up_avg > 0.0 && up_bid < up_avg
         } else if down_shares < up_shares {
-            // DOWN меньше - проверяем, является ли DOWN cheap
-            down_is_cheap
+            // DOWN меньше - проверяем, дешевая ли DOWN (bid < avg)
+            down_avg > 0.0 && down_bid < down_avg
         } else {
             false // Нет перекоса
         };
 
         if skew_against_cheap {
-            // Перекос НЕ В ПОЛЬЗУ cheap стороны - закрываем его
+            // Перекос НЕ В ПОЛЬЗУ дешёвой стороны (bid < avg) - закрываем его
             let (buy_side, buy_price, avg_side_with_more) = if up_shares < down_shares {
-                // UP меньше (и это cheap), покупаем UP
+                // UP меньше (и дешевая), покупаем UP
                 (Side::Up, up_bid, down_avg)
             } else {
-                // DOWN меньше (и это cheap), покупаем DOWN
+                // DOWN меньше (и дешевая), покупаем DOWN
                 (Side::Down, down_bid, up_avg)
             };
 
@@ -151,10 +153,11 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
             }
 
             if num_orders > 0 {
-                info!("💎 Перекос {:.1} акций НЕ В ПОЛЬЗУ CHEAP стороны → Закрываем полностью ({} ордеров)", skew_abs, num_orders);
+                info!("💎 Перекос {:.1} акций НЕ В ПОЛЬЗУ дешёвой стороны (bid < avg) → Закрываем полностью ({} ордеров)", skew_abs, num_orders);
                 for i in 0..num_orders {
-                    info!("📝 Ордер {}/{} для закрытия перекоса против cheap: {:?} @ {:.2}",
-                        i + 1, num_orders, buy_side, buy_price);
+                    info!("📝 Ордер {}/{} для закрытия перекоса: {:?} @ {:.2} (avg: {:.3})",
+                        i + 1, num_orders, buy_side, buy_price,
+                        if buy_side == Side::Up { up_avg } else { down_avg });
                     place_order_on_side(engine, buy_side, buy_price);
                 }
                 return;
@@ -162,84 +165,55 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
         }
     }
 
-    // ПРОСТАЯ ЛОГИКА: 3 ключевых правила
-    let mut mode = engine.trading_mode.lock().unwrap();
+    // НОВАЯ ЛОГИКА: условия размещения ордеров
+    // Cheap сторона: размещаем если avg_cheap < best_bid ИЛИ total_avg < 0.98
+    // Expensive сторона: размещаем если total_avg < 1.01
 
-    // Определяем expensive сторону и проверяем ее прибыльность
-    let expensive_side_shares = if !up_is_cheap {
-        up_shares
-    } else if !down_is_cheap {
-        down_shares
+    // Проверяем условия для UP стороны
+    if up_is_cheap {
+        // UP - cheap сторона
+        let should_place_up = up_avg < up_bid || total_avg < 0.98;
+        if should_place_up {
+            info!("✅ UP (cheap): размещаем (up_avg {:.3} < up_bid {:.3} ИЛИ total_avg {:.3} < 0.98)",
+                up_avg, up_bid, total_avg);
+            place_order_on_side(engine, Side::Up, up_bid);
+        } else {
+            info!("⏸️ UP (cheap): не размещаем (up_avg {:.3} >= up_bid {:.3} И total_avg {:.3} >= 0.98)",
+                up_avg, up_bid, total_avg);
+        }
     } else {
-        0.0 // Обе стороны cheap - нет expensive
-    };
-
-    let total_spent = {
-        let port = engine.portfolio.lock().unwrap();
-        port.up_spent + port.down_spent
-    };
-    let expensive_profitable = (expensive_side_shares + 5.00) >= total_spent;
-
-    // ПРАВИЛО 1: avg <= 0.99 → режим BuyExpensive (покупаем пока не выйдем в плюс)
-    if total_avg <= 0.98 {
-        *mode = TradingMode::BuyExpensive;
-        info!("✅ ПРАВИЛО 1: Avg <= 0.98 ({:.3}) → Режим: BuyExpensive (до выхода в плюс)", total_avg);
-    }
-    // ПРАВИЛО 2: BuyExpensive вышел в плюс → переключение на BuyCheap
-    else if *mode == TradingMode::BuyExpensive && expensive_profitable {
-        *mode = TradingMode::BuyCheap;
-        info!("✅ ПРАВИЛО 2: BuyExpensive вышел в плюс ({:.1} >= {:.1}) → BuyCheap",
-            expensive_side_shares, total_spent);
-    }
-    // ПРАВИЛО 2 продолжение: BuyExpensive работает пока не выйдем в плюс
-    else if *mode == TradingMode::BuyExpensive {
-        info!("📊 BuyExpensive работает (profit {:.1} < {:.1})", expensive_side_shares, total_spent);
-    }
-    // ПРАВИЛО 3: BuyCheap ничего не может остановить (работает пока avg > 0.98)
-    else if *mode == TradingMode::BuyCheap {
-        info!("📊 ПРАВИЛО 3: BuyCheap работает (avg {:.3}, доводим до 0.98)", total_avg);
-    }
-
-    // Выполняем действия согласно текущему режиму
-    match *mode {
-        TradingMode::BuyExpensive => {
-            // Покупаем ТОЛЬКО expensive
-            if !up_is_cheap {
-                place_order_on_side(engine, Side::Up, up_bid);
-            }
-            if !down_is_cheap {
-                place_order_on_side(engine, Side::Down, down_bid);
-            }
-        }
-        TradingMode::BuyCheap => {
-            // Покупаем ТОЛЬКО cheap, НО: если цена cheap > 0.5, то не понижаем avg
-            if up_is_cheap {
-                if up_bid <= 0.5 {
-                    place_order_on_side(engine, Side::Up, up_bid);
-                } else {
-                    info!("⚠️ UP cheap @ {:.2} > 0.5 → не понижаем avg", up_bid);
-                }
-            }
-            if down_is_cheap {
-                if down_bid <= 0.5 {
-                    place_order_on_side(engine, Side::Down, down_bid);
-                } else {
-                    info!("⚠️ DOWN cheap @ {:.2} > 0.5 → не понижаем avg", down_bid);
-                }
-            }
+        // UP - expensive сторона
+        let should_place_up = total_avg < 1.01;
+        if should_place_up {
+            info!("✅ UP (expensive): размещаем (total_avg {:.3} < 1.01)", total_avg);
+            place_order_on_side(engine, Side::Up, up_bid);
+        } else {
+            info!("⏸️ UP (expensive): не размещаем (total_avg {:.3} >= 1.01)", total_avg);
         }
     }
-}
 
-/// Определяет, является ли сторона cheap (уменьшает avg) или expensive (увеличивает avg)
-fn is_cheap_side(_side: Side, current_price: f64, current_avg: f64) -> bool {
-    if current_avg == 0.0 {
-        // Если avg = 0 (нет позиции), любая покупка УВЕЛИЧИВАЕТ avg → EXPENSIVE
-        return false;
+    // Проверяем условия для DOWN стороны
+    if down_is_cheap {
+        // DOWN - cheap сторона
+        let should_place_down = down_avg < down_bid || total_avg < 0.98;
+        if should_place_down {
+            info!("✅ DOWN (cheap): размещаем (down_avg {:.3} < down_bid {:.3} ИЛИ total_avg {:.3} < 0.98)",
+                down_avg, down_bid, total_avg);
+            place_order_on_side(engine, Side::Down, down_bid);
+        } else {
+            info!("⏸️ DOWN (cheap): не размещаем (down_avg {:.3} >= down_bid {:.3} И total_avg {:.3} >= 0.98)",
+                down_avg, down_bid, total_avg);
+        }
+    } else {
+        // DOWN - expensive сторона
+        let should_place_down = total_avg < 1.01;
+        if should_place_down {
+            info!("✅ DOWN (expensive): размещаем (total_avg {:.3} < 1.01)", total_avg);
+            place_order_on_side(engine, Side::Down, down_bid);
+        } else {
+            info!("⏸️ DOWN (expensive): не размещаем (total_avg {:.3} >= 1.01)", total_avg);
+        }
     }
-    // Cheap если текущая цена меньше avg (уменьшает avg при покупке)
-    // Expensive если текущая цена больше avg (увеличивает avg при покупке)
-    current_price < current_avg
 }
 
 /// Размещает GTD ордер на указанную сторону
