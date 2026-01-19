@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 use std::collections::{HashSet, HashMap};
+use std::time::Instant;
 use crate::models::{Portfolio, Side, MarketPrices};
 use crate::utils::config::TradingConfig;
 use crate::ui::{self, UiState};
@@ -8,50 +9,11 @@ use polymarket_client_sdk::clob::Client;
 use polymarket_client_sdk::auth::Normal;
 use polymarket_client_sdk::auth::state::Authenticated;
 use alloy::signers::local::PrivateKeySigner;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
-
-/// Трекер виртуального лимита для cheap side и закрытия перекоса
-#[derive(Debug, Clone)]
-pub struct VirtualLimitTracker {
-    /// Shares зарезервированные для размещения на cheap side
-    pub used_shares: f64,
-    /// Shares зарезервированные для закрытия перекоса на expensive side
-    pub used_skew_close: f64,
-}
-
-impl Default for VirtualLimitTracker {
-    fn default() -> Self {
-        Self {
-            used_shares: 0.0,
-            used_skew_close: 0.0,
-        }
-    }
-}
-
-/// Тип потока для отслеживания ордеров
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum StreamType {
-    CheapSide,
-    ExpensiveSide,
-}
-
-/// Информация об активном ордере
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct ActiveOrder {
-    pub order_id: String,
-    pub is_up: bool,
-    pub price: f64,
-    pub size: f64,
-    pub filled: f64,
-    pub stream_type: StreamType,
-}
 
 pub struct RealEngine {
     pub portfolio: Mutex<Portfolio>,
-    pub virtual_limit: Mutex<VirtualLimitTracker>,
-    pub active_orders: Mutex<HashMap<String, ActiveOrder>>,
     pub client: Client<Authenticated<Normal>>,
     pub signer: PrivateKeySigner,
     pub up_token: Arc<str>,
@@ -64,6 +26,8 @@ pub struct RealEngine {
     pub config: TradingConfig,
     pub ui_state: UiState,
     pub last_prices: Mutex<Option<MarketPrices>>,
+    pub last_order_time: Mutex<Instant>,
+    pub profit_target_reached: Mutex<bool>,
 }
 
 impl RealEngine {
@@ -76,14 +40,12 @@ impl RealEngine {
         config: TradingConfig,
         ui_state: UiState,
     ) -> Self {
-        info!("🔧 Инициализация движка: Two-Stream Architecture");
-        info!("   Cheap limit: {:.1} | Order size: {:.1} | Expiration: {}s",
-            config.cheap_limit, config.size, config.expiration_seconds);
+        info!("🔧 Инициализация движка: Новая логика размещения ордеров");
+        info!("   Order size: {:.1} | Expiration: {}s | Placement interval: 0.5s",
+            config.size, config.expiration_seconds);
 
         Self {
             portfolio: Mutex::new(Portfolio::default()),
-            virtual_limit: Mutex::new(VirtualLimitTracker::default()),
-            active_orders: Mutex::new(HashMap::new()),
             client,
             signer,
             up_token: Arc::from(up_token.as_str()),
@@ -96,6 +58,8 @@ impl RealEngine {
             config,
             ui_state,
             last_prices: Mutex::new(None),
+            last_order_time: Mutex::new(Instant::now()),
+            profit_target_reached: Mutex::new(false),
         }
     }
 
@@ -110,17 +74,6 @@ impl RealEngine {
         (price * 100.0).round() / 100.0
     }
 
-    /// Рассчитывает эффективный перекос с учетом виртуального резервирования
-    /// Вычитает виртуально зарезервированные shares для закрытия перекоса
-    pub fn effective_directed_skew(&self, cheap_side: Side) -> f64 {
-        let port = self.portfolio.lock().unwrap();
-        let limit = self.virtual_limit.lock().unwrap();
-
-        let real_skew = port.directed_skew(cheap_side);
-        // Вычитаем виртуально зарезервированные shares
-        real_skew - limit.used_skew_close
-    }
-
     // Методы для работы с активными ордерами
     pub fn add_order_id(&self, order_id: String) {
         let mut orders = self.active_order_ids.lock().unwrap();
@@ -130,6 +83,43 @@ impl RealEngine {
     pub fn remove_order_id(&self, order_id: &str) {
         let mut orders = self.active_order_ids.lock().unwrap();
         orders.remove(order_id);
+    }
+
+    /// Проверяет условие прибыльности: прибыль с каждой стороны > $3
+    pub fn check_profit_target(&self) -> bool {
+        let port = self.portfolio.lock().unwrap();
+
+        // Прибыль = shares - spent
+        let up_profit = port.up_shares - port.up_spent;
+        let down_profit = port.down_shares - port.down_spent;
+
+        info!("💰 Profit Check: UP profit: ${:.2} | DOWN profit: ${:.2}", up_profit, down_profit);
+
+        // Если обе стороны имеют прибыль > $3
+        if up_profit > 3.0 && down_profit > 3.0 {
+            info!("🎉 PROFIT TARGET REACHED! UP: ${:.2} | DOWN: ${:.2}", up_profit, down_profit);
+            return true;
+        }
+
+        false
+    }
+
+    /// Отменяет все активные ордера
+    pub async fn cancel_all_orders(&self) {
+        info!("🛑 Отменяем все активные ордера...");
+
+        match self.client.cancel_all_orders().await {
+            Ok(_) => {
+                info!("✅ Все ордера успешно отменены");
+
+                // Очищаем внутренние структуры
+                self.active_order_ids.lock().unwrap().clear();
+                self.active_orders_info.lock().unwrap().clear();
+            }
+            Err(e) => {
+                warn!("❌ Ошибка отмены ордеров: {}", e);
+            }
+        }
     }
 
     /// Основной метод стратегии - точка входа для каждого тика рынка
@@ -153,52 +143,54 @@ impl RealEngine {
             }
         }
 
-        // Определяем cheap и expensive sides по bid цене
-        let (cheap_side, cheap_bid, expensive_side, expensive_bid) =
-            self.detect_sides(&prices);
+        // Проверяем флаг достижения прибыли
+        {
+            let target_reached = self.profit_target_reached.lock().unwrap();
+            if *target_reached {
+                // Прибыль уже достигнута, ордера отменены, ничего не делаем
+                return;
+            }
+        }
 
-        // Edge case: если обе стороны cheap или обе expensive - ничего не делаем
-        if cheap_side == expensive_side {
+        // Проверяем условие прибыльности
+        if self.check_profit_target() {
+            // Устанавливаем флаг
+            *self.profit_target_reached.lock().unwrap() = true;
+
+            // Отменяем все ордера асинхронно
+            let engine_clone = Arc::clone(self);
+            tokio::spawn(async move {
+                engine_clone.cancel_all_orders().await;
+
+                // Переводим бота в режим STOP
+                {
+                    let mut state = engine_clone.ui_state.lock().unwrap();
+                    state.trading_mode = ui::TradingMode::Stop;
+                }
+
+                info!("🛑 Бот остановлен. Profit target достигнут.");
+            });
+
             return;
         }
 
-        // Stream 1: Cheap Side (bid < 0.5)
-        super::streams::run_cheap_side_stream(self, cheap_side, cheap_bid);
+        // Проверяем таймер: размещаем ордера каждые 0.5 секунды
+        {
+            let mut last_time = self.last_order_time.lock().unwrap();
+            let now = Instant::now();
+            let elapsed = now.duration_since(*last_time);
 
-        // Stream 2: Expensive Side (bid > 0.5)
-        super::streams::run_expensive_side_stream(
-            self,
-            cheap_side,
-            cheap_bid,
-            expensive_side,
-            expensive_bid,
-        );
-    }
-
-
-    /// Определяет cheap и expensive sides по bid ценам
-    fn detect_sides(&self, prices: &MarketPrices) -> (Side, f64, Side, f64) {
-        // cheap side = bid < 0.5
-        // expensive side = bid > 0.5
-        if prices.up_bid < 0.5 && prices.down_bid > 0.5 {
-            (Side::Up, prices.up_bid, Side::Down, prices.down_bid)
-        } else if prices.down_bid < 0.5 && prices.up_bid > 0.5 {
-            (Side::Down, prices.down_bid, Side::Up, prices.up_bid)
-        } else if prices.up_bid < 0.5 && prices.down_bid < 0.5 {
-            // Обе стороны cheap - выбираем более дешёвую
-            if prices.up_bid <= prices.down_bid {
-                (Side::Up, prices.up_bid, Side::Up, prices.up_bid)
-            } else {
-                (Side::Down, prices.down_bid, Side::Down, prices.down_bid)
+            if elapsed.as_millis() < 500 {
+                // Еще не прошло 0.5 сек
+                return;
             }
-        } else {
-            // Обе стороны expensive - выбираем менее дорогую как expensive
-            if prices.up_bid <= prices.down_bid {
-                (Side::Down, prices.down_bid, Side::Up, prices.up_bid)
-            } else {
-                (Side::Up, prices.up_bid, Side::Down, prices.down_bid)
-            }
+
+            // Обновляем время последнего размещения
+            *last_time = now;
         }
+
+        // Размещаем ордера согласно новой логике
+        super::streams::process_order_placement(self, prices.up_bid, prices.down_bid);
     }
 
     /// Финализация сессии - генерация отчета

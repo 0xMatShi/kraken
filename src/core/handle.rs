@@ -4,7 +4,7 @@ use polymarket_client_sdk::clob::types::Side as PolySide;
 use chrono::Utc;
 use uuid::Uuid;
 use crate::ui::{self, TradeHistoryEntry, TradeType, OpenOrder};
-use super::strat::{RealEngine, StreamType};
+use super::strat::RealEngine;
 
 /// Обработка TAKER сделок (market orders FAK)
 pub fn handle_ws_trade(
@@ -15,7 +15,7 @@ pub fn handle_ws_trade(
     side: PolySide,
     asset_id: &str,
     trade_owner: Option<Uuid>,
-    taker_order_id: Option<String>,
+    _taker_order_id: Option<String>,
 ) {
     let owner_matches = trade_owner.map_or(false, |owner| owner == engine.our_api_key);
     if !owner_matches { return; }
@@ -75,14 +75,6 @@ pub fn handle_ws_trade(
     }
 
     engine.update_ui_portfolio();
-
-    // Если есть taker_order_id - запускаем фоновую задачу для освобождения виртуальных лимитов
-    if let Some(order_id) = taker_order_id {
-        let engine_clone = Arc::clone(engine);
-        tokio::spawn(async move {
-            handle_taker_fill_async(engine_clone, order_id, size).await;
-        });
-    }
 }
 
 /// Обработка событий MAKER ордеров (PLACEMENT, UPDATE, CANCELLATION)
@@ -192,26 +184,6 @@ pub fn handle_ws_order(
                         }
 
                         if size_for_portfolio > 0.0 {
-                            // Проверяем тип ордера для освобождения виртуальных резервов
-                            let stream_type = {
-                                let orders = engine.active_orders.lock().unwrap();
-                                orders.get(&order_id).map(|o| o.stream_type)
-                            };
-
-                            // Если это ExpensiveSide - освобождаем виртуальное закрытие перекоса
-                            if let Some(StreamType::ExpensiveSide) = stream_type {
-                                let mut limit = engine.virtual_limit.lock().unwrap();
-
-                                let release_skew = size_for_portfolio.min(limit.used_skew_close);
-                                limit.used_skew_close = (limit.used_skew_close - release_skew).max(0.0);
-
-                                let release_shares = size_for_portfolio.min(limit.used_shares);
-                                limit.used_shares = (limit.used_shares - release_shares).max(0.0);
-
-                                info!("📊 ExpensiveSide partial fill | Освобождено skew: {:.1} | Освобождено shares: {:.1}",
-                                    release_skew, release_shares);
-                            }
-
                             let mut port = engine.portfolio.lock().unwrap();
                             port.maker_trades += 1;
 
@@ -287,111 +259,11 @@ pub fn handle_ws_order(
 }
 
 /// Обработка полного заполнения ордера
-fn handle_order_fully_filled(engine: &Arc<RealEngine>, order_id: &str, is_up: bool, size: f64) {
-    let mut active_orders = engine.active_orders.lock().unwrap();
-
-    if let Some(order) = active_orders.remove(order_id) {
-        // Если это ExpensiveSide ордер - освобождаем виртуальное резервирование skew и used_shares
-        if matches!(order.stream_type, StreamType::ExpensiveSide) {
-            let mut limit = engine.virtual_limit.lock().unwrap();
-
-            // Освобождаем виртуальное закрытие перекоса
-            let release_skew = size.min(limit.used_skew_close);
-            limit.used_skew_close = (limit.used_skew_close - release_skew).max(0.0);
-
-            // Освобождаем виртуальный лимит cheap side (фактически закрыли перекос)
-            let release_shares = size.min(limit.used_shares);
-            limit.used_shares = (limit.used_shares - release_shares).max(0.0);
-
-            info!("📊 ExpensiveSide fill | Освобождено skew: {:.1} | Освобождено shares: {:.1}",
-                release_skew, release_shares);
-        }
-
-        info!("✅ Ордер {} полностью исполнен: {} @ {:.2}",
-            order_id, if is_up { "UP" } else { "DOWN" }, order.price);
-    }
+fn handle_order_fully_filled(_engine: &Arc<RealEngine>, _order_id: &str, is_up: bool, _size: f64) {
+    info!("✅ Ордер полностью исполнен: {}", if is_up { "UP" } else { "DOWN" });
 }
 
-/// Обработка отмены ордера - освобождаем виртуальный лимит
-fn handle_order_cancelled(engine: &Arc<RealEngine>, order_id: &str, unfilled_size: f64) {
-    let mut active_orders = engine.active_orders.lock().unwrap();
-
-    if let Some(order) = active_orders.remove(order_id) {
-        if unfilled_size > 0.0 {
-            let mut limit = engine.virtual_limit.lock().unwrap();
-
-            if matches!(order.stream_type, StreamType::CheapSide) {
-                // Освобождаем виртуальный лимит для CheapSide ордеров
-                let release = unfilled_size.min(limit.used_shares);
-                limit.used_shares = (limit.used_shares - release).max(0.0);
-                info!("📊 CheapSide cancelled | Освобождено из лимита: {:.1} | Осталось: {:.1}",
-                    release, limit.used_shares);
-            } else if matches!(order.stream_type, StreamType::ExpensiveSide) {
-                // Освобождаем виртуальное закрытие перекоса для ExpensiveSide ордеров
-                let release = unfilled_size.min(limit.used_skew_close);
-                limit.used_skew_close = (limit.used_skew_close - release).max(0.0);
-                info!("📊 ExpensiveSide cancelled | Освобождено skew: {:.1} | Осталось: {:.1}",
-                    release, limit.used_skew_close);
-            }
-        }
-    }
-}
-
-/// Асинхронная обработка TAKER fill - ждет появления order_id в active_orders
-/// Это нужно потому что WebSocket событие может прийти раньше чем API вернет order_id
-async fn handle_taker_fill_async(engine: Arc<RealEngine>, order_id: String, size: f64) {
-    use tokio::time::{sleep, Duration};
-
-    info!("🔍 TAKER: Ищем order_id {} в active_orders...", order_id);
-
-    // Пытаемся найти ордер в течение 10 секунд (с интервалом 5ms)
-    for attempt in 1..=2000 {
-        // Проверяем наличие ордера в active_orders
-        let stream_type_opt = {
-            let orders = engine.active_orders.lock().unwrap();
-            orders.get(&order_id).map(|o| o.stream_type)
-        };
-
-        if let Some(stream_type) = stream_type_opt {
-            // Нашли ордер! Освобождаем виртуальные лимиты
-            info!("✅ TAKER: Найден order_id {} (попытка {})", order_id, attempt);
-
-            let mut limit = engine.virtual_limit.lock().unwrap();
-
-            if matches!(stream_type, StreamType::CheapSide) {
-                // CheapSide TAKER fill - освобождаем used_shares
-                let release = size.min(limit.used_shares);
-                limit.used_shares = (limit.used_shares - release).max(0.0);
-                info!("📊 TAKER CheapSide | Освобождено shares: {:.1} | Осталось: {:.1}",
-                    release, limit.used_shares);
-            } else if matches!(stream_type, StreamType::ExpensiveSide) {
-                // ExpensiveSide TAKER fill - освобождаем used_skew_close и used_shares
-                let release_skew = size.min(limit.used_skew_close);
-                limit.used_skew_close = (limit.used_skew_close - release_skew).max(0.0);
-
-                let release_shares = size.min(limit.used_shares);
-                limit.used_shares = (limit.used_shares - release_shares).max(0.0);
-
-                info!("📊 TAKER ExpensiveSide | Освобождено skew: {:.1} | Освобождено shares: {:.1}",
-                    release_skew, release_shares);
-            }
-
-            drop(limit);
-
-            // Удаляем ордер из active_orders
-            let mut orders = engine.active_orders.lock().unwrap();
-            orders.remove(&order_id);
-
-            return; // Выходим из цикла
-        }
-
-        // Ордер еще не добавлен - ждем 5ms и пробуем снова
-        if attempt % 200 == 0 {
-            info!("🔍 TAKER: Все еще ищем order_id {} (попытка {}/2000)...", order_id, attempt);
-        }
-        sleep(Duration::from_millis(5)).await;
-    }
-
-    // Timeout - не нашли ордер за 10 секунд
-    warn!("⚠️ TAKER: Не найден order_id {} в active_orders за 10 секунд (timeout)", order_id);
+/// Обработка отмены ордера
+fn handle_order_cancelled(_engine: &Arc<RealEngine>, _order_id: &str, _unfilled_size: f64) {
+    info!("⚠️ Ордер отменен");
 }
