@@ -106,7 +106,7 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
     // ДОПОЛНИТЕЛЬНОЕ ПРАВИЛО: Если перекос > size НЕ В ПОЛЬЗУ cheap стороны - закрыть полностью
     // Т.е. если cheap стороны у нас меньше
     let order_size = engine.config.size;
-    if skew_abs > order_size {
+    if skew_abs > (order_size * 2.0) {
         // Проверяем: является ли сторона с МЕНЬШИМ количеством акций cheap?
         let skew_against_cheap = if up_shares < down_shares {
             // UP меньше - проверяем, является ли UP cheap
@@ -178,10 +178,10 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
         let port = engine.portfolio.lock().unwrap();
         port.up_spent + port.down_spent
     };
-    let expensive_profitable = expensive_side_shares >= total_spent;
+    let expensive_profitable = (expensive_side_shares + 5.00) >= total_spent;
 
-    // ПРАВИЛО 1: avg <= 0.98 → режим BuyExpensive (покупаем пока не выйдем в плюс)
-    if total_avg <= 0.99 {
+    // ПРАВИЛО 1: avg <= 0.99 → режим BuyExpensive (покупаем пока не выйдем в плюс)
+    if total_avg <= 0.98 {
         *mode = TradingMode::BuyExpensive;
         info!("✅ ПРАВИЛО 1: Avg <= 0.98 ({:.3}) → Режим: BuyExpensive (до выхода в плюс)", total_avg);
     }
@@ -212,12 +212,20 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
             }
         }
         TradingMode::BuyCheap => {
-            // Покупаем ТОЛЬКО cheap
+            // Покупаем ТОЛЬКО cheap, НО: если цена cheap > 0.5, то не понижаем avg
             if up_is_cheap {
-                place_order_on_side(engine, Side::Up, up_bid);
+                if up_bid <= 0.5 {
+                    place_order_on_side(engine, Side::Up, up_bid);
+                } else {
+                    info!("⚠️ UP cheap @ {:.2} > 0.5 → не понижаем avg", up_bid);
+                }
             }
             if down_is_cheap {
-                place_order_on_side(engine, Side::Down, down_bid);
+                if down_bid <= 0.5 {
+                    place_order_on_side(engine, Side::Down, down_bid);
+                } else {
+                    info!("⚠️ DOWN cheap @ {:.2} > 0.5 → не понижаем avg", down_bid);
+                }
             }
         }
     }
@@ -239,7 +247,7 @@ fn place_order_on_side(engine: &Arc<RealEngine>, side: Side, price: f64) {
     let size = engine.config.size;
 
     // Проверяем валидность цены
-    if price < 0.01 || price > 0.99 {
+    if price < 0.02 || price > 0.98 {
         warn!("⚠️ Невалидная цена: {:.3}", price);
         return;
     }
