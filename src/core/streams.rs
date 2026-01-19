@@ -4,7 +4,7 @@ use polymarket_client_sdk::clob::types::{OrderType, Side as PolySide};
 use polymarket_client_sdk::types::Decimal;
 use chrono::Utc;
 use crate::models::Side;
-use super::strat::RealEngine;
+use super::strat::{RealEngine, TradingMode};
 
 /// Новая логика размещения ордеров
 /// Размещает ордера на обе стороны каждые 0.5 секунды
@@ -36,30 +36,40 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
         if up_is_cheap { "CHEAP" } else { "EXPENSIVE" },
         if down_is_cheap { "CHEAP" } else { "EXPENSIVE" });
 
-    // Логика предпочтений на основе total_avg
-    if total_avg >= 1.02 {
-        // Предпочтение cheap стороне
-        info!("✅ Total Avg >= 1.02 → Предпочтение CHEAP стороне");
-        if up_is_cheap {
-            place_order_on_side(engine, Side::Up, up_bid);
-        }
-        if down_is_cheap {
-            place_order_on_side(engine, Side::Down, down_bid);
-        }
-    } else if total_avg <= 0.98 {
-        // Предпочтение expensive стороне
-        info!("✅ Total Avg <= 0.98 → Предпочтение EXPENSIVE стороне");
-        if !up_is_cheap {
-            place_order_on_side(engine, Side::Up, up_bid);
-        }
-        if !down_is_cheap {
-            place_order_on_side(engine, Side::Down, down_bid);
-        }
+    // Логика с гистерезисом: переключаем режим на границах, сохраняем между ними
+    let mut mode = engine.trading_mode.lock().unwrap();
+
+    // Проверяем условия переключения режима
+    if total_avg <= 0.98 {
+        *mode = TradingMode::BuyExpensive;
+        info!("✅ Avg <= 0.98 ({:.3}) → Режим: BuyExpensive (до avg >= 1.02)", total_avg);
+    } else if total_avg >= 1.02 {
+        *mode = TradingMode::BuyCheap;
+        info!("✅ Avg >= 1.02 ({:.3}) → Режим: BuyCheap (до avg <= 0.98)", total_avg);
     } else {
-        // total_avg между 0.99 и 1.01 - размещаем на обе стороны
-        info!("📊 Total Avg между 0.99 и 1.01 → Размещаем на обе стороны");
-        place_order_on_side(engine, Side::Up, up_bid);
-        place_order_on_side(engine, Side::Down, down_bid);
+        info!("📊 Avg в зоне 0.98-1.02 ({:.3}) → Продолжаем режим {:?}", total_avg, *mode);
+    }
+
+    // Выполняем действия согласно текущему режиму
+    match *mode {
+        TradingMode::BuyExpensive => {
+            // Покупаем ТОЛЬКО expensive
+            if !up_is_cheap {
+                place_order_on_side(engine, Side::Up, up_bid);
+            }
+            if !down_is_cheap {
+                place_order_on_side(engine, Side::Down, down_bid);
+            }
+        }
+        TradingMode::BuyCheap => {
+            // Покупаем ТОЛЬКО cheap
+            if up_is_cheap {
+                place_order_on_side(engine, Side::Up, up_bid);
+            }
+            if down_is_cheap {
+                place_order_on_side(engine, Side::Down, down_bid);
+            }
+        }
     }
 }
 

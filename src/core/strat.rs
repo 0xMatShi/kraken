@@ -12,6 +12,12 @@ use alloy::signers::local::PrivateKeySigner;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TradingMode {
+    BuyExpensive,  // avg <= 0.98: покупаем expensive до 1.02
+    BuyCheap,      // avg >= 1.02: покупаем cheap до 0.98
+}
+
 pub struct RealEngine {
     pub portfolio: Mutex<Portfolio>,
     pub client: Client<Authenticated<Normal>>,
@@ -28,6 +34,7 @@ pub struct RealEngine {
     pub last_prices: Mutex<Option<MarketPrices>>,
     pub last_order_time: Mutex<Instant>,
     pub profit_target_reached: Mutex<bool>,
+    pub trading_mode: Mutex<TradingMode>,
 }
 
 impl RealEngine {
@@ -60,6 +67,7 @@ impl RealEngine {
             last_prices: Mutex::new(None),
             last_order_time: Mutex::new(Instant::now()),
             profit_target_reached: Mutex::new(false),
+            trading_mode: Mutex::new(TradingMode::BuyExpensive),  // Начинаем с покупки expensive
         }
     }
 
@@ -181,8 +189,8 @@ impl RealEngine {
             let now = Instant::now();
             let elapsed = now.duration_since(*last_time);
 
-            if elapsed.as_millis() < 500 {
-                // Еще не прошло 0.5 сек
+            if elapsed.as_millis() < 700 {
+                // Еще не прошло 0.7 сек
                 return;
             }
 
