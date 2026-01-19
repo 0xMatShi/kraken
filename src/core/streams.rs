@@ -15,16 +15,83 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
     let up_avg = port.up_avg();
     let down_avg = port.down_avg();
     let total_avg = port.total_avg();
+
+    // Рассчитываем перекос в процентах и в абсолютных значениях
+    let total_shares = up_shares + down_shares;
+    let skew_abs = (up_shares - down_shares).abs();
+    let skew_percent = if total_shares > 0.0 {
+        (skew_abs / total_shares) * 100.0
+    } else {
+        0.0
+    };
+
     drop(port);
 
-    info!("📊 Portfolio State: UP {:.1} @ {:.3} | DOWN {:.1} @ {:.3} | Total Avg: {:.3}",
-        up_shares, up_avg, down_shares, down_avg, total_avg);
+    info!("📊 Portfolio State: UP {:.1} @ {:.3} | DOWN {:.1} @ {:.3} | Total Avg: {:.3} | Skew: {:.1}% ({:.1} акций)",
+        up_shares, up_avg, down_shares, down_avg, total_avg, skew_percent, skew_abs);
 
     // Если баланс 0/0 - размещаем на обе стороны одновременно
     if up_shares == 0.0 && down_shares == 0.0 {
         info!("🎯 Начальная фаза (0/0): размещаем на обе стороны");
         place_order_on_side(engine, Side::Up, up_bid);
         place_order_on_side(engine, Side::Down, down_bid);
+        return;
+    }
+
+    // ПРИОРИТЕТ: Если перекос > 2% И абсолютный перекос > 50 акций
+    if skew_percent > 2.0 && skew_abs > 50.0 {
+        // Определяем сторону для закрытия перекоса
+        let (buy_side, buy_price, avg_side_with_more) = if up_shares < down_shares {
+            // DOWN больше, покупаем UP
+            (Side::Up, up_bid, down_avg)
+        } else {
+            // UP больше, покупаем DOWN
+            (Side::Down, down_bid, up_avg)
+        };
+
+        // Рассчитываем ratio = (1 - avg_side_with_more) / buy_price
+        let ratio = if buy_price > 0.0 && avg_side_with_more > 0.0 {
+            (1.0 - avg_side_with_more) / buy_price
+        } else {
+            1.0 // Если avg = 0 или price = 0, используем ratio = 1.0
+        };
+
+        // Рассчитываем размер для закрытия: skew_size = ratio * skew
+        let skew_size = ratio * skew_abs;
+
+        // Рассчитываем количество ордеров: floor(skew_size / size)
+        let order_size = engine.config.size;
+        let mut num_orders = (skew_size / order_size).floor() as usize;
+
+        // Проверяем max_balance для всех ордеров сразу
+        let total_cost = buy_price * order_size * num_orders as f64;
+        {
+            let port = engine.portfolio.lock().unwrap();
+            let total_spent = port.up_spent + port.down_spent;
+            if total_spent + total_cost > engine.config.max_balance {
+                // Уменьшаем количество ордеров, чтобы не превысить max_balance
+                let available_budget = engine.config.max_balance - total_spent;
+                let max_orders = (available_budget / (buy_price * order_size)).floor() as usize;
+                num_orders = num_orders.min(max_orders);
+                info!("⚠️ Max balance ограничение: уменьшаем количество ордеров до {}", num_orders);
+            }
+        }
+
+        if num_orders == 0 {
+            info!("⚠️ Недостаточно баланса для закрытия перекоса");
+            return;
+        }
+
+        info!("⚠️ Перекос {:.1}% ({:.1} акций) | Ratio: {:.3} | Skew Size: {:.1} | Размещаем {} ордеров по {:.1}",
+            skew_percent, skew_abs, ratio, skew_size, num_orders, order_size);
+
+        // Размещаем рассчитанное количество ордеров
+        for i in 0..num_orders {
+            info!("📝 Ордер {}/{} для закрытия перекоса: {:?} @ {:.2}",
+                i + 1, num_orders, buy_side, buy_price);
+            place_order_on_side(engine, buy_side, buy_price);
+        }
+
         return;
     }
 
@@ -45,7 +112,7 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
         info!("✅ Avg <= 0.98 ({:.3}) → Режим: BuyExpensive (до avg >= 1.02)", total_avg);
     } else if total_avg >= 1.03 {
         *mode = TradingMode::BuyCheap;
-        info!("✅ Avg >= 1.02 ({:.3}) → Режим: BuyCheap (до avg <= 0.98)", total_avg);
+        info!("✅ Avg >= 1.03 ({:.3}) → Режим: BuyCheap (до avg <= 0.98)", total_avg);
     } else {
         info!("📊 Avg в зоне 0.98-1.02 ({:.3}) → Продолжаем режим {:?}", total_avg, *mode);
     }
