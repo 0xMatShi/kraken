@@ -172,14 +172,14 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
     // Проверяем условия для UP стороны
     if up_is_cheap {
         // UP - cheap сторона
-        let should_place_up = up_avg < up_bid || total_avg < 0.98;
+        let should_place_up = up_bid < up_avg || total_avg < 0.98;
         if should_place_up {
-            info!("✅ UP (cheap): размещаем (up_avg {:.3} < up_bid {:.3} ИЛИ total_avg {:.3} < 0.98)",
-                up_avg, up_bid, total_avg);
+            info!("✅ UP (cheap): размещаем (up_bid {:.3} < up_avg {:.3} ИЛИ total_avg {:.3} < 0.98)",
+                up_bid, up_avg, total_avg);
             place_order_on_side(engine, Side::Up, up_bid);
         } else {
-            info!("⏸️ UP (cheap): не размещаем (up_avg {:.3} >= up_bid {:.3} И total_avg {:.3} >= 0.98)",
-                up_avg, up_bid, total_avg);
+            info!("⏸️ UP (cheap): не размещаем (up_bid {:.3} >= up_avg {:.3} И total_avg {:.3} >= 0.98)",
+                up_bid, up_avg, total_avg);
         }
     } else {
         // UP - expensive сторона
@@ -195,14 +195,14 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
     // Проверяем условия для DOWN стороны
     if down_is_cheap {
         // DOWN - cheap сторона
-        let should_place_down = down_avg < down_bid || total_avg < 0.98;
+        let should_place_down = down_bid < down_avg || total_avg < 0.98;
         if should_place_down {
-            info!("✅ DOWN (cheap): размещаем (down_avg {:.3} < down_bid {:.3} ИЛИ total_avg {:.3} < 0.98)",
-                down_avg, down_bid, total_avg);
+            info!("✅ DOWN (cheap): размещаем (down_bid {:.3} < down_avg {:.3} ИЛИ total_avg {:.3} < 0.98)",
+                down_bid, down_avg, total_avg);
             place_order_on_side(engine, Side::Down, down_bid);
         } else {
-            info!("⏸️ DOWN (cheap): не размещаем (down_avg {:.3} >= down_bid {:.3} И total_avg {:.3} >= 0.98)",
-                down_avg, down_bid, total_avg);
+            info!("⏸️ DOWN (cheap): не размещаем (down_bid {:.3} >= down_avg {:.3} И total_avg {:.3} >= 0.98)",
+                down_bid, down_avg, total_avg);
         }
     } else {
         // DOWN - expensive сторона
