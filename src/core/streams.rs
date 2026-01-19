@@ -8,7 +8,7 @@ use super::strat::RealEngine;
 
 /// Новая логика размещения ордеров
 /// Размещает ордера на обе стороны каждые 0.5 секунды
-pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: f64) {
+pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: f64, up_ask: f64, down_ask: f64) {
     let port = engine.portfolio.lock().unwrap();
     let up_shares = port.up_shares;
     let down_shares = port.down_shares;
@@ -239,9 +239,9 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
         let (is_up_expensive, is_down_expensive) = (!up_is_cheap, !down_is_cheap);
 
         // Проверяем UP expensive в дефиците (срабатывает только при перекосе > 50 акций)
-        if is_up_expensive && up_shares < down_shares && up_bid > p_max && skew_abs > 50.0 {
+        if is_up_expensive && up_shares < down_shares && up_ask >= p_max && skew_abs > 50.0 {
             let s_exp = up_shares;
-            let p_exp = up_bid;
+            let p_exp = up_ask;
 
             if p_exp < 1.0 && p_exp > 0.0 {
                 let margin = 0.01;
@@ -272,20 +272,20 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
                         for i in 0..num_orders {
                             info!("📝 Ордер {}/{} expensive убыток: UP @ {:.2}",
                                 i + 1, num_orders, p_exp);
-                            place_order_on_side(engine, Side::Up, up_bid);
+                            place_order_on_side(engine, Side::Up, up_ask);
                         }
                         // НЕ возвращаемся, продолжаем дальше для размещения cheap ордеров
                     }
                 }
             }
         } else if is_up_expensive && up_shares < down_shares {
-            info!("⏸️ UP expensive убыток: bid {:.3} <= p_max ({:.3})", up_bid, p_max);
+            info!("⏸️ UP expensive убыток: ask {:.3} < p_max ({:.3})", up_ask, p_max);
         }
 
         // Проверяем DOWN expensive в дефиците (срабатывает только при перекосе > 50 акций)
-        if is_down_expensive && down_shares < up_shares && down_bid > p_max && skew_abs > 50.0 {
+        if is_down_expensive && down_shares < up_shares && down_ask >= p_max && skew_abs > 50.0 {
             let s_exp = down_shares;
-            let p_exp = down_bid;
+            let p_exp = down_ask;
 
             if p_exp < 1.0 && p_exp > 0.0 {
                 let margin = 0.01;
@@ -316,14 +316,14 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
                         for i in 0..num_orders {
                             info!("📝 Ордер {}/{} expensive убыток: DOWN @ {:.2}",
                                 i + 1, num_orders, p_exp);
-                            place_order_on_side(engine, Side::Down, down_bid);
+                            place_order_on_side(engine, Side::Down, down_ask);
                         }
                         // НЕ возвращаемся, продолжаем дальше для размещения cheap ордеров
                     }
                 }
             }
         } else if is_down_expensive && down_shares < up_shares {
-            info!("⏸️ DOWN expensive убыток: bid {:.3} <= p_max ({:.3})", down_bid, p_max);
+            info!("⏸️ DOWN expensive убыток: ask {:.3} < p_max ({:.3})", down_ask, p_max);
         }
     }
 
