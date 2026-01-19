@@ -167,6 +167,8 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
 
     // ЛОГИКА P_max: Закрытие перекоса по максимальной выгодной цене
     // Проверяем перекос и рассчитываем P_max для стороны с меньшим количеством акций
+    let mut calculated_p_max: Option<f64> = None;
+
     if skew_abs > order_size {
         let port = engine.portfolio.lock().unwrap();
         let total_spent = port.up_spent + port.down_spent;
@@ -187,6 +189,7 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
         if shares_to_buy > 0.0 {
             // P_max = (S_target - total_spent) / shares_to_buy
             let p_max = (s_target - total_spent) / shares_to_buy;
+            calculated_p_max = Some(p_max);
 
             info!("📊 P_max расчёт: S_target={:.1} | total_spent={:.2} | shares_to_buy={:.1} → P_max={:.3}",
                 s_target, total_spent, shares_to_buy, p_max);
@@ -221,6 +224,104 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
             } else {
                 info!("⏸️ P_max условие не выполнено: best_bid {:.3} >= P_max {:.3}", deficit_bid, p_max);
             }
+        }
+    }
+
+    // ЛОГИКА ЗАКРЫТИЯ УБЫТКА ПО EXPENSIVE СТОРОНЕ ПРИ ПЕРЕКОСЕ
+    // N = (total_spent - S_exp) / (1 - P_exp)
+    // Применяется ТОЛЬКО если текущий bid > p_max + 0.05
+    if let Some(p_max) = calculated_p_max {
+        let port = engine.portfolio.lock().unwrap();
+        let total_spent = port.up_spent + port.down_spent;
+        drop(port);
+
+        // Определяем expensive сторону и проверяем перекос
+        let (is_up_expensive, is_down_expensive) = (!up_is_cheap, !down_is_cheap);
+
+        // Проверяем UP expensive в дефиците
+        if is_up_expensive && up_shares < down_shares && up_bid > p_max + 0.05 {
+            let s_exp = up_shares;
+            let p_exp = up_bid;
+
+            if p_exp < 1.0 && p_exp > 0.0 {
+                let n = (total_spent - s_exp) / (1.0 - p_exp);
+
+                if n > 0.0 {
+                    info!("📊 Expensive убыток (UP): total_spent={:.2} | S_exp={:.1} | P_exp={:.3} → N={:.1}",
+                        total_spent, s_exp, p_exp, n);
+
+                    // Рассчитываем количество ордеров
+                    let mut num_orders = (n / order_size).ceil() as usize;
+
+                    // Проверяем max_balance
+                    let total_cost = p_exp * order_size * num_orders as f64;
+                    {
+                        let port = engine.portfolio.lock().unwrap();
+                        let total_spent = port.up_spent + port.down_spent;
+                        if total_spent + total_cost > engine.config.max_balance {
+                            let available_budget = engine.config.max_balance - total_spent;
+                            let max_orders = (available_budget / (p_exp * order_size)).floor() as usize;
+                            num_orders = num_orders.min(max_orders);
+                        }
+                    }
+
+                    if num_orders > 0 {
+                        info!("💎 Закрытие убытка expensive (UP): N={:.1} акций → {} ордеров @ {:.2}",
+                            n, num_orders, p_exp);
+                        for i in 0..num_orders {
+                            info!("📝 Ордер {}/{} expensive убыток: UP @ {:.2}",
+                                i + 1, num_orders, p_exp);
+                            place_order_on_side(engine, Side::Up, up_bid);
+                        }
+                        return;
+                    }
+                }
+            }
+        } else if is_up_expensive && up_shares < down_shares {
+            info!("⏸️ UP expensive убыток: bid {:.3} <= p_max + 0.05 ({:.3})", up_bid, p_max + 0.05);
+        }
+
+        // Проверяем DOWN expensive в дефиците
+        if is_down_expensive && down_shares < up_shares && down_bid > p_max + 0.05 {
+            let s_exp = down_shares;
+            let p_exp = down_bid;
+
+            if p_exp < 1.0 && p_exp > 0.0 {
+                let n = (total_spent - s_exp) / (1.0 - p_exp);
+
+                if n > 0.0 {
+                    info!("📊 Expensive убыток (DOWN): total_spent={:.2} | S_exp={:.1} | P_exp={:.3} → N={:.1}",
+                        total_spent, s_exp, p_exp, n);
+
+                    // Рассчитываем количество ордеров
+                    let mut num_orders = (n / order_size).ceil() as usize;
+
+                    // Проверяем max_balance
+                    let total_cost = p_exp * order_size * num_orders as f64;
+                    {
+                        let port = engine.portfolio.lock().unwrap();
+                        let total_spent = port.up_spent + port.down_spent;
+                        if total_spent + total_cost > engine.config.max_balance {
+                            let available_budget = engine.config.max_balance - total_spent;
+                            let max_orders = (available_budget / (p_exp * order_size)).floor() as usize;
+                            num_orders = num_orders.min(max_orders);
+                        }
+                    }
+
+                    if num_orders > 0 {
+                        info!("💎 Закрытие убытка expensive (DOWN): N={:.1} акций → {} ордеров @ {:.2}",
+                            n, num_orders, p_exp);
+                        for i in 0..num_orders {
+                            info!("📝 Ордер {}/{} expensive убыток: DOWN @ {:.2}",
+                                i + 1, num_orders, p_exp);
+                            place_order_on_side(engine, Side::Down, down_bid);
+                        }
+                        return;
+                    }
+                }
+            }
+        } else if is_down_expensive && down_shares < up_shares {
+            info!("⏸️ DOWN expensive убыток: bid {:.3} <= p_max + 0.05 ({:.3})", down_bid, p_max + 0.05);
         }
     }
 
