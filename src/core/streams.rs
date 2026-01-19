@@ -244,7 +244,8 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
             let p_exp = up_bid;
 
             if p_exp < 1.0 && p_exp > 0.0 {
-                let n = (total_spent - s_exp) / (1.0 - p_exp);
+                let margin = 0.01;
+                let n = (total_spent * (1.0 + margin) - s_exp) / (1.0 - p_exp * (1.0 + margin));
 
                 if n > 0.0 {
                     info!("📊 Expensive убыток (UP): total_spent={:.2} | S_exp={:.1} | P_exp={:.3} → N={:.1}",
@@ -278,7 +279,7 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
                 }
             }
         } else if is_up_expensive && up_shares < down_shares {
-            info!("⏸️ UP expensive убыток: bid {:.3} <= p_max + 0.05 ({:.3})", up_bid, p_max + 0.05);
+            info!("⏸️ UP expensive убыток: bid {:.3} <= p_max + 0.05 ({:.3})", up_bid, p_max + 0.03);
         }
 
         // Проверяем DOWN expensive в дефиците
@@ -287,7 +288,8 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
             let p_exp = down_bid;
 
             if p_exp < 1.0 && p_exp > 0.0 {
-                let n = (total_spent - s_exp) / (1.0 - p_exp);
+                let margin = 0.01;
+                let n = (total_spent * (1.0 + margin) - s_exp) / (1.0 - p_exp * (1.0 + margin));
 
                 if n > 0.0 {
                     info!("📊 Expensive убыток (DOWN): total_spent={:.2} | S_exp={:.1} | P_exp={:.3} → N={:.1}",
@@ -321,7 +323,7 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
                 }
             }
         } else if is_down_expensive && down_shares < up_shares {
-            info!("⏸️ DOWN expensive убыток: bid {:.3} <= p_max + 0.05 ({:.3})", down_bid, p_max + 0.05);
+            info!("⏸️ DOWN expensive убыток: bid {:.3} <= p_max + 0.05 ({:.3})", down_bid, p_max + 0.03);
         }
     }
 
