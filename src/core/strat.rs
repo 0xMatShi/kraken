@@ -105,7 +105,7 @@ impl RealEngine {
         info!("💰 Profit Check: UP profit: ${:.2} | DOWN profit: ${:.2}", up_profit, down_profit);
 
         // Если обе стороны имеют прибыль > $3
-        if up_profit > 3.0 && down_profit > 3.0 {
+        if up_profit > 2.0 && down_profit > 2.0 {
             info!("🎉 PROFIT TARGET REACHED! UP: ${:.2} | DOWN: ${:.2}", up_profit, down_profit);
             return true;
         }
