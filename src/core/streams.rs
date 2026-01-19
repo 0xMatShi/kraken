@@ -194,9 +194,19 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
         // Перекос закрыт, но expensive еще не в плюсе - продолжаем покупать expensive
         info!("📊 Перекос закрыт, но expensive еще не в плюсе ({:.1} < {:.1}) → Продолжаем BuyExpensive",
             expensive_side_shares, total_spent);
-    } else if total_avg >= 1.00 {
+    } else if *mode == TradingMode::BuyExpensive {
+        // В режиме BuyExpensive продолжаем, пока не закроется перекос
+        info!("📊 Avg: {:.3} | Skew: {:.1} > {:.1} → Продолжаем BuyExpensive (закрываем перекос)",
+            total_avg, skew_abs, skew_threshold);
+    } else if total_avg >= 1.00 && skew_abs < skew_threshold {
+        // Переключаемся на BuyCheap только если перекос небольшой
         *mode = TradingMode::BuyCheap;
-        info!("✅ Avg >= 1.00 ({:.3}) → Режим: BuyCheap", total_avg);
+        info!("✅ Avg >= 1.00 ({:.3}) И перекос < {:.1} → Режим: BuyCheap", total_avg, skew_threshold);
+    } else if total_avg >= 1.00 {
+        // Avg высокий, но перекос большой - переключаемся на BuyExpensive
+        *mode = TradingMode::BuyExpensive;
+        info!("⚠️ Avg >= 1.00 ({:.3}), но большой перекос {:.1} → Переключаемся на BuyExpensive для закрытия",
+            total_avg, skew_abs);
     } else {
         info!("📊 Avg: {:.3} | Skew: {:.1} | Режим: {:?}", total_avg, skew_abs, *mode);
     }
