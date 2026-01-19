@@ -66,8 +66,8 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
 /// Определяет, является ли сторона cheap (уменьшает avg) или expensive (увеличивает avg)
 fn is_cheap_side(_side: Side, current_price: f64, current_avg: f64) -> bool {
     if current_avg == 0.0 {
-        // Если avg = 0 (нет позиции), то считаем cheap если цена < 0.5
-        return current_price < 0.5;
+        // Если avg = 0 (нет позиции), любая покупка УВЕЛИЧИВАЕТ avg → EXPENSIVE
+        return false;
     }
     // Cheap если текущая цена меньше avg (уменьшает avg при покупке)
     // Expensive если текущая цена больше avg (увеличивает avg при покупке)
