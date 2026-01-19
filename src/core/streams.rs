@@ -61,7 +61,7 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
 
         // Рассчитываем количество ордеров: floor(skew_size / size)
         let order_size = engine.config.size;
-        let mut num_orders = (skew_size / order_size).floor() as usize;
+        let mut num_orders = ((skew_size / order_size) / 2.0).floor() as usize;
 
         // Проверяем max_balance для всех ордеров сразу
         let total_cost = buy_price * order_size * num_orders as f64;
@@ -107,12 +107,12 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
     let mut mode = engine.trading_mode.lock().unwrap();
 
     // Проверяем условия переключения режима
-    if total_avg <= 0.97 {
+    if total_avg <= 0.98 {
         *mode = TradingMode::BuyExpensive;
         info!("✅ Avg <= 0.98 ({:.3}) → Режим: BuyExpensive (до avg >= 1.02)", total_avg);
     } else if total_avg >= 1.03 {
         *mode = TradingMode::BuyCheap;
-        info!("✅ Avg >= 1.03 ({:.3}) → Режим: BuyCheap (до avg <= 0.98)", total_avg);
+        info!("✅ Avg >= 1.02 ({:.3}) → Режим: BuyCheap (до avg <= 0.98)", total_avg);
     } else {
         info!("📊 Avg в зоне 0.98-1.02 ({:.3}) → Продолжаем режим {:?}", total_avg, *mode);
     }
