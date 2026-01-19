@@ -110,9 +110,9 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
     if total_avg <= 0.98 {
         *mode = TradingMode::BuyExpensive;
         info!("✅ Avg <= 0.98 ({:.3}) → Режим: BuyExpensive (до avg >= 1.02)", total_avg);
-    } else if total_avg >= 1.02 {
+    } else if total_avg >= 1.01 {
         *mode = TradingMode::BuyCheap;
-        info!("✅ Avg >= 1.02 ({:.3}) → Режим: BuyCheap (до avg <= 0.98)", total_avg);
+        info!("✅ Avg >= 1.01 ({:.3}) → Режим: BuyCheap (до avg <= 0.98)", total_avg);
     } else {
         info!("📊 Avg в зоне 0.98-1.02 ({:.3}) → Продолжаем режим {:?}", total_avg, *mode);
     }
