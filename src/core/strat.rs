@@ -189,8 +189,7 @@ impl RealEngine {
             let now = Instant::now();
             let elapsed = now.duration_since(*last_time);
 
-            if elapsed.as_millis() < 700 {
-                // Еще не прошло 0.7 сек
+            if elapsed.as_millis() < 1000 {
                 return;
             }
 
