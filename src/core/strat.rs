@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TradingMode {
-    BuyExpensive,  // avg <= 0.98: покупаем expensive до 1.02
-    BuyCheap,      // avg >= 1.02: покупаем cheap до 0.98
+    BuyExpensive,  // avg <= 0.98: покупаем expensive до выхода в плюс
+    BuyCheap,      // expensive в плюсе: покупаем cheap до avg <= 0.98
 }
 
 pub struct RealEngine {

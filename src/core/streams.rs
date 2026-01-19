@@ -162,9 +162,8 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
         }
     }
 
-    // Логика с переключением на основе перекоса
+    // ПРОСТАЯ ЛОГИКА: 3 ключевых правила
     let mut mode = engine.trading_mode.lock().unwrap();
-    let skew_threshold = engine.config.size; // Порог перекоса = размер ордера из конфига
 
     // Определяем expensive сторону и проверяем ее прибыльность
     let expensive_side_shares = if !up_is_cheap {
@@ -181,27 +180,24 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
     };
     let expensive_profitable = expensive_side_shares >= total_spent;
 
-    // УПРОЩЕННАЯ ЛОГИКА: 3 правила
-
-    // Правило 1: avg <= 0.98 → BuyExpensive (до восстановления перекоса + выход в плюс)
+    // ПРАВИЛО 1: avg <= 0.98 → режим BuyExpensive (покупаем пока не выйдем в плюс)
     if total_avg <= 0.98 {
         *mode = TradingMode::BuyExpensive;
-        info!("✅ ПРАВИЛО 1: Avg <= 0.98 ({:.3}) → Режим: BuyExpensive", total_avg);
+        info!("✅ ПРАВИЛО 1: Avg <= 0.98 ({:.3}) → Режим: BuyExpensive (до выхода в плюс)", total_avg);
     }
-    // Правило 2: После отработки expensive → BuyCheap (накапливаем cheap пока avg > 0.98)
-    else if *mode == TradingMode::BuyExpensive && skew_abs < skew_threshold && expensive_profitable {
+    // ПРАВИЛО 2: BuyExpensive вышел в плюс → переключение на BuyCheap
+    else if *mode == TradingMode::BuyExpensive && expensive_profitable {
         *mode = TradingMode::BuyCheap;
-        info!("✅ ПРАВИЛО 2: Expensive отработала (perекос {:.1} < {:.1}, прибыль {:.1} >= {:.1}) → BuyCheap",
-            skew_abs, skew_threshold, expensive_side_shares, total_spent);
+        info!("✅ ПРАВИЛО 2: BuyExpensive вышел в плюс ({:.1} >= {:.1}) → BuyCheap",
+            expensive_side_shares, total_spent);
     }
-    // Правило 2 продолжение: продолжаем BuyExpensive пока не выполнены условия
+    // ПРАВИЛО 2 продолжение: BuyExpensive работает пока не выйдем в плюс
     else if *mode == TradingMode::BuyExpensive {
-        info!("📊 ПРАВИЛО 2: BuyExpensive продолжается (skew: {:.1}, profit: {:.1} < {:.1})",
-            skew_abs, expensive_side_shares, total_spent);
+        info!("📊 BuyExpensive работает (profit {:.1} < {:.1})", expensive_side_shares, total_spent);
     }
-    // Правило 3: обрабатывается выше в коде (перекос не в пользу cheap)
-    else {
-        info!("📊 Режим BuyCheap: Avg {:.3} | Накапливаем cheap пока avg > 0.98", total_avg);
+    // ПРАВИЛО 3: BuyCheap ничего не может остановить (работает пока avg > 0.98)
+    else if *mode == TradingMode::BuyCheap {
+        info!("📊 ПРАВИЛО 3: BuyCheap работает (avg {:.3}, доводим до 0.98)", total_avg);
     }
 
     // Выполняем действия согласно текущему режиму
