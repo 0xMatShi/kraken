@@ -138,7 +138,7 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
             };
 
             let skew_size = ratio * skew_abs;
-            let mut num_orders = ((skew_size / order_size) / 3.0).floor() as usize;
+            let mut num_orders = ((skew_size / order_size) / 2.0).floor() as usize;
 
             // Проверяем max_balance
             let total_cost = buy_price * order_size * num_orders as f64;
