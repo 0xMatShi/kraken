@@ -165,54 +165,84 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
         }
     }
 
-    // НОВАЯ ЛОГИКА: условия размещения ордеров
-    // Cheap сторона: размещаем если avg_cheap < best_bid ИЛИ total_avg < 0.98
-    // Expensive сторона: размещаем если total_avg < 1.01
+    // ЛОГИКА P_max: Закрытие перекоса по максимальной выгодной цене
+    // Проверяем перекос и рассчитываем P_max для стороны с меньшим количеством акций
+    if skew_abs > order_size {
+        let port = engine.portfolio.lock().unwrap();
+        let total_spent = port.up_spent + port.down_spent;
+        drop(port);
+
+        // Определяем параметры для расчёта P_max
+        let (deficit_side, deficit_bid, s_target, shares_to_buy) = if up_shares < down_shares {
+            // UP меньше, цель - выровнять до DOWN
+            (Side::Up, up_bid, down_shares, down_shares - up_shares)
+        } else if down_shares < up_shares {
+            // DOWN меньше, цель - выровнять до UP
+            (Side::Down, down_bid, up_shares, up_shares - down_shares)
+        } else {
+            // Нет перекоса
+            (Side::Up, 0.0, 0.0, 0.0)
+        };
+
+        if shares_to_buy > 0.0 {
+            // P_max = (S_target - total_spent) / shares_to_buy
+            let p_max = (s_target - total_spent) / shares_to_buy;
+
+            info!("📊 P_max расчёт: S_target={:.1} | total_spent={:.2} | shares_to_buy={:.1} → P_max={:.3}",
+                s_target, total_spent, shares_to_buy, p_max);
+
+            // Если best_bid на дефицитной стороне < P_max, закрываем перекос
+            if deficit_bid > 0.0 && deficit_bid < p_max {
+                // Рассчитываем количество ордеров для покрытия перекоса
+                let mut num_orders = ((shares_to_buy / order_size) / 2.0).ceil() as usize;
+
+                // Проверяем max_balance
+                let total_cost = deficit_bid * order_size * num_orders as f64;
+                {
+                    let port = engine.portfolio.lock().unwrap();
+                    let total_spent = port.up_spent + port.down_spent;
+                    if total_spent + total_cost > engine.config.max_balance {
+                        let available_budget = engine.config.max_balance - total_spent;
+                        let max_orders = (available_budget / (deficit_bid * order_size)).floor() as usize;
+                        num_orders = num_orders.min(max_orders);
+                    }
+                }
+
+                if num_orders > 0 {
+                    info!("💰 P_max условие: best_bid {:.3} < P_max {:.3} → Закрываем перекос ({} ордеров)",
+                        deficit_bid, p_max, num_orders);
+                    for i in 0..num_orders {
+                        info!("📝 Ордер {}/{} P_max закрытие: {:?} @ {:.2}",
+                            i + 1, num_orders, deficit_side, deficit_bid);
+                        place_order_on_side(engine, deficit_side, deficit_bid);
+                    }
+                    return;
+                }
+            } else {
+                info!("⏸️ P_max условие не выполнено: best_bid {:.3} >= P_max {:.3}", deficit_bid, p_max);
+            }
+        }
+    }
+
+    // БАЗОВАЯ СТРАТЕГИЯ: Покупаем только cheap акции
+    // Cheap = best_bid < 0.5 (определено в строках 101-102)
 
     // Проверяем условия для UP стороны
     if up_is_cheap {
-        // UP - cheap сторона
-        let should_place_up = up_bid < up_avg || total_avg < 0.98;
-        if should_place_up {
-            info!("✅ UP (cheap): размещаем (up_bid {:.3} < up_avg {:.3} ИЛИ total_avg {:.3} < 0.98)",
-                up_bid, up_avg, total_avg);
-            place_order_on_side(engine, Side::Up, up_bid);
-        } else {
-            info!("⏸️ UP (cheap): не размещаем (up_bid {:.3} >= up_avg {:.3} И total_avg {:.3} >= 0.98)",
-                up_bid, up_avg, total_avg);
-        }
+        // UP - cheap сторона, покупаем
+        info!("✅ UP (cheap): размещаем (up_bid {:.3} < 0.5)", up_bid);
+        place_order_on_side(engine, Side::Up, up_bid);
     } else {
-        // UP - expensive сторона
-        let should_place_up = total_avg < 1.0;
-        if should_place_up {
-            info!("✅ UP (expensive): размещаем (total_avg {:.3} < 1.01)", total_avg);
-            place_order_on_side(engine, Side::Up, up_bid);
-        } else {
-            info!("⏸️ UP (expensive): не размещаем (total_avg {:.3} >= 1.01)", total_avg);
-        }
+        info!("⏸️ UP (expensive): не размещаем (up_bid {:.3} >= 0.5)", up_bid);
     }
 
     // Проверяем условия для DOWN стороны
     if down_is_cheap {
-        // DOWN - cheap сторона
-        let should_place_down = down_bid < down_avg || total_avg < 0.98;
-        if should_place_down {
-            info!("✅ DOWN (cheap): размещаем (down_bid {:.3} < down_avg {:.3} ИЛИ total_avg {:.3} < 0.98)",
-                down_bid, down_avg, total_avg);
-            place_order_on_side(engine, Side::Down, down_bid);
-        } else {
-            info!("⏸️ DOWN (cheap): не размещаем (down_bid {:.3} >= down_avg {:.3} И total_avg {:.3} >= 0.98)",
-                down_bid, down_avg, total_avg);
-        }
+        // DOWN - cheap сторона, покупаем
+        info!("✅ DOWN (cheap): размещаем (down_bid {:.3} < 0.5)", down_bid);
+        place_order_on_side(engine, Side::Down, down_bid);
     } else {
-        // DOWN - expensive сторона
-        let should_place_down = total_avg < 1.01;
-        if should_place_down {
-            info!("✅ DOWN (expensive): размещаем (total_avg {:.3} < 1.01)", total_avg);
-            place_order_on_side(engine, Side::Down, down_bid);
-        } else {
-            info!("⏸️ DOWN (expensive): не размещаем (total_avg {:.3} >= 1.01)", total_avg);
-        }
+        info!("⏸️ DOWN (expensive): не размещаем (down_bid {:.3} >= 0.5)", down_bid);
     }
 }
 
