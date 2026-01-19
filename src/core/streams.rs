@@ -183,7 +183,7 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
         }
     } else {
         // UP - expensive сторона
-        let should_place_up = total_avg < 1.01;
+        let should_place_up = total_avg < 1.0;
         if should_place_up {
             info!("✅ UP (expensive): размещаем (total_avg {:.3} < 1.01)", total_avg);
             place_order_on_side(engine, Side::Up, up_bid);
