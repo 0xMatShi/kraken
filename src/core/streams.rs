@@ -39,7 +39,7 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
     }
 
     // ПРИОРИТЕТ: Если перекос > 2% И абсолютный перекос > 50 акций
-    if skew_percent > 2.0 && skew_abs > 50.0 {
+    if skew_percent > 2.0 && skew_abs > 100.0 {
         // Определяем сторону для закрытия перекоса
         let (buy_side, buy_price, avg_side_with_more) = if up_shares < down_shares {
             // DOWN больше, покупаем UP
