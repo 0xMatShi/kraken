@@ -40,10 +40,10 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
     let mut mode = engine.trading_mode.lock().unwrap();
 
     // Проверяем условия переключения режима
-    if total_avg <= 0.98 {
+    if total_avg <= 0.97 {
         *mode = TradingMode::BuyExpensive;
         info!("✅ Avg <= 0.98 ({:.3}) → Режим: BuyExpensive (до avg >= 1.02)", total_avg);
-    } else if total_avg >= 1.02 {
+    } else if total_avg >= 1.03 {
         *mode = TradingMode::BuyCheap;
         info!("✅ Avg >= 1.02 ({:.3}) → Режим: BuyCheap (до avg <= 0.98)", total_avg);
     } else {
