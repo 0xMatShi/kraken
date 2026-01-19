@@ -252,7 +252,7 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
                         total_spent, s_exp, p_exp, n);
 
                     // Рассчитываем количество ордеров
-                    let mut num_orders = ((n / order_size) / 2.0).ceil() as usize;
+                    let mut num_orders = ((n / order_size)).ceil() as usize;
 
                     // Проверяем max_balance
                     let total_cost = p_exp * order_size * num_orders as f64;
@@ -296,7 +296,7 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
                         total_spent, s_exp, p_exp, n);
 
                     // Рассчитываем количество ордеров
-                    let mut num_orders = ((n / order_size) / 2.0).ceil() as usize;
+                    let mut num_orders = ((n / order_size)).ceil() as usize;
 
                     // Проверяем max_balance
                     let total_cost = p_exp * order_size * num_orders as f64;
