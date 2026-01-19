@@ -103,16 +103,75 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
         if up_is_cheap { "CHEAP" } else { "EXPENSIVE" },
         if down_is_cheap { "CHEAP" } else { "EXPENSIVE" });
 
+    // ДОПОЛНИТЕЛЬНОЕ ПРАВИЛО: Если перекос > size НЕ В ПОЛЬЗУ cheap стороны - закрыть полностью
+    // Т.е. если cheap стороны у нас меньше
+    let order_size = engine.config.size;
+    if skew_abs > order_size {
+        // Проверяем: является ли сторона с МЕНЬШИМ количеством акций cheap?
+        let skew_against_cheap = if up_shares < down_shares {
+            // UP меньше - проверяем, является ли UP cheap
+            up_is_cheap
+        } else if down_shares < up_shares {
+            // DOWN меньше - проверяем, является ли DOWN cheap
+            down_is_cheap
+        } else {
+            false // Нет перекоса
+        };
+
+        if skew_against_cheap {
+            // Перекос НЕ В ПОЛЬЗУ cheap стороны - закрываем его
+            let (buy_side, buy_price, avg_side_with_more) = if up_shares < down_shares {
+                // UP меньше (и это cheap), покупаем UP
+                (Side::Up, up_bid, down_avg)
+            } else {
+                // DOWN меньше (и это cheap), покупаем DOWN
+                (Side::Down, down_bid, up_avg)
+            };
+
+            // Рассчитываем ratio = (1 - avg_side_with_more) / buy_price
+            let ratio = if buy_price > 0.0 && avg_side_with_more > 0.0 {
+                (1.0 - avg_side_with_more) / buy_price
+            } else {
+                1.0
+            };
+
+            let skew_size = ratio * skew_abs;
+            let mut num_orders = ((skew_size / order_size) / 2.0).floor() as usize;
+
+            // Проверяем max_balance
+            let total_cost = buy_price * order_size * num_orders as f64;
+            {
+                let port = engine.portfolio.lock().unwrap();
+                let total_spent = port.up_spent + port.down_spent;
+                if total_spent + total_cost > engine.config.max_balance {
+                    let available_budget = engine.config.max_balance - total_spent;
+                    let max_orders = (available_budget / (buy_price * order_size)).floor() as usize;
+                    num_orders = num_orders.min(max_orders);
+                }
+            }
+
+            if num_orders > 0 {
+                info!("💎 Перекос {:.1} акций НЕ В ПОЛЬЗУ CHEAP стороны → Закрываем полностью ({} ордеров)", skew_abs, num_orders);
+                for i in 0..num_orders {
+                    info!("📝 Ордер {}/{} для закрытия перекоса против cheap: {:?} @ {:.2}",
+                        i + 1, num_orders, buy_side, buy_price);
+                    place_order_on_side(engine, buy_side, buy_price);
+                }
+                return;
+            }
+        }
+    }
+
     // Логика с гистерезисом: переключаем режим на границах, сохраняем между ними
     let mut mode = engine.trading_mode.lock().unwrap();
 
     // Проверяем условия переключения режима
-    if total_avg <= 0.98 {
+    if total_avg <= 0.99 {
         *mode = TradingMode::BuyExpensive;
-        info!("✅ Avg <= 0.98 ({:.3}) → Режим: BuyExpensive (до avg >= 1.02)", total_avg);
+        info!("✅ Avg <= 0.99 ({:.3}) → Режим: BuyExpensive (до avg >= 1.02)", total_avg);
     } else if total_avg >= 1.00 {
         *mode = TradingMode::BuyCheap;
-        info!("✅ Avg >= 1.01 ({:.3}) → Режим: BuyCheap (до avg <= 0.98)", total_avg);
+        info!("✅ Avg >= 1.00 ({:.3}) → Режим: BuyCheap (до avg <= 0.98)", total_avg);
     } else {
         info!("📊 Avg в зоне 0.98-1.02 ({:.3}) → Продолжаем режим {:?}", total_avg, *mode);
     }
