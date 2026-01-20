@@ -190,7 +190,7 @@ impl RealEngine {
         }
 
         // Размещаем ордера согласно новой логике
-        super::streams::process_order_placement(self, prices.up_bid, prices.down_bid, prices.up_ask, prices.down_ask);
+        super::streams::process_order_placement(self, prices.up_bid, prices.down_bid);
     }
 
     /// Финализация сессии - генерация отчета

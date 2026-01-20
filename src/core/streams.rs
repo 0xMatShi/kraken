@@ -8,7 +8,7 @@ use super::strat::RealEngine;
 
 /// Новая логика размещения ордеров
 /// Размещает ордера на обе стороны каждые 0.5 секунды
-pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: f64, up_ask: f64, down_ask: f64) {
+pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: f64) {
     let port = engine.portfolio.lock().unwrap();
     let up_shares = port.up_shares;
     let down_shares = port.down_shares;
@@ -37,64 +37,7 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
         place_order_on_side(engine, Side::Down, down_bid);
         return; // Возвращаемся, так как это специальный случай старта
     }
-
-    // ЗАКОММЕНТИРОВАНО: Старая логика закрытия большого перекоса
-    // if skew_percent > 2.0 && skew_abs > 100.0 {
-    //     // Определяем сторону для закрытия перекоса
-    //     let (buy_side, buy_price, avg_side_with_more) = if up_shares < down_shares {
-    //         // DOWN больше, покупаем UP
-    //         (Side::Up, up_bid, down_avg)
-    //     } else {
-    //         // UP больше, покупаем DOWN
-    //         (Side::Down, down_bid, up_avg)
-    //     };
-    //
-    //     // Рассчитываем ratio = (1 - avg_side_with_more) / buy_price
-    //     let ratio = if buy_price > 0.0 && avg_side_with_more > 0.0 {
-    //         (1.0 - avg_side_with_more) / buy_price
-    //     } else {
-    //         1.0 // Если avg = 0 или price = 0, используем ratio = 1.0
-    //     };
-    //
-    //     // Рассчитываем размер для закрытия: skew_size = ratio * skew
-    //     let skew_size = ratio * skew_abs;
-    //
-    //     // Рассчитываем количество ордеров: floor(skew_size / size)
-    //     let order_size = engine.config.size;
-    //     let mut num_orders = ((skew_size / order_size) / 2.0).floor() as usize;
-    //
-    //     // Проверяем max_balance для всех ордеров сразу
-    //     let total_cost = buy_price * order_size * num_orders as f64;
-    //     {
-    //         let port = engine.portfolio.lock().unwrap();
-    //         let total_spent = port.up_spent + port.down_spent;
-    //         if total_spent + total_cost > engine.config.max_balance {
-    //             // Уменьшаем количество ордеров, чтобы не превысить max_balance
-    //             let available_budget = engine.config.max_balance - total_spent;
-    //             let max_orders = (available_budget / (buy_price * order_size)).floor() as usize;
-    //             num_orders = num_orders.min(max_orders);
-    //             info!("⚠️ Max balance ограничение: уменьшаем количество ордеров до {}", num_orders);
-    //         }
-    //     }
-    //
-    //     if num_orders == 0 {
-    //         info!("⚠️ Недостаточно баланса для закрытия перекоса");
-    //         return;
-    //     }
-    //
-    //     info!("⚠️ Перекос {:.1}% ({:.1} акций) | Ratio: {:.3} | Skew Size: {:.1} | Размещаем {} ордеров по {:.1}",
-    //         skew_percent, skew_abs, ratio, skew_size, num_orders, order_size);
-    //
-    //     // Размещаем рассчитанное количество ордеров
-    //     for i in 0..num_orders {
-    //         info!("📝 Ордер {}/{} для закрытия перекоса: {:?} @ {:.2}",
-    //             i + 1, num_orders, buy_side, buy_price);
-    //         place_order_on_side(engine, buy_side, buy_price);
-    //     }
-    //
-    //     return;
-    // }
-
+    
     // Определяем cheap и expensive стороны по новым правилам:
     // cheap: best_bid < 0.5
     // expensive: best_bid >= 0.5
@@ -167,8 +110,6 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
 
     // ЛОГИКА P_max: Закрытие перекоса по максимальной выгодной цене
     // Проверяем перекос и рассчитываем P_max для стороны с меньшим количеством акций
-    let mut calculated_p_max: Option<f64> = None;
-
     if skew_abs > order_size {
         let port = engine.portfolio.lock().unwrap();
         let total_spent = port.up_spent + port.down_spent;
@@ -189,7 +130,6 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
         if shares_to_buy > 0.0 {
             // P_max = (S_target - total_spent) / shares_to_buy
             let p_max = (s_target - total_spent) / shares_to_buy;
-            calculated_p_max = Some(p_max);
 
             info!("📊 P_max расчёт: S_target={:.1} | total_spent={:.2} | shares_to_buy={:.1} → P_max={:.3}",
                 s_target, total_spent, shares_to_buy, p_max);
@@ -227,123 +167,31 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, up_bid: f64, down_bid: 
         }
     }
 
-    // ЛОГИКА ЗАКРЫТИЯ УБЫТКА ПО EXPENSIVE СТОРОНЕ ПРИ ПЕРЕКОСЕ
-    // N = (total_spent - S_exp) / (1 - P_exp)
-    // Применяется ТОЛЬКО если текущий bid > p_max + 0.05
-    if let Some(p_max) = calculated_p_max {
-        let port = engine.portfolio.lock().unwrap();
-        let total_spent = port.up_spent + port.down_spent;
-        drop(port);
-
-        // Определяем expensive сторону и проверяем перекос
-        let (is_up_expensive, is_down_expensive) = (!up_is_cheap, !down_is_cheap);
-
-        // Проверяем UP expensive в дефиците (срабатывает только при перекосе > 50 акций)
-        if is_up_expensive && up_shares < down_shares && up_ask >= p_max && skew_abs > 50.0 {
-            let s_exp = up_shares;
-            let p_exp = up_ask;
-
-            if p_exp < 1.0 && p_exp > 0.0 {
-                let margin = 0.01;
-                let n = (total_spent * (1.0 + margin) - s_exp) / (1.0 - p_exp * (1.0 + margin));
-
-                if n > 0.0 {
-                    info!("📊 Expensive убыток (UP): total_spent={:.2} | S_exp={:.1} | P_exp={:.3} → N={:.1}",
-                        total_spent, s_exp, p_exp, n);
-
-                    // Рассчитываем количество ордеров
-                    let mut num_orders = ((n / order_size)).ceil() as usize;
-
-                    // Проверяем max_balance
-                    let total_cost = p_exp * order_size * num_orders as f64;
-                    {
-                        let port = engine.portfolio.lock().unwrap();
-                        let total_spent = port.up_spent + port.down_spent;
-                        if total_spent + total_cost > engine.config.max_balance {
-                            let available_budget = engine.config.max_balance - total_spent;
-                            let max_orders = (available_budget / (p_exp * order_size)).floor() as usize;
-                            num_orders = num_orders.min(max_orders);
-                        }
-                    }
-
-                    if num_orders > 0 {
-                        info!("💎 Закрытие убытка expensive (UP): N={:.1} акций → {} ордеров @ {:.2}",
-                            n, num_orders, p_exp);
-                        for i in 0..num_orders {
-                            info!("📝 Ордер {}/{} expensive убыток: UP @ {:.2}",
-                                i + 1, num_orders, p_exp);
-                            place_order_on_side(engine, Side::Up, up_ask);
-                        }
-                        // НЕ возвращаемся, продолжаем дальше для размещения cheap ордеров
-                    }
-                }
-            }
-        } else if is_up_expensive && up_shares < down_shares {
-            info!("⏸️ UP expensive убыток: ask {:.3} < p_max ({:.3})", up_ask, p_max);
-        }
-
-        // Проверяем DOWN expensive в дефиците (срабатывает только при перекосе > 50 акций)
-        if is_down_expensive && down_shares < up_shares && down_ask >= p_max && skew_abs > 50.0 {
-            let s_exp = down_shares;
-            let p_exp = down_ask;
-
-            if p_exp < 1.0 && p_exp > 0.0 {
-                let margin = 0.01;
-                let n = (total_spent * (1.0 + margin) - s_exp) / (1.0 - p_exp * (1.0 + margin));
-
-                if n > 0.0 {
-                    info!("📊 Expensive убыток (DOWN): total_spent={:.2} | S_exp={:.1} | P_exp={:.3} → N={:.1}",
-                        total_spent, s_exp, p_exp, n);
-
-                    // Рассчитываем количество ордеров
-                    let mut num_orders = ((n / order_size)).ceil() as usize;
-
-                    // Проверяем max_balance
-                    let total_cost = p_exp * order_size * num_orders as f64;
-                    {
-                        let port = engine.portfolio.lock().unwrap();
-                        let total_spent = port.up_spent + port.down_spent;
-                        if total_spent + total_cost > engine.config.max_balance {
-                            let available_budget = engine.config.max_balance - total_spent;
-                            let max_orders = (available_budget / (p_exp * order_size)).floor() as usize;
-                            num_orders = num_orders.min(max_orders);
-                        }
-                    }
-
-                    if num_orders > 0 {
-                        info!("💎 Закрытие убытка expensive (DOWN): N={:.1} акций → {} ордеров @ {:.2}",
-                            n, num_orders, p_exp);
-                        for i in 0..num_orders {
-                            info!("📝 Ордер {}/{} expensive убыток: DOWN @ {:.2}",
-                                i + 1, num_orders, p_exp);
-                            place_order_on_side(engine, Side::Down, down_ask);
-                        }
-                        // НЕ возвращаемся, продолжаем дальше для размещения cheap ордеров
-                    }
-                }
-            }
-        } else if is_down_expensive && down_shares < up_shares {
-            info!("⏸️ DOWN expensive убыток: ask {:.3} < p_max ({:.3})", down_ask, p_max);
-        }
-    }
-
     // БАЗОВАЯ СТРАТЕГИЯ: Покупаем только cheap акции
     // Cheap = best_bid < 0.5 (определено в строках 101-102)
 
     // Проверяем условия для UP стороны
     if up_is_cheap {
-        // UP - cheap сторона, покупаем
-        info!("✅ UP (cheap): размещаем (up_bid {:.3} < 0.5)", up_bid);
-        place_order_on_side(engine, Side::Up, up_bid);
+        // UP - cheap сторона, проверяем bid <= avg портфеля
+        if up_avg == 0.0 || up_bid <= up_avg {
+            info!("✅ UP (cheap): размещаем (up_bid {:.3} < 0.5 и <= avg {:.3})", up_bid, up_avg);
+            place_order_on_side(engine, Side::Up, up_bid);
+        } else {
+            info!("⏸️ UP (cheap): не размещаем (up_bid {:.3} > avg {:.3})", up_bid, up_avg);
+        }
     } else {
         info!("⏸️ UP (expensive): не размещаем (up_bid {:.3} >= 0.5)", up_bid);
     }
 
     // Проверяем условия для DOWN стороны
     if down_is_cheap {
-        // DOWN - cheap сторона, покупаем
-        info!("✅ DOWN (cheap): размещаем (down_bid {:.3} < 0.5)", down_bid);
-        place_order_on_side(engine, Side::Down, down_bid);
+        // DOWN - cheap сторона, проверяем bid <= avg портфеля
+        if down_avg == 0.0 || down_bid <= down_avg {
+            info!("✅ DOWN (cheap): размещаем (down_bid {:.3} < 0.5 и <= avg {:.3})", down_bid, down_avg);
+            place_order_on_side(engine, Side::Down, down_bid);
+        } else {
+            info!("⏸️ DOWN (cheap): не размещаем (down_bid {:.3} > avg {:.3})", down_bid, down_avg);
+        }
     } else {
         info!("⏸️ DOWN (expensive): не размещаем (down_bid {:.3} >= 0.5)", down_bid);
     }
