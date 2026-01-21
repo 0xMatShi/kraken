@@ -236,11 +236,11 @@ impl RealEngine {
         }
 
         // Условие 4: Размер второго уровня bid >= 1000 с обеих сторон
-        if up_size_2 < 1000.0 {
+        if up_size_2 < 300.0 {
             info!("⏸️ UP второй уровень bid size {:.1} < 1000 - не размещаем", up_size_2);
             return;
         }
-        if down_size_2 < 1000.0 {
+        if down_size_2 < 300.0 {
             info!("⏸️ DOWN второй уровень bid size {:.1} < 1000 - не размещаем", down_size_2);
             return;
         }
