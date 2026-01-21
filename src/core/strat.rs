@@ -21,8 +21,9 @@ pub struct RealEngine {
     pub seen_orders: Mutex<HashSet<String>>,
     pub active_orders_info: Mutex<HashMap<String, (f64, bool, f64, f64)>>,  // order_id -> (price, is_up, original_size, accumulated_filled)
     /// Отслеживание неисполненных ордеров по сторонам для замены
-    pub pending_up_orders: Mutex<Vec<String>>,    // order_id ордеров на UP стороне
-    pub pending_down_orders: Mutex<Vec<String>>,  // order_id ордеров на DOWN стороне
+    /// Хранит (order_id, price) для проверки нужности замены
+    pub pending_up_orders: Mutex<Vec<(String, f64)>>,    // (order_id, price) на UP стороне
+    pub pending_down_orders: Mutex<Vec<(String, f64)>>,  // (order_id, price) на DOWN стороне
     pub our_api_key: Uuid,
     pub config: TradingConfig,
     pub ui_state: UiState,
@@ -78,14 +79,14 @@ impl RealEngine {
     }
 
 
-    /// Добавляет ордер в список неисполненных по стороне
-    pub fn add_pending_order(&self, order_id: String, is_up: bool) {
+    /// Добавляет ордер в список неисполненных по стороне с ценой
+    pub fn add_pending_order(&self, order_id: String, is_up: bool, price: f64) {
         if is_up {
             let mut orders = self.pending_up_orders.lock().unwrap();
-            orders.push(order_id);
+            orders.push((order_id, price));
         } else {
             let mut orders = self.pending_down_orders.lock().unwrap();
-            orders.push(order_id);
+            orders.push((order_id, price));
         }
     }
 
@@ -93,15 +94,15 @@ impl RealEngine {
     pub fn remove_pending_order(&self, order_id: &str, is_up: bool) {
         if is_up {
             let mut orders = self.pending_up_orders.lock().unwrap();
-            orders.retain(|id| id != order_id);
+            orders.retain(|(id, _)| id != order_id);
         } else {
             let mut orders = self.pending_down_orders.lock().unwrap();
-            orders.retain(|id| id != order_id);
+            orders.retain(|(id, _)| id != order_id);
         }
     }
 
-    /// Получает список неисполненных ордеров (UP, DOWN)
-    pub fn get_pending_orders(&self) -> (Vec<String>, Vec<String>) {
+    /// Получает список неисполненных ордеров (UP, DOWN) с ценами
+    pub fn get_pending_orders(&self) -> (Vec<(String, f64)>, Vec<(String, f64)>) {
         let up = self.pending_up_orders.lock().unwrap().clone();
         let down = self.pending_down_orders.lock().unwrap().clone();
         (up, down)

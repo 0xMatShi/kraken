@@ -52,38 +52,56 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, prices: MarketPrices) {
         }
     }
 
-    // Получаем список неисполненных ордеров (это КЛОНЫ, не ссылки!)
+    // Получаем список неисполненных ордеров с ценами (это КЛОНЫ, не ссылки!)
     let (pending_up, pending_down) = engine.get_pending_orders();
-    let pending_up_count = pending_up.len();
-    let pending_down_count = pending_down.len();
 
-    if pending_up_count > 0 || pending_down_count > 0 {
-        info!("🔄 Обнаружены неисполненные ордера: UP={} DOWN={}", pending_up_count, pending_down_count);
+    // Фильтруем ордера: размещаем замену только если новая цена ВЫШЕ старой
+    let up_replacements: Vec<_> = pending_up.iter()
+        .filter(|(_, old_price)| up_bid > *old_price)
+        .collect();
+    let down_replacements: Vec<_> = pending_down.iter()
+        .filter(|(_, old_price)| down_bid > *old_price)
+        .collect();
+
+    let up_replace_count = up_replacements.len();
+    let down_replace_count = down_replacements.len();
+
+    if !pending_up.is_empty() || !pending_down.is_empty() {
+        info!("🔄 Обнаружены неисполненные ордера: UP={} DOWN={}", pending_up.len(), pending_down.len());
 
         // КРИТИЧЕСКИ ВАЖНО: Очищаем оригинальные pending списки СРАЗУ!
-        // Это предотвращает race condition: следующий тик не увидит эти ордера снова
-        // pending_up и pending_down - это клоны, поэтому их можно использовать дальше
         engine.clear_pending_orders();
 
-        // Отменяем все неисполненные ордера асинхронно (используем клоны)
-        for order_id in pending_up.iter().chain(pending_down.iter()) {
-            cancel_order(engine, order_id.clone());
+        // Отменяем все неисполненные ордера асинхронно
+        for (order_id, old_price) in pending_up.iter().chain(pending_down.iter()) {
+            let is_up = pending_up.iter().any(|(id, _)| id == order_id);
+            let new_price = if is_up { up_bid } else { down_bid };
+
+            if new_price > *old_price {
+                info!("🔄 Отменяем неисполненный ордер: {} @ {:.3} (новая цена {:.3} выше)",
+                    if is_up { "UP" } else { "DOWN" }, old_price, new_price);
+                cancel_order(engine, order_id.clone());
+            } else {
+                info!("⏭️ Скипаем замену: {} @ {:.3} (новая цена {:.3} не выше - ордер скорее всего исполнен)",
+                    if is_up { "UP" } else { "DOWN" }, old_price, new_price);
+            }
         }
     }
 
-    info!("✅ Условия выполнены! Размещаем основную пару + {} замен", pending_up_count + pending_down_count);
+    info!("✅ Условия выполнены! Размещаем основную пару + {} замен (UP={}, DOWN={})",
+        up_replace_count + down_replace_count, up_replace_count, down_replace_count);
 
     // Размещаем основную пару (UP + DOWN)
     place_single_order(engine, true, up_bid, order_size);
     place_single_order(engine, false, down_bid, order_size);
 
-    // Размещаем дополнительные лимитки на стороны с неисполненными ордерами
-    for _ in 0..pending_up_count {
+    // Размещаем дополнительные лимитки только для ордеров с ценой ниже новой
+    for _ in 0..up_replace_count {
         info!("🔁 Размещаем дополнительную UP лимитку (замена неисполненной)");
         place_single_order(engine, true, up_bid, order_size);
     }
 
-    for _ in 0..pending_down_count {
+    for _ in 0..down_replace_count {
         info!("🔁 Размещаем дополнительную DOWN лимитку (замена неисполненной)");
         place_single_order(engine, false, down_bid, order_size);
     }
@@ -128,8 +146,8 @@ fn place_single_order(
                     info!("📝 GTC лимитка размещена: {} @ {:.3} | order_id={}",
                         if is_up { "UP" } else { "DOWN" }, rounded_price, response.order_id);
 
-                    // Добавляем в список неисполненных (будет удален при FILL)
-                    engine_clone.add_pending_order(response.order_id, is_up);
+                    // Добавляем в список неисполненных с ценой (будет удален при FILL)
+                    engine_clone.add_pending_order(response.order_id, is_up, rounded_price);
                 } else {
                     warn!("⚠️ Ордер {} размещен но order_id пустой", if is_up { "UP" } else { "DOWN" });
                 }

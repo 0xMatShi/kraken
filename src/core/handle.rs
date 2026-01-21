@@ -18,10 +18,10 @@ fn try_match_and_remove_pending(engine: &Arc<RealEngine>, taker_order_id: &str, 
         let found = {
             if is_up {
                 let pending = engine.pending_up_orders.lock().unwrap();
-                pending.iter().any(|id| id == taker_order_id)
+                pending.iter().any(|(id, _)| id == taker_order_id)
             } else {
                 let pending = engine.pending_down_orders.lock().unwrap();
-                pending.iter().any(|id| id == taker_order_id)
+                pending.iter().any(|(id, _)| id == taker_order_id)
             }
         };
 
