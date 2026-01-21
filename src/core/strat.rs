@@ -19,7 +19,6 @@ pub struct RealEngine {
     pub down_token: Arc<str>,
     pub seen_trades: Mutex<HashSet<String>>,
     pub seen_orders: Mutex<HashSet<String>>,
-    pub active_order_ids: Mutex<HashSet<String>>,
     pub active_orders_info: Mutex<HashMap<String, (f64, bool, f64, f64)>>,  // order_id -> (price, is_up, original_size, accumulated_filled)
     /// Отслеживание неисполненных ордеров по сторонам для замены
     pub pending_up_orders: Mutex<Vec<String>>,    // order_id ордеров на UP стороне
@@ -29,8 +28,6 @@ pub struct RealEngine {
     pub ui_state: UiState,
     pub last_prices: Mutex<Option<MarketPrices>>,
     pub profit_target_reached: Mutex<bool>,
-    /// Счетчик активных лимиток (увеличивается при размещении, уменьшается при полном FILL или CANCELLATION)
-    pub active_orders_count: Mutex<usize>,
     /// Последние обработанные цены тика для дедупликации (up_bid, down_bid)
     pub last_tick_prices: Mutex<Option<(f64, f64)>>,
 }
@@ -57,14 +54,12 @@ impl RealEngine {
             down_token: Arc::from(down_token.as_str()),
             seen_trades: Mutex::new(HashSet::new()),
             seen_orders: Mutex::new(HashSet::new()),
-            active_order_ids: Mutex::new(HashSet::new()),
             active_orders_info: Mutex::new(HashMap::new()),
             our_api_key,
             config,
             ui_state,
             last_prices: Mutex::new(None),
             profit_target_reached: Mutex::new(false),
-            active_orders_count: Mutex::new(0),
             pending_up_orders: Mutex::new(Vec::new()),
             pending_down_orders: Mutex::new(Vec::new()),
             last_tick_prices: Mutex::new(None),
@@ -82,39 +77,6 @@ impl RealEngine {
         (price * 100.0).round() / 100.0
     }
 
-    // Методы для работы с активными ордерами
-    pub fn add_order_id(&self, order_id: String) {
-        let mut orders = self.active_order_ids.lock().unwrap();
-        orders.insert(order_id);
-    }
-
-    pub fn remove_order_id(&self, order_id: &str) {
-        let mut orders = self.active_order_ids.lock().unwrap();
-        orders.remove(order_id);
-    }
-
-    /// Увеличивает счетчик активных лимиток при размещении
-    pub fn increment_orders_count(&self) {
-        let mut count = self.active_orders_count.lock().unwrap();
-        *count += 1;
-        info!("📊 Активных лимиток: {}/{}", *count, self.config.max_active_orders);
-    }
-
-    /// Уменьшает счетчик активных лимиток при полном FILL или CANCELLATION
-    pub fn decrement_orders_count(&self) {
-        let mut count = self.active_orders_count.lock().unwrap();
-        if *count > 0 {
-            *count -= 1;
-        }
-        info!("📊 Активных лимиток: {}/{}", *count, self.config.max_active_orders);
-    }
-    
-    // #[allow(dead_code)]
-    // /// Проверяет, можно ли разместить новую лимитку
-    // pub fn can_place_order(&self) -> bool {
-    //     let count = self.active_orders_count.lock().unwrap();
-    //     *count < self.config.max_active_orders
-    // }
 
     /// Добавляет ордер в список неисполненных по стороне
     pub fn add_pending_order(&self, order_id: String, is_up: bool) {
@@ -180,7 +142,6 @@ impl RealEngine {
                 info!("✅ Все ордера успешно отменены");
 
                 // Очищаем внутренние структуры
-                self.active_order_ids.lock().unwrap().clear();
                 self.active_orders_info.lock().unwrap().clear();
             }
             Err(e) => {

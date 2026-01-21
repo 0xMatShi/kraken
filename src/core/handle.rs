@@ -156,7 +156,6 @@ pub fn handle_ws_order(
 
     match msg_type.as_deref() {
         Some("PLACEMENT") => {
-            engine.add_order_id(order_id.clone());
 
             if let Some(size) = original_size {
                 let mut orders_info = engine.active_orders_info.lock().unwrap();
@@ -221,7 +220,6 @@ pub fn handle_ws_order(
                             orders_info.remove(&order_id);
                             drop(orders_info);
 
-                            engine.remove_order_id(&order_id);
                             ui::remove_our_bid_price(&engine.ui_state, final_is_up, final_price);
                             ui::remove_open_order(&engine.ui_state, &order_id);
                             info!("🔔 ОРДЕР ПОЛНОСТЬЮ ИСПОЛНЕН: {} {} @ {:.3}", side_str, token_str, price);
@@ -284,7 +282,6 @@ pub fn handle_ws_order(
             }
         }
         Some("CANCELLATION") => {
-            engine.remove_order_id(&order_id);
 
             let order_info = {
                 let mut orders_info = engine.active_orders_info.lock().unwrap();
@@ -313,9 +310,6 @@ fn handle_order_fully_filled(engine: &Arc<RealEngine>, order_id: &str, is_up: bo
 
     // Удаляем из списка неисполненных (если там есть)
     engine.remove_pending_order(order_id, is_up);
-
-    // Уменьшаем счетчик активных лимиток
-    engine.decrement_orders_count();
 }
 
 /// Обработка отмены ордера
@@ -332,7 +326,4 @@ fn handle_order_cancelled(engine: &Arc<RealEngine>, order_id: &str, _unfilled_si
     if let Some(is_up) = is_up {
         engine.remove_pending_order(order_id, is_up);
     }
-
-    // Уменьшаем счетчик активных лимиток
-    engine.decrement_orders_count();
 }

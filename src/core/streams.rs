@@ -71,9 +71,6 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, prices: MarketPrices) {
         }
     }
 
-    // Увеличиваем счетчик: основная пара (1) + дополнительные замены
-    engine.increment_orders_count();
-
     info!("✅ Условия выполнены! Размещаем основную пару + {} замен", pending_up_count + pending_down_count);
 
     // Размещаем основную пару (UP + DOWN)
@@ -131,19 +128,14 @@ fn place_single_order(
                     info!("📝 GTC лимитка размещена: {} @ {:.3} | order_id={}",
                         if is_up { "UP" } else { "DOWN" }, rounded_price, response.order_id);
 
-                    // Записываем order_id в список активных
-                    engine_clone.add_order_id(response.order_id.clone());
-
                     // Добавляем в список неисполненных (будет удален при FILL)
                     engine_clone.add_pending_order(response.order_id, is_up);
                 } else {
                     warn!("⚠️ Ордер {} размещен но order_id пустой", if is_up { "UP" } else { "DOWN" });
-                    engine_clone.decrement_orders_count();
                 }
             },
             Err(e) => {
                 warn!("❌ Ошибка размещения GTC лимитки {}: {}", if is_up { "UP" } else { "DOWN" }, e);
-                engine_clone.decrement_orders_count();
             },
         }
     });
