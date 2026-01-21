@@ -31,11 +31,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Загружаем торговую конфигурацию
     let app_config = Config::load()?;
-    tracing::info!("Конфигурация загружена: MAX_BALANCE={:.1}, SIZE={:.1}, CHEAP_LIMIT={:.1}, EXPIRATION={}s",
+    tracing::info!("Конфигурация загружена: MAX_BALANCE={:.1}, SIZE={:.1}, MAX_ACTIVE_ORDERS={}",
         app_config.trading.max_balance,
         app_config.trading.size,
-        app_config.trading.cheap_limit,
-        app_config.trading.expiration_seconds
+        app_config.trading.max_active_orders
     );
 
     // Загружаем переменные окружения

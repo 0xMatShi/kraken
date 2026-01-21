@@ -259,11 +259,17 @@ pub fn handle_ws_order(
 }
 
 /// Обработка полного заполнения ордера
-fn handle_order_fully_filled(_engine: &Arc<RealEngine>, _order_id: &str, is_up: bool, _size: f64) {
+fn handle_order_fully_filled(engine: &Arc<RealEngine>, _order_id: &str, is_up: bool, _size: f64) {
     info!("✅ Ордер полностью исполнен: {}", if is_up { "UP" } else { "DOWN" });
+
+    // Уменьшаем счетчик активных лимиток
+    engine.decrement_orders_count();
 }
 
 /// Обработка отмены ордера
-fn handle_order_cancelled(_engine: &Arc<RealEngine>, _order_id: &str, _unfilled_size: f64) {
+fn handle_order_cancelled(engine: &Arc<RealEngine>, _order_id: &str, _unfilled_size: f64) {
     info!("⚠️ Ордер отменен");
+
+    // Уменьшаем счетчик активных лимиток
+    engine.decrement_orders_count();
 }

@@ -16,21 +16,13 @@ pub struct TradingConfig {
     /// Размер одного ордера (количество акций)
     pub size: f64,
 
-    /// Виртуальный лимит для cheap side (максимум акций)
-    #[serde(default = "default_cheap_limit")]
-    pub cheap_limit: f64,
-
-    /// Время экспирации GTD ордеров (секунды)
-    #[serde(default = "default_expiration_seconds")]
-    pub expiration_seconds: u64,
+    /// Максимальное количество одновременно активных лимиток
+    #[serde(default = "default_max_active_orders")]
+    pub max_active_orders: usize,
 }
 
-fn default_cheap_limit() -> f64 {
-    150.0
-}
-
-fn default_expiration_seconds() -> u64 {
-    2
+fn default_max_active_orders() -> usize {
+    3
 }
 
 impl Config {

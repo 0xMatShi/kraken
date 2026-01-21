@@ -1,6 +1,5 @@
 use std::sync::{Arc, Mutex};
 use std::collections::{HashSet, HashMap};
-use std::time::Instant;
 use crate::models::{Portfolio, Side, MarketPrices};
 use crate::utils::config::TradingConfig;
 use crate::ui::{self, UiState};
@@ -26,8 +25,9 @@ pub struct RealEngine {
     pub config: TradingConfig,
     pub ui_state: UiState,
     pub last_prices: Mutex<Option<MarketPrices>>,
-    pub last_order_time: Mutex<Instant>,
     pub profit_target_reached: Mutex<bool>,
+    /// Счетчик активных лимиток (увеличивается при размещении, уменьшается при полном FILL или CANCELLATION)
+    pub active_orders_count: Mutex<usize>,
 }
 
 impl RealEngine {
@@ -41,8 +41,8 @@ impl RealEngine {
         ui_state: UiState,
     ) -> Self {
         info!("🔧 Инициализация движка: Новая логика размещения ордеров");
-        info!("   Order size: {:.1} | Expiration: {}s | Placement interval: 0.5s",
-            config.size, config.expiration_seconds);
+        info!("   Order size: {:.1} | Max active orders: {}",
+            config.size, config.max_active_orders);
 
         Self {
             portfolio: Mutex::new(Portfolio::default()),
@@ -58,8 +58,8 @@ impl RealEngine {
             config,
             ui_state,
             last_prices: Mutex::new(None),
-            last_order_time: Mutex::new(Instant::now()),
             profit_target_reached: Mutex::new(false),
+            active_orders_count: Mutex::new(0),
         }
     }
 
@@ -83,6 +83,28 @@ impl RealEngine {
     pub fn remove_order_id(&self, order_id: &str) {
         let mut orders = self.active_order_ids.lock().unwrap();
         orders.remove(order_id);
+    }
+
+    /// Увеличивает счетчик активных лимиток при размещении
+    pub fn increment_orders_count(&self) {
+        let mut count = self.active_orders_count.lock().unwrap();
+        *count += 1;
+        info!("📊 Активных лимиток: {}/{}", *count, self.config.max_active_orders);
+    }
+
+    /// Уменьшает счетчик активных лимиток при полном FILL или CANCELLATION
+    pub fn decrement_orders_count(&self) {
+        let mut count = self.active_orders_count.lock().unwrap();
+        if *count > 0 {
+            *count -= 1;
+        }
+        info!("📊 Активных лимиток: {}/{}", *count, self.config.max_active_orders);
+    }
+
+    /// Проверяет, можно ли разместить новую лимитку
+    pub fn can_place_order(&self) -> bool {
+        let count = self.active_orders_count.lock().unwrap();
+        *count < self.config.max_active_orders
     }
 
     /// Проверяет условие прибыльности: прибыль с каждой стороны > $3
@@ -175,22 +197,8 @@ impl RealEngine {
             return;
         }
 
-        // Проверяем таймер: размещаем ордера каждые 0.5 секунды
-        {
-            let mut last_time = self.last_order_time.lock().unwrap();
-            let now = Instant::now();
-            let elapsed = now.duration_since(*last_time);
-
-            if elapsed.as_millis() < 2000 {
-                return;
-            }
-
-            // Обновляем время последнего размещения
-            *last_time = now;
-        }
-
-        // Размещаем ордера согласно новой логике
-        super::streams::process_order_placement(self, prices.up_bid, prices.down_bid);
+        // Размещаем ордера согласно новой логике (без таймера, на каждый тик)
+        super::streams::process_order_placement(self, prices);
     }
 
     /// Финализация сессии - генерация отчета
