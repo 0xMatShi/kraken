@@ -179,7 +179,7 @@ impl RealEngine {
             // Если цены не изменились - скипаем обработку
             if let Some(prev_tick) = *last_tick {
                 if prev_tick == current_tick {
-                    // info!("⏭️ Тик с теми же ценами: UP {:.3} | DOWN {:.3} - скипаем", current_tick.0, current_tick.1);
+                    info!("⏭️ Тик с теми же ценами: UP {:.3} | DOWN {:.3} - скипаем", current_tick.0, current_tick.1);
                     return;
                 }
             }
