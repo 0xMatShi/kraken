@@ -172,23 +172,6 @@ impl RealEngine {
             }
         }
 
-        // Проверяем дедупликацию по ценам тика
-        let current_tick = (prices.up_bid, prices.down_bid);
-        {
-            let mut last_tick = self.last_tick_prices.lock().unwrap();
-
-            // Если цены не изменились - скипаем обработку
-            if let Some(prev_tick) = *last_tick {
-                if prev_tick == current_tick {
-                    info!("⏭️ Тик с теми же ценами: UP {:.3} | DOWN {:.3} - скипаем", current_tick.0, current_tick.1);
-                    return;
-                }
-            }
-
-            // Сохраняем новые цены
-            *last_tick = Some(current_tick);
-        }
-
         // Проверяем флаг достижения прибыли
         {
             let target_reached = self.profit_target_reached.lock().unwrap();
@@ -218,6 +201,65 @@ impl RealEngine {
             });
 
             return;
+        }
+
+        // Выполняем проверки условий для размещения ордеров
+        let up_bid = prices.up_bid;
+        let down_bid = prices.down_bid;
+        let up_size = prices.up_bid_size;
+        let down_size = prices.down_bid_size;
+
+        info!("📊 Тик: UP bid {:.3} (size {:.1}) | DOWN bid {:.3} (size {:.1})",
+            up_bid, up_size, down_bid, down_size);
+
+        // Условие 1: Сумма бест бидов <= 0.99
+        let sum_bids = up_bid + down_bid;
+        if sum_bids > 0.99 {
+            info!("⏸️ Сумма бидов {:.3} > 0.99 - не размещаем", sum_bids);
+            return;
+        }
+
+        // Условие 2: Размер на UP стороне 50 < size < 100
+        if up_size <= 50.0 || up_size >= 100.0 {
+            info!("⏸️ UP size {:.1} вне диапазона (50, 100) - не размещаем", up_size);
+            return;
+        }
+
+        // Условие 3: Размер на DOWN стороне 50 < size < 100
+        if down_size <= 50.0 || down_size >= 100.0 {
+            info!("⏸️ DOWN size {:.1} вне диапазона (50, 100) - не размещаем", down_size);
+            return;
+        }
+
+        // Условие 4: Проверяем max_balance
+        let order_size = self.config.size;
+        let total_cost = (up_bid + down_bid) * order_size;
+        {
+            let port = self.portfolio.lock().unwrap();
+            let total_spent = port.up_spent + port.down_spent;
+            if total_spent + total_cost > self.config.max_balance {
+                info!("⏸️ Max balance достигнут: {:.2} + {:.2} > {:.2}",
+                    total_spent, total_cost, self.config.max_balance);
+                return;
+            }
+        }
+
+        // Проверяем дедупликацию по ценам тика
+        let current_tick = (prices.up_bid, prices.down_bid);
+        {
+            let mut last_tick = self.last_tick_prices.lock().unwrap();
+
+            // Если цены не изменились - скипаем обработку
+            if let Some(prev_tick) = *last_tick {
+                if prev_tick == current_tick {
+                    info!("⏭️ Тик с теми же ценами: UP {:.3} | DOWN {:.3} - уже пытались разместить, скипаем",
+                        current_tick.0, current_tick.1);
+                    return;
+                }
+            }
+
+            // ВСЕ ПРОВЕРКИ ПРОШЛИ! Помечаем попытку размещения по этим ценам
+            *last_tick = Some(current_tick);
         }
 
         // Размещаем ордера согласно новой логике (без таймера, на каждый тик)

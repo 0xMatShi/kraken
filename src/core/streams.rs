@@ -5,52 +5,13 @@ use polymarket_client_sdk::types::Decimal;
 use crate::models::MarketPrices;
 use super::strat::RealEngine;
 
-/// Новая логика размещения лимиток
-/// Размещает 2 GTC лимитки одновременно при выполнении условий:
-/// - сумма бест бидов <= 0.99
-/// - размер на обеих сторонах 50 < size < 100
-/// - max_balance не превышен
+/// Размещение GTC лимиток и управление заменами
+/// Вызывается после успешного прохождения всех проверок в process_tick
 /// + отменяет и заменяет неисполненные лимитки
 pub fn process_order_placement(engine: &Arc<RealEngine>, prices: MarketPrices) {
     let up_bid = prices.up_bid;
     let down_bid = prices.down_bid;
-    let up_size = prices.up_bid_size;
-    let down_size = prices.down_bid_size;
-
-    info!("📊 Тик: UP bid {:.3} (size {:.1}) | DOWN bid {:.3} (size {:.1})",
-        up_bid, up_size, down_bid, down_size);
-
-    // Условие 1: Сумма бест бидов <= 0.99
-    let sum_bids = up_bid + down_bid;
-    if sum_bids > 0.99 {
-        info!("⏸️ Сумма бидов {:.3} > 0.99 - не размещаем", sum_bids);
-        return;
-    }
-
-    // Условие 2: Размер на UP стороне 50 < size < 100
-    if up_size <= 50.0 || up_size >= 100.0 {
-        info!("⏸️ UP size {:.1} вне диапазона (50, 100) - не размещаем", up_size);
-        return;
-    }
-
-    // Условие 3: Размер на DOWN стороне 50 < size < 100
-    if down_size <= 50.0 || down_size >= 100.0 {
-        info!("⏸️ DOWN size {:.1} вне диапазона (50, 100) - не размещаем", down_size);
-        return;
-    }
-
-    // Условие 4: Проверяем max_balance
     let order_size = engine.config.size;
-    let total_cost = (up_bid + down_bid) * order_size;
-    {
-        let port = engine.portfolio.lock().unwrap();
-        let total_spent = port.up_spent + port.down_spent;
-        if total_spent + total_cost > engine.config.max_balance {
-            info!("⏸️ Max balance достигнут: {:.2} + {:.2} > {:.2}",
-                total_spent, total_cost, engine.config.max_balance);
-            return;
-        }
-    }
 
     // Получаем список неисполненных ордеров с ценами (это КЛОНЫ, не ссылки!)
     let (pending_up, pending_down) = engine.get_pending_orders();
