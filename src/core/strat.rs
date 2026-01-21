@@ -220,13 +220,13 @@ impl RealEngine {
         }
 
         // Условие 2: Размер на UP стороне 50 < size < 100
-        if up_size <= 50.0 {
+        if up_size <= 10.0 {
             info!("⏸️ UP size {:.1} вне диапазона (50, 100) - не размещаем", up_size);
             return;
         }
 
         // Условие 3: Размер на DOWN стороне 50 < size < 100
-        if down_size <= 50.0 {
+        if down_size <= 10.0 {
             info!("⏸️ DOWN size {:.1} вне диапазона (50, 100) - не размещаем", down_size);
             return;
         }
