@@ -78,7 +78,7 @@ impl RealEngine {
         (price * 100.0).round() / 100.0
     }
 
-
+    #[allow(dead_code)]
     /// Добавляет ордер в список неисполненных по стороне с ценой
     pub fn add_pending_order(&self, order_id: String, is_up: bool, price: f64) {
         if is_up {
@@ -101,13 +101,15 @@ impl RealEngine {
         }
     }
 
+    #[allow(dead_code)]
     /// Получает список неисполненных ордеров (UP, DOWN) с ценами
     pub fn get_pending_orders(&self) -> (Vec<(String, f64)>, Vec<(String, f64)>) {
         let up = self.pending_up_orders.lock().unwrap().clone();
         let down = self.pending_down_orders.lock().unwrap().clone();
         (up, down)
     }
-
+    
+    #[allow(dead_code)]
     /// Очищает списки неисполненных ордеров
     pub fn clear_pending_orders(&self) {
         self.pending_up_orders.lock().unwrap().clear();
@@ -208,9 +210,11 @@ impl RealEngine {
         let down_bid = prices.down_bid;
         let up_size = prices.up_bid_size;
         let down_size = prices.down_bid_size;
+        let up_size_2 = prices.up_bid_size_2;
+        let down_size_2 = prices.down_bid_size_2;
 
-        info!("📊 Тик: UP bid {:.3} (size {:.1}) | DOWN bid {:.3} (size {:.1})",
-            up_bid, up_size, down_bid, down_size);
+        info!("📊 Тик: UP bid {:.3} (size {:.1}, 2nd: {:.1}) | DOWN bid {:.3} (size {:.1}, 2nd: {:.1})",
+            up_bid, up_size, up_size_2, down_bid, down_size, down_size_2);
 
         // Условие 1: Сумма бест бидов <= 0.99
         let sum_bids = up_bid + down_bid;
@@ -220,18 +224,28 @@ impl RealEngine {
         }
 
         // Условие 2: Размер на UP стороне 50 < size < 100
-        if up_size <= 10.0 {
+        if up_size <= 25.0 {
             info!("⏸️ UP size {:.1} вне диапазона (50, 100) - не размещаем", up_size);
             return;
         }
 
         // Условие 3: Размер на DOWN стороне 50 < size < 100
-        if down_size <= 10.0 {
+        if down_size <= 25.0 {
             info!("⏸️ DOWN size {:.1} вне диапазона (50, 100) - не размещаем", down_size);
             return;
         }
 
-        // Условие 4: Проверяем max_balance
+        // Условие 4: Размер второго уровня bid >= 1000 с обеих сторон
+        if up_size_2 < 1000.0 {
+            info!("⏸️ UP второй уровень bid size {:.1} < 1000 - не размещаем", up_size_2);
+            return;
+        }
+        if down_size_2 < 1000.0 {
+            info!("⏸️ DOWN второй уровень bid size {:.1} < 1000 - не размещаем", down_size_2);
+            return;
+        }
+
+        // Условие 5: Проверяем max_balance
         let order_size = self.config.size;
         let total_cost = (up_bid + down_bid) * order_size;
         {

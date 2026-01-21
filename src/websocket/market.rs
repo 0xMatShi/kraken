@@ -126,17 +126,20 @@ impl DataStream {
             ui_asks[i] = OrderLevel { price: *price, size: *size };
         }
 
-        // Обновляем MarketPrices (лучший bid/ask)
+        // Обновляем MarketPrices (лучший bid/ask и второй уровень bid)
         let best_bid = sorted_bids.first().copied();
+        let second_bid = sorted_bids.get(1).copied();
         let best_ask = sorted_asks.first().copied();
 
         if book.asset_id == self.up_token {
             if let Some(b) = best_bid { p.up_bid = b.0; p.up_bid_size = b.1; }
+            if let Some(b2) = second_bid { p.up_bid_2 = b2.0; p.up_bid_size_2 = b2.1; }
             if let Some(a) = best_ask { p.up_ask = a.0; p.up_ask_size = a.1; }
             // Обновляем UI state для UP стакана
             ui::update_up_book(&self.ui_state, ui_bids, ui_asks);
         } else {
             if let Some(b) = best_bid { p.down_bid = b.0; p.down_bid_size = b.1; }
+            if let Some(b2) = second_bid { p.down_bid_2 = b2.0; p.down_bid_size_2 = b2.1; }
             if let Some(a) = best_ask { p.down_ask = a.0; p.down_ask_size = a.1; }
             // Обновляем UI state для DOWN стакана
             ui::update_down_book(&self.ui_state, ui_bids, ui_asks);

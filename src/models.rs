@@ -168,10 +168,14 @@ impl Portfolio {
 pub struct MarketPrices {
     pub up_bid: f64,
     pub up_bid_size: f64,
+    pub up_bid_2: f64,          // Второй уровень UP bid
+    pub up_bid_size_2: f64,     // Размер второго уровня UP bid
     pub up_ask: f64,
     pub up_ask_size: f64,
     pub down_bid: f64,
     pub down_bid_size: f64,
+    pub down_bid_2: f64,        // Второй уровень DOWN bid
+    pub down_bid_size_2: f64,   // Размер второго уровня DOWN bid
     pub down_ask: f64,
     pub down_ask_size: f64,
 }
