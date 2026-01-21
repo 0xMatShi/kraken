@@ -9,7 +9,8 @@ use super::strat::RealEngine;
 /// Размещает 2 GTC лимитки одновременно при выполнении условий:
 /// - сумма бест бидов <= 0.99
 /// - размер на обеих сторонах 50 < size < 100
-/// - счетчик активных лимиток < max_active_orders
+/// - max_balance не превышен
+/// + отменяет и заменяет неисполненные лимитки
 pub fn process_order_placement(engine: &Arc<RealEngine>, prices: MarketPrices) {
     let up_bid = prices.up_bid;
     let down_bid = prices.down_bid;
@@ -38,14 +39,7 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, prices: MarketPrices) {
         return;
     }
 
-    // Условие 4: Проверяем лимит активных лимиток
-    if !engine.can_place_order() {
-        let count = engine.active_orders_count.lock().unwrap();
-        info!("⏸️ Достигнут лимит активных лимиток: {}/{}", *count, engine.config.max_active_orders);
-        return;
-    }
-
-    // Условие 5: Проверяем max_balance
+    // Условие 4: Проверяем max_balance
     let order_size = engine.config.size;
     let total_cost = (up_bid + down_bid) * order_size;
     {
@@ -58,92 +52,114 @@ pub fn process_order_placement(engine: &Arc<RealEngine>, prices: MarketPrices) {
         }
     }
 
-    // Все условия выполнены - размещаем ДВЕ GTC лимитки одновременно
-    info!("✅ Условия выполнены! Размещаем 2 GTC лимитки: UP @ {:.3} + DOWN @ {:.3}", up_bid, down_bid);
+    // Получаем список неисполненных ордеров (это КЛОНЫ, не ссылки!)
+    let (pending_up, pending_down) = engine.get_pending_orders();
+    let pending_up_count = pending_up.len();
+    let pending_down_count = pending_down.len();
 
-    // Увеличиваем счетчик ПЕРЕД размещением, чтобы избежать race condition
+    if pending_up_count > 0 || pending_down_count > 0 {
+        info!("🔄 Обнаружены неисполненные ордера: UP={} DOWN={}", pending_up_count, pending_down_count);
+
+        // КРИТИЧЕСКИ ВАЖНО: Очищаем оригинальные pending списки СРАЗУ!
+        // Это предотвращает race condition: следующий тик не увидит эти ордера снова
+        // pending_up и pending_down - это клоны, поэтому их можно использовать дальше
+        engine.clear_pending_orders();
+
+        // Отменяем все неисполненные ордера асинхронно (используем клоны)
+        for order_id in pending_up.iter().chain(pending_down.iter()) {
+            cancel_order(engine, order_id.clone());
+        }
+    }
+
+    // Увеличиваем счетчик: основная пара (1) + дополнительные замены
     engine.increment_orders_count();
 
-    // Вызываем асинхронную функцию для размещения обоих ордеров
-    place_both_orders(engine, up_bid, down_bid, order_size);
+    info!("✅ Условия выполнены! Размещаем основную пару + {} замен", pending_up_count + pending_down_count);
+
+    // Размещаем основную пару (UP + DOWN)
+    place_single_order(engine, true, up_bid, order_size);
+    place_single_order(engine, false, down_bid, order_size);
+
+    // Размещаем дополнительные лимитки на стороны с неисполненными ордерами
+    for _ in 0..pending_up_count {
+        info!("🔁 Размещаем дополнительную UP лимитку (замена неисполненной)");
+        place_single_order(engine, true, up_bid, order_size);
+    }
+
+    for _ in 0..pending_down_count {
+        info!("🔁 Размещаем дополнительную DOWN лимитку (замена неисполненной)");
+        place_single_order(engine, false, down_bid, order_size);
+    }
 }
 
-/// Размещает оба GTC ордера одним запросом через post_orders
-fn place_both_orders(
+/// Размещает один GTC ордер через post_order
+fn place_single_order(
     engine: &Arc<RealEngine>,
-    up_price: f64,
-    down_price: f64,
+    is_up: bool,
+    price: f64,
     size: f64,
 ) {
-    let up_token = Arc::clone(&engine.up_token);
-    let down_token = Arc::clone(&engine.down_token);
+    let token_id = if is_up {
+        Arc::clone(&engine.up_token)
+    } else {
+        Arc::clone(&engine.down_token)
+    };
+
     let client = engine.client.clone();
     let signer = engine.signer.clone();
     let engine_clone = Arc::clone(engine);
 
     tokio::spawn(async move {
-        // Округляем цены
-        let up_rounded = RealEngine::round_price(up_price);
-        let down_rounded = RealEngine::round_price(down_price);
-
-        let up_price_dec: Decimal = format!("{:.2}", up_rounded).parse().unwrap();
-        let down_price_dec: Decimal = format!("{:.2}", down_rounded).parse().unwrap();
+        let rounded_price = RealEngine::round_price(price);
+        let price_dec: Decimal = format!("{:.2}", rounded_price).parse().unwrap();
         let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
-        // Создаем UP ордер
-        let up_order = client.limit_order()
-            .token_id(up_token.as_ref())
-            .price(up_price_dec)
+        // GTC ордер - без экспирации
+        let order = client.limit_order()
+            .token_id(token_id.as_ref())
+            .price(price_dec)
             .size(size_dec)
             .side(PolySide::Buy)
             .order_type(OrderType::GTC)
             .build().await.unwrap();
 
-        // Создаем DOWN ордер
-        let down_order = client.limit_order()
-            .token_id(down_token.as_ref())
-            .price(down_price_dec)
-            .size(size_dec)
-            .side(PolySide::Buy)
-            .order_type(OrderType::GTC)
-            .build().await.unwrap();
+        let signed = client.sign(&signer, order).await.unwrap();
 
-        // Подписываем оба ордера
-        let up_signed = client.sign(&signer, up_order).await.unwrap();
-        let down_signed = client.sign(&signer, down_order).await.unwrap();
+        match client.post_order(signed).await {
+            Ok(response) => {
+                if !response.order_id.is_empty() {
+                    info!("📝 GTC лимитка размещена: {} @ {:.3} | order_id={}",
+                        if is_up { "UP" } else { "DOWN" }, rounded_price, response.order_id);
 
-        // Размещаем оба ордера одним запросом
-        let orders = vec![up_signed, down_signed];
+                    // Записываем order_id в список активных
+                    engine_clone.add_order_id(response.order_id.clone());
 
-        match client.post_orders(orders).await {
-            Ok(responses) => {
-                info!("✅ Размещено {} ордеров через post_orders", responses.len());
-
-                // Обрабатываем каждый ответ
-                for (idx, response) in responses.iter().enumerate() {
-                    let is_up = idx == 0; // Первый ордер - UP, второй - DOWN
-                    let price = if is_up { up_rounded } else { down_rounded };
-
-                    if !response.order_id.is_empty() {
-                        info!("📝 GTC лимитка размещена: {} @ {:.3} | order_id={}",
-                            if is_up { "UP" } else { "DOWN" }, price, response.order_id);
-
-                        // Записываем order_id в список активных
-                        engine_clone.add_order_id(response.order_id.clone());
-                    } else {
-                        warn!("⚠️ Ордер {} размещен но order_id пустой", if is_up { "UP" } else { "DOWN" });
-                    }
-                }
-
-                // Если хотя бы один ордер не размещен - уменьшаем счетчик
-                if responses.is_empty() || responses.iter().any(|r| r.order_id.is_empty()) {
+                    // Добавляем в список неисполненных (будет удален при FILL)
+                    engine_clone.add_pending_order(response.order_id, is_up);
+                } else {
+                    warn!("⚠️ Ордер {} размещен но order_id пустой", if is_up { "UP" } else { "DOWN" });
                     engine_clone.decrement_orders_count();
                 }
             },
             Err(e) => {
-                warn!("❌ Ошибка размещения ордеров через post_orders: {}", e);
-                // Уменьшаем счетчик, так как ордера не были размещены
+                warn!("❌ Ошибка размещения GTC лимитки {}: {}", if is_up { "UP" } else { "DOWN" }, e);
                 engine_clone.decrement_orders_count();
+            },
+        }
+    });
+}
+
+/// Отменяет ордер по order_id
+fn cancel_order(engine: &Arc<RealEngine>, order_id: String) {
+    let client = engine.client.clone();
+
+    tokio::spawn(async move {
+        match client.cancel_order(&order_id).await {
+            Ok(_) => {
+                info!("🗑️ Неисполненный ордер отменен: {}", order_id);
+            },
+            Err(e) => {
+                warn!("⚠️ Ошибка отмены ордера {}: {}", order_id, e);
             },
         }
     });

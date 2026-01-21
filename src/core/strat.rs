@@ -21,6 +21,9 @@ pub struct RealEngine {
     pub seen_orders: Mutex<HashSet<String>>,
     pub active_order_ids: Mutex<HashSet<String>>,
     pub active_orders_info: Mutex<HashMap<String, (f64, bool, f64, f64)>>,  // order_id -> (price, is_up, original_size, accumulated_filled)
+    /// Отслеживание неисполненных ордеров по сторонам для замены
+    pub pending_up_orders: Mutex<Vec<String>>,    // order_id ордеров на UP стороне
+    pub pending_down_orders: Mutex<Vec<String>>,  // order_id ордеров на DOWN стороне
     pub our_api_key: Uuid,
     pub config: TradingConfig,
     pub ui_state: UiState,
@@ -28,6 +31,8 @@ pub struct RealEngine {
     pub profit_target_reached: Mutex<bool>,
     /// Счетчик активных лимиток (увеличивается при размещении, уменьшается при полном FILL или CANCELLATION)
     pub active_orders_count: Mutex<usize>,
+    /// Последние обработанные цены тика для дедупликации (up_bid, down_bid)
+    pub last_tick_prices: Mutex<Option<(f64, f64)>>,
 }
 
 impl RealEngine {
@@ -60,6 +65,9 @@ impl RealEngine {
             last_prices: Mutex::new(None),
             profit_target_reached: Mutex::new(false),
             active_orders_count: Mutex::new(0),
+            pending_up_orders: Mutex::new(Vec::new()),
+            pending_down_orders: Mutex::new(Vec::new()),
+            last_tick_prices: Mutex::new(None),
         }
     }
 
@@ -100,11 +108,47 @@ impl RealEngine {
         }
         info!("📊 Активных лимиток: {}/{}", *count, self.config.max_active_orders);
     }
+    
+    // #[allow(dead_code)]
+    // /// Проверяет, можно ли разместить новую лимитку
+    // pub fn can_place_order(&self) -> bool {
+    //     let count = self.active_orders_count.lock().unwrap();
+    //     *count < self.config.max_active_orders
+    // }
 
-    /// Проверяет, можно ли разместить новую лимитку
-    pub fn can_place_order(&self) -> bool {
-        let count = self.active_orders_count.lock().unwrap();
-        *count < self.config.max_active_orders
+    /// Добавляет ордер в список неисполненных по стороне
+    pub fn add_pending_order(&self, order_id: String, is_up: bool) {
+        if is_up {
+            let mut orders = self.pending_up_orders.lock().unwrap();
+            orders.push(order_id);
+        } else {
+            let mut orders = self.pending_down_orders.lock().unwrap();
+            orders.push(order_id);
+        }
+    }
+
+    /// Удаляет ордер из списка неисполненных при FILL или CANCELLATION
+    pub fn remove_pending_order(&self, order_id: &str, is_up: bool) {
+        if is_up {
+            let mut orders = self.pending_up_orders.lock().unwrap();
+            orders.retain(|id| id != order_id);
+        } else {
+            let mut orders = self.pending_down_orders.lock().unwrap();
+            orders.retain(|id| id != order_id);
+        }
+    }
+
+    /// Получает список неисполненных ордеров (UP, DOWN)
+    pub fn get_pending_orders(&self) -> (Vec<String>, Vec<String>) {
+        let up = self.pending_up_orders.lock().unwrap().clone();
+        let down = self.pending_down_orders.lock().unwrap().clone();
+        (up, down)
+    }
+
+    /// Очищает списки неисполненных ордеров
+    pub fn clear_pending_orders(&self) {
+        self.pending_up_orders.lock().unwrap().clear();
+        self.pending_down_orders.lock().unwrap().clear();
     }
 
     /// Проверяет условие прибыльности: прибыль с каждой стороны > $3
@@ -164,6 +208,23 @@ impl RealEngine {
             ui::TradingMode::RealRun => {
                 // RealRun режим: реальная торговля
             }
+        }
+
+        // Проверяем дедупликацию по ценам тика
+        let current_tick = (prices.up_bid, prices.down_bid);
+        {
+            let mut last_tick = self.last_tick_prices.lock().unwrap();
+
+            // Если цены не изменились - скипаем обработку
+            if let Some(prev_tick) = *last_tick {
+                if prev_tick == current_tick {
+                    // info!("⏭️ Тик с теми же ценами: UP {:.3} | DOWN {:.3} - скипаем", current_tick.0, current_tick.1);
+                    return;
+                }
+            }
+
+            // Сохраняем новые цены
+            *last_tick = Some(current_tick);
         }
 
         // Проверяем флаг достижения прибыли

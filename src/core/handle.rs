@@ -1,10 +1,47 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use polymarket_client_sdk::clob::types::Side as PolySide;
 use chrono::Utc;
 use uuid::Uuid;
 use crate::ui::{self, TradeHistoryEntry, TradeType, OpenOrder};
 use super::strat::RealEngine;
+
+/// Пытается найти и удалить ордер из pending списков с таймаутом
+/// Используется для taker fills, когда WebSocket может прийти раньше API ответа
+fn try_match_and_remove_pending(engine: &Arc<RealEngine>, taker_order_id: &str, is_up: bool) -> bool {
+    let start = Instant::now();
+    let timeout = Duration::from_millis(5000); // 2 секунды таймаут
+
+    loop {
+        // Проверяем, есть ли order_id в pending списках
+        let found = {
+            if is_up {
+                let pending = engine.pending_up_orders.lock().unwrap();
+                pending.iter().any(|id| id == taker_order_id)
+            } else {
+                let pending = engine.pending_down_orders.lock().unwrap();
+                pending.iter().any(|id| id == taker_order_id)
+            }
+        };
+
+        if found {
+            // Нашли! Удаляем из pending
+            engine.remove_pending_order(taker_order_id, is_up);
+            info!("🎯 Taker fill: найден и удален из pending: {}", taker_order_id);
+            return true;
+        }
+
+        // Таймаут истек
+        if start.elapsed() > timeout {
+            info!("⏱️ Taker fill: таймаут поиска order_id {}", taker_order_id);
+            return false;
+        }
+
+        // Ждем 10ms перед следующей проверкой
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 /// Обработка TAKER сделок (market orders FAK)
 pub fn handle_ws_trade(
@@ -15,7 +52,7 @@ pub fn handle_ws_trade(
     side: PolySide,
     asset_id: &str,
     trade_owner: Option<Uuid>,
-    _taker_order_id: Option<String>,
+    taker_order_id: Option<String>,
 ) {
     let owner_matches = trade_owner.map_or(false, |owner| owner == engine.our_api_key);
     if !owner_matches { return; }
@@ -24,6 +61,18 @@ pub fn handle_ws_trade(
         let mut seen = engine.seen_trades.lock().unwrap();
         if seen.contains(&trade_id) { return; }
         seen.insert(trade_id.clone());
+    }
+
+    // Если есть taker_order_id, пытаемся удалить из pending (мгновенное исполнение)
+    let is_up = asset_id == &*engine.up_token;
+    if let Some(ref order_id) = taker_order_id {
+        let engine_clone = Arc::clone(engine);
+        let order_id_clone = order_id.clone();
+
+        // Запускаем поиск в фоновом потоке, чтобы не блокировать WebSocket
+        tokio::spawn(async move {
+            try_match_and_remove_pending(&engine_clone, &order_id_clone, is_up);
+        });
     }
 
     let mut port = engine.portfolio.lock().unwrap();
@@ -259,16 +308,30 @@ pub fn handle_ws_order(
 }
 
 /// Обработка полного заполнения ордера
-fn handle_order_fully_filled(engine: &Arc<RealEngine>, _order_id: &str, is_up: bool, _size: f64) {
+fn handle_order_fully_filled(engine: &Arc<RealEngine>, order_id: &str, is_up: bool, _size: f64) {
     info!("✅ Ордер полностью исполнен: {}", if is_up { "UP" } else { "DOWN" });
+
+    // Удаляем из списка неисполненных (если там есть)
+    engine.remove_pending_order(order_id, is_up);
 
     // Уменьшаем счетчик активных лимиток
     engine.decrement_orders_count();
 }
 
 /// Обработка отмены ордера
-fn handle_order_cancelled(engine: &Arc<RealEngine>, _order_id: &str, _unfilled_size: f64) {
-    info!("⚠️ Ордер отменен");
+fn handle_order_cancelled(engine: &Arc<RealEngine>, order_id: &str, _unfilled_size: f64) {
+    info!("⚠️ Ордер отменен: {}", order_id);
+
+    // Получаем информацию о стороне из active_orders_info
+    let is_up = {
+        let orders_info = engine.active_orders_info.lock().unwrap();
+        orders_info.get(order_id).map(|(_, is_up, _, _)| *is_up)
+    };
+
+    // Удаляем из списка неисполненных (если там есть)
+    if let Some(is_up) = is_up {
+        engine.remove_pending_order(order_id, is_up);
+    }
 
     // Уменьшаем счетчик активных лимиток
     engine.decrement_orders_count();
