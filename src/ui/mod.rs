@@ -1,8 +1,6 @@
 pub mod log_capture;
 
-use std::collections::{VecDeque, HashSet};
-use std::io::{self, Stdout};
-use std::sync::{Arc, Mutex};
+use crate::models::Portfolio;
 use chrono::{DateTime, Utc};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
@@ -10,13 +8,15 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
-    prelude::*,
-    widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table},
-    style::{Color, Modifier, Style},
     layout::{Constraint, Layout, Rect},
+    prelude::*,
+    style::{Color, Modifier, Style},
+    widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table},
     Frame,
 };
-use crate::models::Portfolio;
+use std::collections::{HashSet, VecDeque};
+use std::io::{self, Stdout};
+use std::sync::{Arc, Mutex};
 
 pub use log_capture::UiLogLayer;
 
@@ -35,11 +35,11 @@ pub enum TradeType {
 /// Запись в истории торговли
 #[derive(Debug, Clone)]
 pub struct TradeHistoryEntry {
-    pub is_up: bool,           // true = Up, false = Down
-    pub shares: f64,           // количество акций
-    pub price: f64,            // цена в центах (0.36 = 36¢)
-    pub cost: f64,             // стоимость в долларах
-    pub trade_type: TradeType, // Maker или Taker
+    pub is_up: bool,              // true = Up, false = Down
+    pub shares: f64,              // количество акций
+    pub price: f64,               // цена в центах (0.36 = 36¢)
+    pub cost: f64,                // стоимость в долларах
+    pub trade_type: TradeType,    // Maker или Taker
     pub timestamp: DateTime<Utc>, // время покупки
 }
 
@@ -47,10 +47,10 @@ pub struct TradeHistoryEntry {
 #[derive(Debug, Clone)]
 pub struct OpenOrder {
     pub order_id: String,
-    pub is_up: bool,           // true = Up, false = Down
-    pub price: f64,            // цена
-    pub filled: f64,           // заполнено
-    pub total: f64,            // всего
+    pub is_up: bool, // true = Up, false = Down
+    pub price: f64,  // цена
+    pub filled: f64, // заполнено
+    pub total: f64,  // всего
 }
 
 impl OpenOrder {
@@ -93,6 +93,11 @@ impl EventInfo {
         (self.end_date - Utc::now()).num_seconds().max(0)
     }
 
+    /// Сколько секунд прошло с начала события
+    pub fn elapsed_seconds(&self) -> i64 {
+        (self.total_seconds - self.remaining_seconds()).max(0)
+    }
+
     pub fn progress_ratio(&self) -> f64 {
         if self.total_seconds <= 0 {
             return 1.0;
@@ -106,13 +111,14 @@ impl EventInfo {
 /// Режим работы бота
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TradingMode {
-    Stop,    // Софт стоит афк
-    RealRun, // Реальная торговля за деньги
+    Stop,       // Софт стоит афк
+    RealRun,    // Реальная торговля за деньги
+    Cancelling, // Режим отмены ордеров (нажать x для отмены всех)
 }
 
 impl Default for TradingMode {
     fn default() -> Self {
-        TradingMode::Stop  // По умолчанию Stop
+        TradingMode::Stop // По умолчанию Stop
     }
 }
 
@@ -124,14 +130,13 @@ pub struct UiStateInner {
     pub up_book: SideOrderBook,
     pub down_book: SideOrderBook,
     pub is_running: bool,
-    pub trading_mode: TradingMode,  // Текущий режим работы
+    pub trading_mode: TradingMode, // Текущий режим работы
     pub price_to_beat: Option<f64>,
     pub current_price: Option<f64>,
-    pub our_up_bid_prices: HashSet<u32>,   // Цены в центах, где размещены наши UP ордера
+    pub our_up_bid_prices: HashSet<u32>, // Цены в центах, где размещены наши UP ордера
     pub our_down_bid_prices: HashSet<u32>, // Цены в центах, где размещены наши DOWN ордера
     // История торговли
     pub trade_history: VecDeque<TradeHistoryEntry>,
-    pub history_scroll_offset: usize,  // Для скролла истории
     // Открытые ордера
     pub open_orders: Vec<OpenOrder>,
 }
@@ -182,26 +187,21 @@ pub fn clear_open_orders(state: &UiState) {
     }
 }
 
-/// Прокрутка истории вверх
-pub fn scroll_history_up(state: &UiState) {
-    if let Ok(mut s) = state.lock() {
-        if s.history_scroll_offset < s.trade_history.len().saturating_sub(1) {
-            s.history_scroll_offset += 1;
-        }
-    }
-}
-
-/// Прокрутка истории вниз
-pub fn scroll_history_down(state: &UiState) {
-    if let Ok(mut s) = state.lock() {
-        s.history_scroll_offset = s.history_scroll_offset.saturating_sub(1);
-    }
-}
-
 /// Обновить информацию о событии
-pub fn set_event_info(state: &UiState, title: String, slug: String, end_date: DateTime<Utc>, total_seconds: i64) {
+pub fn set_event_info(
+    state: &UiState,
+    title: String,
+    slug: String,
+    end_date: DateTime<Utc>,
+    total_seconds: i64,
+) {
     if let Ok(mut s) = state.lock() {
-        s.event_info = EventInfo { title, slug, end_date, total_seconds };
+        s.event_info = EventInfo {
+            title,
+            slug,
+            end_date,
+            total_seconds,
+        };
         s.is_running = true;
     }
 }
@@ -218,30 +218,38 @@ pub fn get_trading_mode(state: &UiState) -> TradingMode {
     state.lock().map(|s| s.trading_mode).unwrap_or_default()
 }
 
-/// Переключить режим торговли (вызывается при нажатии 'r', 's')
-/// Возвращает true если нужно сбросить портфель (всегда false теперь)
+/// Переключить режим торговли
+/// Возвращает true если нужно отменить все ордера (CancelAllOrders в режиме Cancelling)
 pub fn switch_trading_mode(state: &UiState, action: KeyAction) -> bool {
     if let Ok(mut s) = state.lock() {
         match action {
-            KeyAction::ActivateRealRun => {
-                if s.trading_mode == TradingMode::RealRun {
-                    // Повторное нажатие r - переходим в Stop
-                    s.trading_mode = TradingMode::Stop;
-                    tracing::info!("⏸️ Режим: STOP (софт стоит афк)");
-                } else {
-                    s.trading_mode = TradingMode::RealRun;
-                    tracing::info!("🟢 Режим: REAL RUN (реальная торговля)");
+            KeyAction::ToggleTrading => {
+                match s.trading_mode {
+                    TradingMode::Stop => {
+                        s.trading_mode = TradingMode::RealRun;
+                        tracing::info!("🟢 Режим: REAL RUN (реальная торговля)");
+                    }
+                    TradingMode::RealRun => {
+                        s.trading_mode = TradingMode::Stop;
+                        tracing::info!("⏸️ Режим: STOP (софт стоит афк)");
+                    }
+                    TradingMode::Cancelling => {
+                        // Из Cancelling нельзя переключить Space-ом
+                    }
                 }
             }
-            KeyAction::ActivateStop => {
+            KeyAction::ActivateCancelling => {
+                s.trading_mode = TradingMode::Cancelling;
+                tracing::info!("🟡 Режим: CANCELLING (нажмите x для отмены ордеров)");
+            }
+            KeyAction::CancelAllOrders => {
+                // Отменить ордера и вернуться в Stop
                 s.trading_mode = TradingMode::Stop;
-                tracing::info!("⏸️ Режим: STOP (софт стоит афк)");
+                tracing::info!("⏸️ Режим: STOP (ордера отменяются...)");
+                return true; // Сигнал для отмены ордеров
             }
             _ => return false,
         }
-
-        // Портфель сохраняется при переключении между Stop и RealRun
-        return false;
     }
     false
 }
@@ -254,7 +262,11 @@ pub fn update_portfolio(state: &UiState, portfolio: Portfolio) {
 }
 
 /// Обновить стакан UP
-pub fn update_up_book(state: &UiState, bids: [OrderLevel; ORDER_BOOK_DEPTH], asks: [OrderLevel; ORDER_BOOK_DEPTH]) {
+pub fn update_up_book(
+    state: &UiState,
+    bids: [OrderLevel; ORDER_BOOK_DEPTH],
+    asks: [OrderLevel; ORDER_BOOK_DEPTH],
+) {
     if let Ok(mut s) = state.lock() {
         s.up_book.bids = bids;
         s.up_book.asks = asks;
@@ -262,7 +274,11 @@ pub fn update_up_book(state: &UiState, bids: [OrderLevel; ORDER_BOOK_DEPTH], ask
 }
 
 /// Обновить стакан DOWN
-pub fn update_down_book(state: &UiState, bids: [OrderLevel; ORDER_BOOK_DEPTH], asks: [OrderLevel; ORDER_BOOK_DEPTH]) {
+pub fn update_down_book(
+    state: &UiState,
+    bids: [OrderLevel; ORDER_BOOK_DEPTH],
+    asks: [OrderLevel; ORDER_BOOK_DEPTH],
+) {
     if let Ok(mut s) = state.lock() {
         s.down_book.bids = bids;
         s.down_book.asks = asks;
@@ -353,54 +369,93 @@ pub fn render(frame: &mut Frame, state: &UiState) {
     let area = frame.area();
 
     // Основной layout: левая часть и правая (стакан)
-    let [left_area, right_area] = Layout::horizontal([
-        Constraint::Percentage(60),
-        Constraint::Percentage(40),
-    ]).areas(area);
+    let [left_area, right_area] =
+        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
 
     // Левая часть: event info, portfolio, open orders, history
     let [event_area, portfolio_area, open_orders_area, history_area] = Layout::vertical([
-        Constraint::Length(8),    // Event info (включая URL)
-        Constraint::Length(9),    // Portfolio
-        Constraint::Length(14),   // Open Orders (увеличено для отображения большего числа ордеров)
-        Constraint::Fill(1),      // History
-    ]).areas(left_area);
+        Constraint::Length(8),  // Event info (включая URL)
+        Constraint::Length(9),  // Portfolio
+        Constraint::Length(14), // Open Orders (увеличено для отображения большего числа ордеров)
+        Constraint::Fill(1),    // History
+    ])
+    .areas(left_area);
 
-    render_event_info(frame, event_area, &state.event_info, state.trading_mode, state.price_to_beat, state.current_price);
+    render_event_info(
+        frame,
+        event_area,
+        &state.event_info,
+        state.trading_mode,
+        state.price_to_beat,
+        state.current_price,
+    );
 
     // Получаем best_bid для расчета PnL
     let up_best_bid = state.up_book.bids.first().map(|l| l.price).unwrap_or(0.0);
     let down_best_bid = state.down_book.bids.first().map(|l| l.price).unwrap_or(0.0);
-    render_portfolio(frame, portfolio_area, &state.portfolio, state.trading_mode, up_best_bid, down_best_bid);
+    render_portfolio(
+        frame,
+        portfolio_area,
+        &state.portfolio,
+        state.trading_mode,
+        up_best_bid,
+        down_best_bid,
+    );
     render_open_orders(frame, open_orders_area, &state.open_orders);
-    render_history(frame, history_area, &state.trade_history, state.history_scroll_offset);
+    render_history(frame, history_area, &state.trade_history);
 
     // Правая часть: стаканы UP и DOWN
-    let [up_book_area, down_book_area] = Layout::vertical([
-        Constraint::Percentage(50),
-        Constraint::Percentage(50),
-    ]).areas(right_area);
+    let [up_book_area, down_book_area] =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .areas(right_area);
 
-    render_order_book(frame, up_book_area, "UP", &state.up_book, Color::Green, &state.our_up_bid_prices);
-    render_order_book(frame, down_book_area, "DOWN", &state.down_book, Color::Red, &state.our_down_bid_prices);
+    render_order_book(
+        frame,
+        up_book_area,
+        "UP",
+        &state.up_book,
+        Color::Green,
+        &state.our_up_bid_prices,
+    );
+    render_order_book(
+        frame,
+        down_book_area,
+        "DOWN",
+        &state.down_book,
+        Color::Red,
+        &state.our_down_bid_prices,
+    );
 }
 
 /// Рендер информации о событии
-fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, trading_mode: TradingMode, price_to_beat: Option<f64>, current_price: Option<f64>) {
+fn render_event_info(
+    frame: &mut Frame,
+    area: Rect,
+    info: &EventInfo,
+    trading_mode: TradingMode,
+    price_to_beat: Option<f64>,
+    current_price: Option<f64>,
+) {
     // Заголовок с индикатором режима
     let title = match trading_mode {
         TradingMode::Stop => " MARKET [STOP] ",
         TradingMode::RealRun => " MARKET [REAL RUN] ",
+        TradingMode::Cancelling => " MARKET [CANCELLING] ",
     };
 
     let title_color = match trading_mode {
         TradingMode::Stop => Color::DarkGray,
         TradingMode::RealRun => Color::Green,
+        TradingMode::Cancelling => Color::Yellow,
     };
 
     let block = Block::default()
         .title(title)
-        .title_style(Style::default().fg(title_color).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(title_color)
+                .add_modifier(Modifier::BOLD),
+        )
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
 
@@ -411,25 +466,25 @@ fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, trading_mo
     let total = info.total_seconds;
 
     // Title, URL, time, progress, price labels, prices
-    let [title_area, url_area, time_area, progress_area, price_labels_area, prices_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ]).areas(inner);
+    let [title_area, url_area, time_area, progress_area, price_labels_area, prices_area] =
+        Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
 
     // Название события
-    let event_title = Paragraph::new(info.title.as_str())
-        .style(Style::default().fg(Color::White));
+    let event_title = Paragraph::new(info.title.as_str()).style(Style::default().fg(Color::White));
     frame.render_widget(event_title, title_area);
 
     // URL (Termius сделает его кликабельным)
     if !info.slug.is_empty() {
         let url = format!("https://polymarket.com/event/{}", info.slug);
-        let url_paragraph = Paragraph::new(url)
-            .style(Style::default().fg(Color::DarkGray));
+        let url_paragraph = Paragraph::new(url).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(url_paragraph, url_area);
     }
 
@@ -438,9 +493,11 @@ fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, trading_mo
     let remaining_secs = remaining % 60;
     let total_mins = total / 60;
     let total_secs = total % 60;
-    let time_text = format!("Time: {:02}:{:02} / {:02}:{:02}", remaining_mins, remaining_secs, total_mins, total_secs);
-    let time = Paragraph::new(time_text)
-        .style(Style::default().fg(Color::Yellow));
+    let time_text = format!(
+        "Time: {:02}:{:02} / {:02}:{:02}",
+        remaining_mins, remaining_secs, total_mins, total_secs
+    );
+    let time = Paragraph::new(time_text).style(Style::default().fg(Color::Yellow));
     frame.render_widget(time, time_area);
 
     // Progress bar
@@ -452,7 +509,10 @@ fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, trading_mo
 
     // Price labels - выровненные
     let price_labels = Line::from(vec![
-        Span::styled(format!("{:<13}", "Price to beat"), Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("{:<13}", "Price to beat"),
+            Style::default().fg(Color::Gray),
+        ),
         Span::raw(" | "),
         Span::styled("Current price", Style::default().fg(Color::Cyan)),
     ]);
@@ -466,13 +526,19 @@ fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, trading_mo
 
     // Формируем строку current price с индикатором
     let mut price_spans = vec![
-        Span::styled(format!("{:<13}", price_to_beat_str), Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("{:<13}", price_to_beat_str),
+            Style::default().fg(Color::Gray),
+        ),
         Span::raw(" | "),
     ];
 
     if let Some(curr) = current_price {
         let current_price_str = format!("${:.2}", curr);
-        price_spans.push(Span::styled(current_price_str, Style::default().fg(Color::Cyan)));
+        price_spans.push(Span::styled(
+            current_price_str,
+            Style::default().fg(Color::Cyan),
+        ));
 
         // Добавляем треугольник и разницу, если есть price_to_beat
         if let Some(ptb) = price_to_beat {
@@ -482,13 +548,19 @@ fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, trading_mo
                 price_spans.push(Span::raw(" "));
                 price_spans.push(Span::styled("▲", Style::default().fg(Color::Green)));
                 price_spans.push(Span::raw(" "));
-                price_spans.push(Span::styled(format!("+${:.2}", diff), Style::default().fg(Color::Green)));
+                price_spans.push(Span::styled(
+                    format!("+${:.2}", diff),
+                    Style::default().fg(Color::Green),
+                ));
             } else if diff < 0.0 {
                 // Цена ниже - красный треугольник вниз
                 price_spans.push(Span::raw(" "));
                 price_spans.push(Span::styled("▼", Style::default().fg(Color::Red)));
                 price_spans.push(Span::raw(" "));
-                price_spans.push(Span::styled(format!("-${:.2}", diff.abs()), Style::default().fg(Color::Red)));
+                price_spans.push(Span::styled(
+                    format!("-${:.2}", diff.abs()),
+                    Style::default().fg(Color::Red),
+                ));
             }
         }
     } else {
@@ -501,10 +573,21 @@ fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, trading_mo
 }
 
 /// Рендер портфолио
-fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio, trading_mode: TradingMode, up_best_bid: f64, down_best_bid: f64) {
+fn render_portfolio(
+    frame: &mut Frame,
+    area: Rect,
+    portfolio: &Portfolio,
+    trading_mode: TradingMode,
+    up_best_bid: f64,
+    down_best_bid: f64,
+) {
     let block = Block::default()
         .title(" PORTFOLIO ")
-        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
 
@@ -531,12 +614,13 @@ fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio, tradin
         } else if pnl < 0.0 {
             vec![
                 Span::styled(" ▼", Style::default().fg(Color::Red)),
-                Span::styled(format!(" -${:.2}", pnl.abs()), Style::default().fg(Color::Red)),
+                Span::styled(
+                    format!(" -${:.2}", pnl.abs()),
+                    Style::default().fg(Color::Red),
+                ),
             ]
         } else {
-            vec![
-                Span::styled(" $0.00", Style::default().fg(Color::Gray)),
-            ]
+            vec![Span::styled(" $0.00", Style::default().fg(Color::Gray))]
         }
     }
 
@@ -544,8 +628,14 @@ fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio, tradin
     // Формат: filled/placed shares @ avg  $spent  PnL
     let mut up_line = vec![
         Span::styled("  UP: ", Style::default().fg(Color::Green)),
-        Span::raw(format!("{:.1} shares @ avg {:.3}", portfolio.up_shares, up_avg)),
-        Span::styled(format!("  ${:.2}", portfolio.up_spent), Style::default().fg(Color::Gray)),
+        Span::raw(format!(
+            "{:.1} shares @ avg {:.3}",
+            portfolio.up_shares, up_avg
+        )),
+        Span::styled(
+            format!("  ${:.2}", portfolio.up_spent),
+            Style::default().fg(Color::Gray),
+        ),
     ];
     if portfolio.up_shares > 0.0 {
         up_line.extend(pnl_spans(up_pnl));
@@ -553,17 +643,24 @@ fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio, tradin
 
     let mut down_line = vec![
         Span::styled("DOWN: ", Style::default().fg(Color::Red)),
-        Span::raw(format!("{:.1} shares @ avg {:.3}", portfolio.down_shares, down_avg)),
-        Span::styled(format!("  ${:.2}", portfolio.down_spent), Style::default().fg(Color::Gray)),
+        Span::raw(format!(
+            "{:.1} shares @ avg {:.3}",
+            portfolio.down_shares, down_avg
+        )),
+        Span::styled(
+            format!("  ${:.2}", portfolio.down_spent),
+            Style::default().fg(Color::Gray),
+        ),
     ];
     if portfolio.down_shares > 0.0 {
         down_line.extend(pnl_spans(down_pnl));
     }
 
     // Total PnL строка
-    let mut total_pnl_line = vec![
-        Span::styled("Total PnL:", Style::default().fg(Color::White)),
-    ];
+    let mut total_pnl_line = vec![Span::styled(
+        "Total PnL:",
+        Style::default().fg(Color::White),
+    )];
     if portfolio.up_shares > 0.0 || portfolio.down_shares > 0.0 {
         total_pnl_line.extend(pnl_spans(total_pnl));
     } else {
@@ -574,17 +671,31 @@ fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio, tradin
         Line::from(up_line),
         Line::from(down_line),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Total Avg: ", Style::default().fg(Color::White)),
-            Span::styled(
-                format!("{:.3}", total_avg),
-                Style::default().fg(if total_avg < 0.97 { Color::Green } else if total_avg < 1.0 { Color::Yellow } else { Color::Red }),
-            ),
-            Span::raw("  |  "),
-            Span::styled("Spent: ", Style::default().fg(Color::White)),
-            Span::styled(format!("${:.2}", total_spent), Style::default().fg(Color::Cyan)),
-            Span::raw("  |  "),
-        ].into_iter().chain(total_pnl_line).collect::<Vec<_>>()),
+        Line::from(
+            vec![
+                Span::styled("Total Avg: ", Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:.3}", total_avg),
+                    Style::default().fg(if total_avg < 0.97 {
+                        Color::Green
+                    } else if total_avg < 1.0 {
+                        Color::Yellow
+                    } else {
+                        Color::Red
+                    }),
+                ),
+                Span::raw("  |  "),
+                Span::styled("Spent: ", Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("${:.2}", total_spent),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::raw("  |  "),
+            ]
+            .into_iter()
+            .chain(total_pnl_line)
+            .collect::<Vec<_>>(),
+        ),
         Line::from(vec![
             Span::styled("Maker: ", Style::default().fg(Color::Gray)),
             Span::raw(format!("{}", portfolio.maker_trades)),
@@ -600,11 +711,13 @@ fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio, tradin
                 match trading_mode {
                     TradingMode::Stop => "STOP",
                     TradingMode::RealRun => "REAL RUN",
+                    TradingMode::Cancelling => "CANCELLING (x to cancel)",
                 },
                 Style::default()
                     .fg(match trading_mode {
                         TradingMode::Stop => Color::DarkGray,
                         TradingMode::RealRun => Color::Green,
+                        TradingMode::Cancelling => Color::Yellow,
                     })
                     .add_modifier(Modifier::BOLD),
             ),
@@ -616,7 +729,14 @@ fn render_portfolio(frame: &mut Frame, area: Rect, portfolio: &Portfolio, tradin
 }
 
 /// Рендер стакана
-fn render_order_book(frame: &mut Frame, area: Rect, title: &str, book: &SideOrderBook, color: Color, our_bid_prices: &HashSet<u32>) {
+fn render_order_book(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    book: &SideOrderBook,
+    color: Color,
+    our_bid_prices: &HashSet<u32>,
+) {
     let block = Block::default()
         .title(format!(" {} ORDER BOOK ", title))
         .title_style(Style::default().fg(color).add_modifier(Modifier::BOLD))
@@ -631,15 +751,20 @@ fn render_order_book(frame: &mut Frame, area: Rect, title: &str, book: &SideOrde
         Constraint::Fill(1),
         Constraint::Length(1),
         Constraint::Fill(1),
-    ]).areas(inner);
+    ])
+    .areas(inner);
 
     // Заголовок asks
-    let header_style = Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD);
+    let header_style = Style::default()
+        .fg(Color::Gray)
+        .add_modifier(Modifier::BOLD);
 
     // Asks (красные) - вычисляем кумулятивный total от лучшего ask'а вверх
     // asks[0] = лучший (самый низкий) ask
     let mut cumulative_ask = 0.0;
-    let ask_data: Vec<(f64, f64, f64)> = book.asks.iter()
+    let ask_data: Vec<(f64, f64, f64)> = book
+        .asks
+        .iter()
         .filter(|l| l.size > 0.0)
         .map(|level| {
             cumulative_ask += level.price * level.size;
@@ -648,7 +773,8 @@ fn render_order_book(frame: &mut Frame, area: Rect, title: &str, book: &SideOrde
         .collect();
 
     // Показываем от высокой к низкой цене (перевернутый порядок для визуала)
-    let ask_rows: Vec<Row> = ask_data.iter()
+    let ask_rows: Vec<Row> = ask_data
+        .iter()
         .rev()
         .map(|(price, size, cum_total)| {
             let price_cents = (price * 100.0).round() as u32;
@@ -656,11 +782,10 @@ fn render_order_book(frame: &mut Frame, area: Rect, title: &str, book: &SideOrde
             let price_text = if has_our_order {
                 format!("{:.0}¢⏱", price * 100.0)
             } else {
-                format!("{:.0}¢ ", price * 100.0)  // Пробел для выравнивания
+                format!("{:.0}¢ ", price * 100.0) // Пробел для выравнивания
             };
             Row::new(vec![
-                Cell::from(price_text)
-                    .style(Style::default().fg(Color::Red)),
+                Cell::from(price_text).style(Style::default().fg(Color::Red)),
                 Cell::from(format!("{:.2}", size)),
                 Cell::from(format!("${:.2}", cum_total)),
             ])
@@ -669,12 +794,13 @@ fn render_order_book(frame: &mut Frame, area: Rect, title: &str, book: &SideOrde
 
     let ask_table = Table::new(
         ask_rows,
-        [Constraint::Percentage(30), Constraint::Percentage(35), Constraint::Percentage(35)],
+        [
+            Constraint::Percentage(30),
+            Constraint::Percentage(35),
+            Constraint::Percentage(35),
+        ],
     )
-    .header(
-        Row::new(vec!["Asks", "Shares", "Total"])
-            .style(header_style)
-    );
+    .header(Row::new(vec!["Asks", "Shares", "Total"]).style(header_style));
     frame.render_widget(ask_table, asks_area);
 
     // Разделитель со spread
@@ -690,7 +816,9 @@ fn render_order_book(frame: &mut Frame, area: Rect, title: &str, book: &SideOrde
     // Bids (зеленые) - вычисляем кумулятивный total от лучшего bid'а вниз
     // bids[0] = лучший (самый высокий) bid
     let mut cumulative_bid = 0.0;
-    let bid_rows: Vec<Row> = book.bids.iter()
+    let bid_rows: Vec<Row> = book
+        .bids
+        .iter()
         .filter(|l| l.size > 0.0)
         .map(|level| {
             cumulative_bid += level.price * level.size;
@@ -699,11 +827,10 @@ fn render_order_book(frame: &mut Frame, area: Rect, title: &str, book: &SideOrde
             let price_text = if has_our_order {
                 format!("{:.0}¢⏱", level.price * 100.0)
             } else {
-                format!("{:.0}¢ ", level.price * 100.0)  // Пробел для выравнивания
+                format!("{:.0}¢ ", level.price * 100.0) // Пробел для выравнивания
             };
             Row::new(vec![
-                Cell::from(price_text)
-                    .style(Style::default().fg(Color::Green)),
+                Cell::from(price_text).style(Style::default().fg(Color::Green)),
                 Cell::from(format!("{:.2}", level.size)),
                 Cell::from(format!("${:.2}", cumulative_bid)),
             ])
@@ -712,12 +839,13 @@ fn render_order_book(frame: &mut Frame, area: Rect, title: &str, book: &SideOrde
 
     let bid_table = Table::new(
         bid_rows,
-        [Constraint::Percentage(30), Constraint::Percentage(35), Constraint::Percentage(35)],
+        [
+            Constraint::Percentage(30),
+            Constraint::Percentage(35),
+            Constraint::Percentage(35),
+        ],
     )
-    .header(
-        Row::new(vec!["Bids", "Shares", "Total"])
-            .style(header_style)
-    );
+    .header(Row::new(vec!["Bids", "Shares", "Total"]).style(header_style));
     frame.render_widget(bid_table, bids_area);
 }
 
@@ -725,26 +853,40 @@ fn render_order_book(frame: &mut Frame, area: Rect, title: &str, book: &SideOrde
 fn render_open_orders(frame: &mut Frame, area: Rect, orders: &[OpenOrder]) {
     let block = Block::default()
         .title(" OPEN ORDERS ")
-        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let header_style = Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD);
+    let header_style = Style::default()
+        .fg(Color::Gray)
+        .add_modifier(Modifier::BOLD);
 
-    let rows: Vec<Row> = orders.iter()
+    let rows: Vec<Row> = orders
+        .iter()
         .map(|order| {
-            let outcome_color = if order.is_up { Color::Green } else { Color::Red };
+            let outcome_color = if order.is_up {
+                Color::Green
+            } else {
+                Color::Red
+            };
             let outcome_text = if order.is_up { "Up" } else { "Down" };
 
             Row::new(vec![
                 Cell::from("Buy").style(Style::default().fg(Color::White)),
                 Cell::from(outcome_text).style(Style::default().fg(outcome_color)),
-                Cell::from(format!("{:.0}¢", order.price * 100.0)).style(Style::default().fg(Color::White)),
-                Cell::from(format!("{:.0} / {:.0}", order.filled, order.total)).style(Style::default().fg(Color::White)),
-                Cell::from(format!("${:.2}", order.total_cost())).style(Style::default().fg(Color::White)),
+                Cell::from(format!("{:.0}¢", order.price * 100.0))
+                    .style(Style::default().fg(Color::White)),
+                Cell::from(format!("{:.0} / {:.0}", order.filled, order.total))
+                    .style(Style::default().fg(Color::White)),
+                Cell::from(format!("${:.2}", order.total_cost()))
+                    .style(Style::default().fg(Color::White)),
             ])
         })
         .collect();
@@ -752,17 +894,14 @@ fn render_open_orders(frame: &mut Frame, area: Rect, orders: &[OpenOrder]) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(6),   // Side
-            Constraint::Length(8),   // Outcome
-            Constraint::Length(8),   // Price
-            Constraint::Length(10),  // Filled
-            Constraint::Length(8),   // Total
+            Constraint::Length(6),  // Side
+            Constraint::Length(8),  // Outcome
+            Constraint::Length(8),  // Price
+            Constraint::Length(10), // Filled
+            Constraint::Length(8),  // Total
         ],
     )
-    .header(
-        Row::new(vec!["Side", "Outcome", "Price", "Filled", "Total"])
-            .style(header_style)
-    );
+    .header(Row::new(vec!["Side", "Outcome", "Price", "Filled", "Total"]).style(header_style));
     frame.render_widget(table, inner);
 }
 
@@ -783,10 +922,14 @@ fn format_time_ago(timestamp: DateTime<Utc>) -> String {
 }
 
 /// Рендер истории торговли
-fn render_history(frame: &mut Frame, area: Rect, history: &VecDeque<TradeHistoryEntry>, scroll_offset: usize) {
+fn render_history(frame: &mut Frame, area: Rect, history: &VecDeque<TradeHistoryEntry>) {
     let block = Block::default()
         .title(" HISTORY ")
-        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
 
@@ -796,20 +939,24 @@ fn render_history(frame: &mut Frame, area: Rect, history: &VecDeque<TradeHistory
     let height = inner.height as usize;
 
     if history.is_empty() {
-        let empty_msg = Paragraph::new("No trades yet...")
-            .style(Style::default().fg(Color::DarkGray));
+        let empty_msg =
+            Paragraph::new("No trades yet...").style(Style::default().fg(Color::DarkGray));
         frame.render_widget(empty_msg, inner);
         return;
     }
 
-    // Применяем скролл и берем записи для отображения
-    let visible_entries: Vec<Line> = history.iter()
-        .skip(scroll_offset)
+    // Показываем записи с начала (новые сверху)
+    let visible_entries: Vec<Line> = history
+        .iter()
         .take(height)
         .enumerate()
         .map(|(idx, entry)| {
-            let number = scroll_offset + idx + 1;
-            let outcome_color = if entry.is_up { Color::Green } else { Color::Red };
+            let number = idx + 1;
+            let outcome_color = if entry.is_up {
+                Color::Green
+            } else {
+                Color::Red
+            };
             let outcome_text = if entry.is_up { "Up" } else { "Down" };
             let trade_type_str = match entry.trade_type {
                 TradeType::Maker => "Maker",
@@ -819,15 +966,36 @@ fn render_history(frame: &mut Frame, area: Rect, history: &VecDeque<TradeHistory
 
             // Формат: "1. Bought 5.00 Up at 36¢($1.8)      Maker      14m 00s"
             Line::from(vec![
-                Span::styled(format!("{:>2}. ", number), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:>2}. ", number),
+                    Style::default().fg(Color::White),
+                ),
                 Span::styled("Bought ", Style::default().fg(Color::White)),
-                Span::styled(format!("{:.2} ", entry.shares), Style::default().fg(outcome_color)),
-                Span::styled(format!("{} ", outcome_text), Style::default().fg(outcome_color)),
+                Span::styled(
+                    format!("{:.2} ", entry.shares),
+                    Style::default().fg(outcome_color),
+                ),
+                Span::styled(
+                    format!("{} ", outcome_text),
+                    Style::default().fg(outcome_color),
+                ),
                 Span::styled("at ", Style::default().fg(Color::White)),
-                Span::styled(format!("{:.0}¢", entry.price * 100.0), Style::default().fg(Color::White)),
-                Span::styled(format!("(${:.2})", entry.cost), Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("      {:<6}", trade_type_str), Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("      {}", time_ago), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{:.0}¢", entry.price * 100.0),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    format!("(${:.2})", entry.cost),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("      {:<6}", trade_type_str),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("      {}", time_ago),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ])
         })
         .collect();
@@ -840,24 +1008,27 @@ fn render_history(frame: &mut Frame, area: Rect, history: &VecDeque<TradeHistory
 #[derive(Clone, Copy)]
 pub enum KeyAction {
     None,
-    Exit,
-    ActivateRealRun,    // 'r' - включить RealRun или Stop если уже включен
-    ActivateStop,       // 's' - включить Stop
-    ScrollHistoryUp,
-    ScrollHistoryDown,
+    Exit,               // 'q' - выход
+    ToggleTrading,      // Space - переключить Stop/RealRun
+    ActivateCancelling, // 'c' - войти в режим Cancelling
+    CancelAllOrders,    // 'x' - отменить все ордера (только в Cancelling)
 }
 
-/// Проверка нажатия клавиш: 'q' для выхода, 'r'/'s' для режимов, 'c'/'x' для скролла истории
-pub fn check_key_action() -> KeyAction {
+/// Проверка нажатия клавиш: 'q' для выхода, Space для режимов, 'c'/'x' для отмены ордеров
+pub fn check_key_action(current_mode: TradingMode) -> KeyAction {
     if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
         if let Ok(Event::Key(key)) = event::read() {
             if key.kind == KeyEventKind::Press {
                 match key.code {
                     KeyCode::Char('q') => return KeyAction::Exit,
-                    KeyCode::Char('r') => return KeyAction::ActivateRealRun,
-                    KeyCode::Char('s') => return KeyAction::ActivateStop,
-                    KeyCode::Char('c') => return KeyAction::ScrollHistoryUp,
-                    KeyCode::Char('x') => return KeyAction::ScrollHistoryDown,
+                    KeyCode::Char(' ') => return KeyAction::ToggleTrading,
+                    KeyCode::Char('c') => return KeyAction::ActivateCancelling,
+                    KeyCode::Char('x') => {
+                        // x работает только в режиме Cancelling
+                        if current_mode == TradingMode::Cancelling {
+                            return KeyAction::CancelAllOrders;
+                        }
+                    }
                     _ => {}
                 }
             }

@@ -203,13 +203,28 @@ impl RealEngine {
         };
 
         match trading_mode {
-            ui::TradingMode::Stop => {
-                // Stop режим: ничего не делаем, только обновляем prev_prices
+            ui::TradingMode::Stop | ui::TradingMode::Cancelling => {
+                // Stop/Cancelling режим: ничего не делаем, только обновляем prev_prices
                 *self.prev_prices.lock().unwrap() = Some(prices);
                 return;
             }
             ui::TradingMode::RealRun => {
                 // RealRun режим: реальная торговля
+            }
+        }
+
+        // Проверяем, прошло ли достаточно времени с начала события
+        {
+            let state = self.ui_state.lock().unwrap();
+            let elapsed = state.event_info.elapsed_seconds();
+            let min_elapsed = self.config.seconds_before_start;
+            
+            if elapsed < min_elapsed {
+                // Слишком рано для торговли, обновляем prev_prices и выходим
+                drop(state); // Освобождаем лок перед обновлением prev_prices
+                *self.prev_prices.lock().unwrap() = Some(prices);
+                info!("⏳ Ждем начала торговли: {} / {} сек", elapsed, min_elapsed);
+                return;
             }
         }
 

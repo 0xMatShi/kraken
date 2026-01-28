@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::fs;
 
-
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub trading: TradingConfig,
@@ -16,13 +15,13 @@ pub struct TradingConfig {
     /// Размер одного ордера (количество акций)
     pub size: f64,
 
-    /// Максимальное количество одновременно активных лимиток
-    #[serde(default = "default_max_active_orders")]
-    pub max_active_orders: usize,
+    /// Через сколько секунд после начала события можно начинать торговать
+    #[serde(default = "default_seconds_before_start")]
+    pub seconds_before_start: i64,
 }
 
-fn default_max_active_orders() -> usize {
-    3
+fn default_seconds_before_start() -> i64 {
+    20
 }
 
 impl Config {

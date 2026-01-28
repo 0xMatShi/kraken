@@ -31,10 +31,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Загружаем торговую конфигурацию
     let app_config = Config::load()?;
-    tracing::info!("Конфигурация загружена: MAX_BALANCE={:.1}, SIZE={:.1}, MAX_ACTIVE_ORDERS={}",
+    tracing::info!("Конфигурация загружена: MAX_BALANCE={:.1}, SIZE={:.1}, SECONDS_BEFORE_START={}",
         app_config.trading.max_balance,
         app_config.trading.size,
-        app_config.trading.max_active_orders
+        app_config.trading.seconds_before_start
     );
 
     // Загружаем переменные окружения
@@ -170,25 +170,33 @@ async fn main() -> anyhow::Result<()> {
                 };
 
                 // UI loop
+                let engine_for_ui = engine.clone();
                 let ui_task = async {
                     loop {
+                        // Получаем текущий режим для check_key_action
+                        let current_mode = ui::get_trading_mode(&ui_state_clone);
+                        
                         // Проверка нажатых клавиш
-                        let key_action = ui::check_key_action();
+                        let key_action = ui::check_key_action(current_mode);
                         match key_action {
                             ui::KeyAction::Exit => {
                                 user_exit_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                                 ui::stop_ui(&ui_state_clone);
                                 break;
                             }
-                            ui::KeyAction::ActivateRealRun | ui::KeyAction::ActivateStop => {
+                            ui::KeyAction::ToggleTrading | ui::KeyAction::ActivateCancelling => {
                                 // Переключаем режим
                                 ui::switch_trading_mode(&ui_state_clone, key_action);
                             }
-                            ui::KeyAction::ScrollHistoryUp => {
-                                ui::scroll_history_up(&ui_state_clone);
-                            }
-                            ui::KeyAction::ScrollHistoryDown => {
-                                ui::scroll_history_down(&ui_state_clone);
+                            ui::KeyAction::CancelAllOrders => {
+                                // Отменяем все ордера и переключаем режим
+                                let should_cancel = ui::switch_trading_mode(&ui_state_clone, key_action);
+                                if should_cancel {
+                                    let engine_cancel = engine_for_ui.clone();
+                                    tokio::spawn(async move {
+                                        engine_cancel.cancel_all_orders().await;
+                                    });
+                                }
                             }
                             ui::KeyAction::None => {}
                         }
