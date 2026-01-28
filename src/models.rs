@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-
+use std::collections::HashSet;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Market {
@@ -16,7 +16,7 @@ pub struct PolymarketEvent {
     pub title: String,
     pub end_date: String,
     pub active: bool,
-    pub markets: serde_json::Value, 
+    pub markets: serde_json::Value,
 }
 
 #[allow(dead_code)]
@@ -63,7 +63,19 @@ pub struct SubscribeMessage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Side { Up, Down }
+pub enum Side {
+    Up,
+    Down,
+}
+
+impl Side {
+    pub fn opposite(&self) -> Side {
+        match self {
+            Side::Up => Side::Down,
+            Side::Down => Side::Up,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Coin {
@@ -103,6 +115,87 @@ impl Coin {
     }
 }
 
+/// Тренд рынка: какая сторона усиливается
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Trend {
+    /// Тренд сильной стороны: bb слабой стороны уменьшился
+    Strong,
+    /// Тренд слабой стороны: bb сильной стороны уменьшился  
+    Weak,
+    /// Нет тренда (спред нормальный или цены не изменились)
+    None,
+}
+
+/// Состояние первой ноги торговой пары
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct FirstLeg {
+    pub order_id: String,
+    pub price: f64,  // Цена размещения (в центах, например 0.65)
+    pub size: f64,   // Размер ордера
+    pub side: Side,  // На какой стороне размещена (Up или Down)
+    pub filled: f64, // Сколько исполнено
+}
+
+/// Состояние второй ноги торговой пары
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct SecondLeg {
+    pub order_id: String,
+    pub price: f64,           // Цена размещения = 0.99 - first_leg_price
+    pub size: f64,            // Размер = размер первой ноги
+    pub side: Side,           // Противоположная сторона от первой ноги
+    pub filled: f64,          // Сколько исполнено
+    pub first_leg_price: f64, // Цена первой ноги (для блокировки)
+}
+
+/// Полная торговая пара (первая нога + вторая нога)
+#[derive(Debug, Clone)]
+pub struct TradePair {
+    pub first_leg: FirstLeg,
+    pub second_leg: Option<SecondLeg>, // None пока первая нога не исполнена
+}
+
+/// Система блокировки цен
+/// Хранит цены (в центах как u32) на которых размещены первые ноги
+/// Цена освобождается только когда вторая нога полностью исполнена
+#[derive(Debug, Default)]
+pub struct PriceLock {
+    /// Заблокированные цены на UP стороне
+    pub up_locked: HashSet<u32>,
+    /// Заблокированные цены на DOWN стороне  
+    pub down_locked: HashSet<u32>,
+}
+
+impl PriceLock {
+    /// Проверяет, заблокирована ли цена на данной стороне
+    pub fn is_locked(&self, side: Side, price: f64) -> bool {
+        let price_cents = (price * 100.0).round() as u32;
+        match side {
+            Side::Up => self.up_locked.contains(&price_cents),
+            Side::Down => self.down_locked.contains(&price_cents),
+        }
+    }
+
+    /// Блокирует цену
+    pub fn lock(&mut self, side: Side, price: f64) {
+        let price_cents = (price * 100.0).round() as u32;
+        match side {
+            Side::Up => self.up_locked.insert(price_cents),
+            Side::Down => self.down_locked.insert(price_cents),
+        };
+    }
+
+    /// Разблокирует цену
+    pub fn unlock(&mut self, side: Side, price: f64) {
+        let price_cents = (price * 100.0).round() as u32;
+        match side {
+            Side::Up => self.up_locked.remove(&price_cents),
+            Side::Down => self.down_locked.remove(&price_cents),
+        };
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Portfolio {
     pub up_shares: f64,
@@ -112,15 +205,29 @@ pub struct Portfolio {
     pub maker_trades: u32,
     pub taker_trades: u32,
     // Отслеживание выставленных лимиток
-    pub up_total_placed: f64,    // Всего shares выставлено в UP лимитках
-    pub down_total_placed: f64,  // Всего shares выставлено в DOWN лимитках
+    pub up_total_placed: f64,   // Всего shares выставлено в UP лимитках
+    pub down_total_placed: f64, // Всего shares выставлено в DOWN лимитках
 }
 
 #[allow(dead_code)]
 impl Portfolio {
-    pub fn up_avg(&self) -> f64 { if self.up_shares > 0.0 { self.up_spent / self.up_shares } else { 0.0 } }
-    pub fn down_avg(&self) -> f64 { if self.down_shares > 0.0 { self.down_spent / self.down_shares } else { 0.0 } }
-    pub fn total_avg(&self) -> f64 { self.up_avg() + self.down_avg() }
+    pub fn up_avg(&self) -> f64 {
+        if self.up_shares > 0.0 {
+            self.up_spent / self.up_shares
+        } else {
+            0.0
+        }
+    }
+    pub fn down_avg(&self) -> f64 {
+        if self.down_shares > 0.0 {
+            self.down_spent / self.down_shares
+        } else {
+            0.0
+        }
+    }
+    pub fn total_avg(&self) -> f64 {
+        self.up_avg() + self.down_avg()
+    }
 
     /// Возвращает абсолютный перекос портфеля (разницу между UP и DOWN акциями)
     pub fn skew(&self) -> f64 {
@@ -168,14 +275,45 @@ impl Portfolio {
 pub struct MarketPrices {
     pub up_bid: f64,
     pub up_bid_size: f64,
-    pub up_bid_2: f64,          // Второй уровень UP bid
-    pub up_bid_size_2: f64,     // Размер второго уровня UP bid
+    pub up_bid_2: f64,      // Второй уровень UP bid
+    pub up_bid_size_2: f64, // Размер второго уровня UP bid
     pub up_ask: f64,
     pub up_ask_size: f64,
     pub down_bid: f64,
     pub down_bid_size: f64,
-    pub down_bid_2: f64,        // Второй уровень DOWN bid
-    pub down_bid_size_2: f64,   // Размер второго уровня DOWN bid
+    pub down_bid_2: f64,      // Второй уровень DOWN bid
+    pub down_bid_size_2: f64, // Размер второго уровня DOWN bid
     pub down_ask: f64,
     pub down_ask_size: f64,
+}
+
+impl MarketPrices {
+    /// Возвращает спред в центах (нормальный спред = 1)
+    pub fn spread_cents(&self) -> i32 {
+        let sum = self.up_bid + self.down_bid;
+        // 0.99 = 1 цент спред, 0.98 = 2 цента спред, и т.д.
+        ((1.0 - sum) * 100.0).round() as i32
+    }
+
+    /// Определяет сильную сторону (bb > 0.5)
+    pub fn strong_side(&self) -> Side {
+        if self.up_bid > self.down_bid {
+            Side::Up
+        } else {
+            Side::Down
+        }
+    }
+
+    /// Определяет слабую сторону (bb < 0.5)
+    pub fn weak_side(&self) -> Side {
+        self.strong_side().opposite()
+    }
+
+    /// Получить bb для указанной стороны
+    pub fn bid_for_side(&self, side: Side) -> f64 {
+        match side {
+            Side::Up => self.up_bid,
+            Side::Down => self.down_bid,
+        }
+    }
 }

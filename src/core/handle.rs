@@ -1,49 +1,14 @@
+use super::strat::RealEngine;
+use crate::ui::{self, OpenOrder, TradeHistoryEntry, TradeType};
+use chrono::Utc;
+use polymarket_client_sdk::clob::types::Side as PolySide;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
-use polymarket_client_sdk::clob::types::Side as PolySide;
-use chrono::Utc;
 use uuid::Uuid;
-use crate::ui::{self, TradeHistoryEntry, TradeType, OpenOrder};
-use super::strat::RealEngine;
-
-/// Пытается найти и удалить ордер из pending списков с таймаутом
-/// Используется для taker fills, когда WebSocket может прийти раньше API ответа
-fn try_match_and_remove_pending(engine: &Arc<RealEngine>, taker_order_id: &str, is_up: bool) -> bool {
-    let start = Instant::now();
-    let timeout = Duration::from_millis(5000); // 2 секунды таймаут
-
-    loop {
-        // Проверяем, есть ли order_id в pending списках
-        let found = {
-            if is_up {
-                let pending = engine.pending_up_orders.lock().unwrap();
-                pending.iter().any(|(id, _)| id == taker_order_id)
-            } else {
-                let pending = engine.pending_down_orders.lock().unwrap();
-                pending.iter().any(|(id, _)| id == taker_order_id)
-            }
-        };
-
-        if found {
-            // Нашли! Удаляем из pending
-            engine.remove_pending_order(taker_order_id, is_up);
-            info!("🎯 Taker fill: найден и удален из pending: {}", taker_order_id);
-            return true;
-        }
-
-        // Таймаут истек
-        if start.elapsed() > timeout {
-            info!("⏱️ Taker fill: таймаут поиска order_id {}", taker_order_id);
-            return false;
-        }
-
-        // Ждем 10ms перед следующей проверкой
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
 
 /// Обработка TAKER сделок (market orders FAK)
+/// Это происходит когда наш лимитный ордер сразу исполняется как taker
 pub fn handle_ws_trade(
     engine: &Arc<RealEngine>,
     trade_id: String,
@@ -55,24 +20,16 @@ pub fn handle_ws_trade(
     taker_order_id: Option<String>,
 ) {
     let owner_matches = trade_owner.map_or(false, |owner| owner == engine.our_api_key);
-    if !owner_matches { return; }
+    if !owner_matches {
+        return;
+    }
 
     {
         let mut seen = engine.seen_trades.lock().unwrap();
-        if seen.contains(&trade_id) { return; }
+        if seen.contains(&trade_id) {
+            return;
+        }
         seen.insert(trade_id.clone());
-    }
-
-    // Если есть taker_order_id, пытаемся удалить из pending (мгновенное исполнение)
-    let is_up = asset_id == &*engine.up_token;
-    if let Some(ref order_id) = taker_order_id {
-        let engine_clone = Arc::clone(engine);
-        let order_id_clone = order_id.clone();
-
-        // Запускаем поиск в фоновом потоке, чтобы не блокировать WebSocket
-        tokio::spawn(async move {
-            try_match_and_remove_pending(&engine_clone, &order_id_clone, is_up);
-        });
     }
 
     let mut port = engine.portfolio.lock().unwrap();
@@ -85,7 +42,6 @@ pub fn handle_ws_trade(
         if is_buy {
             port.up_shares += size;
             port.up_spent += price * size;
-            port.up_total_placed += size;
         } else {
             port.up_shares -= size;
             port.up_spent -= price * size;
@@ -94,7 +50,6 @@ pub fn handle_ws_trade(
         if is_buy {
             port.down_shares += size;
             port.down_spent += price * size;
-            port.down_total_placed += size;
         } else {
             port.down_shares -= size;
             port.down_spent -= price * size;
@@ -104,10 +59,20 @@ pub fn handle_ws_trade(
     let side_str = if is_buy { "BUY" } else { "SELL" };
     let token_str = if is_up { "UP" } else { "DOWN" };
 
-    info!("✅ TAKER FILLED: {} {} @ {:.3} | Size: {:.2} | Cost: ${:.2}",
-        side_str, token_str, price, size, price * size);
-    info!("💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
-        port.up_shares, port.down_shares, port.up_shares - port.down_shares);
+    info!(
+        "✅ TAKER FILLED: {} {} @ {:.3} | Size: {:.2} | Cost: ${:.2}",
+        side_str,
+        token_str,
+        price,
+        size,
+        price * size
+    );
+    info!(
+        "💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
+        port.up_shares,
+        port.down_shares,
+        port.up_shares - port.down_shares
+    );
 
     drop(port);
 
@@ -124,6 +89,62 @@ pub fn handle_ws_trade(
     }
 
     engine.update_ui_portfolio();
+
+    // Если есть taker_order_id - запускаем асинхронный поиск и обработку ноги
+    if let Some(order_id) = taker_order_id {
+        let engine_clone = Arc::clone(engine);
+        tokio::spawn(async move {
+            match_and_process_taker_leg(&engine_clone, &order_id);
+        });
+    }
+}
+
+/// Пытается найти и обработать ногу для taker ордера
+/// 
+/// WebSocket событие о taker fill может прийти раньше, чем API ответ с order_id.
+/// Поэтому в бесконечном цикле (с таймаутом) проверяем, зарегистрирована ли нога
+/// с данным order_id, и если да - вызываем соответствующий обработчик.
+fn match_and_process_taker_leg(engine: &Arc<RealEngine>, taker_order_id: &str) {
+    let start = Instant::now();
+    let timeout = Duration::from_secs(10); // 5 секунд таймаут
+    let poll_interval = Duration::from_millis(5);
+
+    info!("🔍 Начинаем поиск ноги для taker order_id: {}", taker_order_id);
+
+    loop {
+        // Проверяем таймаут
+        if start.elapsed() > timeout {
+            warn!("⏱️ Таймаут поиска ноги для taker order_id: {}", taker_order_id);
+            return;
+        }
+
+        // Проверяем, является ли это первой ногой
+        let is_first_leg = {
+            let pairs = engine.trade_pairs.lock().unwrap();
+            pairs.contains_key(taker_order_id)
+        };
+
+        if is_first_leg {
+            info!("🎯 Taker fill: найдена ПЕРВАЯ нога {}", taker_order_id);
+            engine.on_first_leg_filled(taker_order_id);
+            return;
+        }
+
+        // Проверяем, является ли это второй ногой
+        let is_second_leg = {
+            let mapping = engine.second_leg_to_first.lock().unwrap();
+            mapping.contains_key(taker_order_id)
+        };
+
+        if is_second_leg {
+            info!("🎯 Taker fill: найдена ВТОРАЯ нога {}", taker_order_id);
+            engine.on_second_leg_filled(taker_order_id);
+            return;
+        }
+
+        // Ещё не зарегистрирована - ждём
+        std::thread::sleep(poll_interval);
+    }
 }
 
 /// Обработка событий MAKER ордеров (PLACEMENT, UPDATE, CANCELLATION)
@@ -135,13 +156,15 @@ pub fn handle_ws_order(
     side: PolySide,
     asset_id: &str,
     size_matched: Option<f64>,
-    original_size: Option<f64>
+    original_size: Option<f64>,
 ) {
     // Дедупликация для PLACEMENT и CANCELLATION
     if msg_type.as_deref() != Some("UPDATE") {
         let order_key = format!("{}:{:?}", order_id, msg_type);
         let mut seen = engine.seen_orders.lock().unwrap();
-        if seen.contains(&order_key) { return; }
+        if seen.contains(&order_key) {
+            return;
+        }
         seen.insert(order_key);
     }
 
@@ -151,12 +174,15 @@ pub fn handle_ws_order(
         _ => "UNKNOWN",
     };
 
-    let token_str = if asset_id == &*engine.up_token { "UP" } else { "DOWN" };
+    let token_str = if asset_id == &*engine.up_token {
+        "UP"
+    } else {
+        "DOWN"
+    };
     let is_up = asset_id == &*engine.up_token;
 
     match msg_type.as_deref() {
         Some("PLACEMENT") => {
-
             if let Some(size) = original_size {
                 let mut orders_info = engine.active_orders_info.lock().unwrap();
                 orders_info.insert(order_id.clone(), (price, is_up, size, 0.0));
@@ -173,28 +199,21 @@ pub fn handle_ws_order(
 
             ui::add_our_bid_price(&engine.ui_state, is_up, price);
 
-            if let Some(size) = original_size {
-                let mut port = engine.portfolio.lock().unwrap();
-                if is_up {
-                    port.up_total_placed += size;
-                } else {
-                    port.down_total_placed += size;
-                }
-                drop(port);
-                engine.update_ui_portfolio();
-            }
-
             info!("📝 MAKER PLACED: {} {} @ {:.3}", side_str, token_str, price);
         }
         Some("UPDATE") => {
             if let Some(size) = size_matched {
                 let mut orders_info = engine.active_orders_info.lock().unwrap();
 
-                if let Some((_order_price, _is_up, _original_size, accumulated_filled)) = orders_info.get_mut(&order_id) {
+                if let Some((_order_price, _is_up, _original_size, accumulated_filled)) =
+                    orders_info.get_mut(&order_id)
+                {
                     let previous_filled = *accumulated_filled;
                     *accumulated_filled += size;
 
-                    if let Some((order_price, is_up, original_size, accumulated_filled)) = orders_info.get_mut(&order_id) {
+                    if let Some((order_price, is_up, original_size, accumulated_filled)) =
+                        orders_info.get_mut(&order_id)
+                    {
                         let size_for_portfolio = if *accumulated_filled > *original_size {
                             (*original_size - previous_filled).max(0.0)
                         } else {
@@ -206,12 +225,20 @@ pub fn handle_ws_order(
                         let current_original_size = *original_size;
                         let current_order_price = *order_price;
 
-                        info!("📊 MAKER PARTIAL FILL: {} {} @ {:.3} | Filled: {:.2}/{:.2}",
-                            side_str, token_str, price, *accumulated_filled, *original_size);
+                        info!(
+                            "📊 MAKER PARTIAL FILL: {} {} @ {:.3} | Filled: {:.2}/{:.2}",
+                            side_str, token_str, price, *accumulated_filled, *original_size
+                        );
 
-                        ui::update_open_order_filled(&engine.ui_state, &order_id, current_accumulated);
+                        ui::update_open_order_filled(
+                            &engine.ui_state,
+                            &order_id,
+                            current_accumulated,
+                        );
 
-                        let is_fully_filled = (current_accumulated - current_original_size).abs() < 0.01 || current_accumulated >= current_original_size;
+                        let is_fully_filled = (current_accumulated - current_original_size).abs()
+                            < 0.01
+                            || current_accumulated >= current_original_size;
 
                         if is_fully_filled {
                             let final_price = current_order_price;
@@ -222,10 +249,29 @@ pub fn handle_ws_order(
 
                             ui::remove_our_bid_price(&engine.ui_state, final_is_up, final_price);
                             ui::remove_open_order(&engine.ui_state, &order_id);
-                            info!("🔔 ОРДЕР ПОЛНОСТЬЮ ИСПОЛНЕН: {} {} @ {:.3}", side_str, token_str, price);
+                            info!(
+                                "🔔 ОРДЕР ПОЛНОСТЬЮ ИСПОЛНЕН: {} {} @ {:.3}",
+                                side_str, token_str, price
+                            );
 
-                            // Обновляем active_orders и виртуальный лимит
-                            handle_order_fully_filled(engine, &order_id, final_is_up, current_original_size);
+                            // Проверяем, является ли это первой ногой
+                            let is_first_leg =
+                                engine.trade_pairs.lock().unwrap().contains_key(&order_id);
+
+                            // Проверяем, является ли это второй ногой
+                            let is_second_leg = engine
+                                .second_leg_to_first
+                                .lock()
+                                .unwrap()
+                                .contains_key(&order_id);
+
+                            if is_first_leg {
+                                // Первая нога исполнена - размещаем вторую
+                                engine.on_first_leg_filled(&order_id);
+                            } else if is_second_leg {
+                                // Вторая нога исполнена - освобождаем цену
+                                engine.on_second_leg_filled(&order_id);
+                            }
                         } else {
                             drop(orders_info);
                         }
@@ -254,10 +300,20 @@ pub fn handle_ws_order(
                                 }
                             }
 
-                            info!("✅ MAKER FILLED: {} {} @ {:.3} | Size: {:.2} | Cost: ${:.2}",
-                                side_str, token_str, price, size_for_portfolio, price * size_for_portfolio);
-                            info!("💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
-                                port.up_shares, port.down_shares, port.up_shares - port.down_shares);
+                            info!(
+                                "✅ MAKER FILLED: {} {} @ {:.3} | Size: {:.2} | Cost: ${:.2}",
+                                side_str,
+                                token_str,
+                                price,
+                                size_for_portfolio,
+                                price * size_for_portfolio
+                            );
+                            info!(
+                                "💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
+                                port.up_shares,
+                                port.down_shares,
+                                port.up_shares - port.down_shares
+                            );
 
                             drop(port);
 
@@ -282,48 +338,30 @@ pub fn handle_ws_order(
             }
         }
         Some("CANCELLATION") => {
-
             let order_info = {
                 let mut orders_info = engine.active_orders_info.lock().unwrap();
                 orders_info.remove(&order_id)
             };
 
-            if let Some((order_price, is_up, original_size, accumulated)) = order_info {
+            if let Some((order_price, is_up, _original_size, _accumulated)) = order_info {
                 ui::remove_our_bid_price(&engine.ui_state, is_up, order_price);
-
-                // Освобождаем виртуальный лимит для неисполненной части
-                let unfilled = original_size - accumulated;
-                handle_order_cancelled(engine, &order_id, unfilled);
             }
 
             ui::remove_open_order(&engine.ui_state, &order_id);
 
-            warn!("❌ MAKER CANCELLED: {} {} @ {:.3}", side_str, token_str, price);
+            // Проверяем, является ли это первой ногой
+            let is_first_leg = engine.trade_pairs.lock().unwrap().contains_key(&order_id);
+
+            if is_first_leg {
+                // Первая нога отменена - освобождаем цену
+                engine.on_first_leg_cancelled(&order_id);
+            }
+
+            warn!(
+                "❌ MAKER CANCELLED: {} {} @ {:.3}",
+                side_str, token_str, price
+            );
         }
         _ => {}
-    }
-}
-
-/// Обработка полного заполнения ордера
-fn handle_order_fully_filled(engine: &Arc<RealEngine>, order_id: &str, is_up: bool, _size: f64) {
-    info!("✅ Ордер полностью исполнен: {}", if is_up { "UP" } else { "DOWN" });
-
-    // Удаляем из списка неисполненных (если там есть)
-    engine.remove_pending_order(order_id, is_up);
-}
-
-/// Обработка отмены ордера
-fn handle_order_cancelled(engine: &Arc<RealEngine>, order_id: &str, _unfilled_size: f64) {
-    info!("⚠️ Ордер отменен: {}", order_id);
-
-    // Получаем информацию о стороне из active_orders_info
-    let is_up = {
-        let orders_info = engine.active_orders_info.lock().unwrap();
-        orders_info.get(order_id).map(|(_, is_up, _, _)| *is_up)
-    };
-
-    // Удаляем из списка неисполненных (если там есть)
-    if let Some(is_up) = is_up {
-        engine.remove_pending_order(order_id, is_up);
     }
 }

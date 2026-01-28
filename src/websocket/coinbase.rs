@@ -3,6 +3,7 @@ use futures_util::{StreamExt, SinkExt};
 use serde_json::json;
 use crate::models::Coin;
 use crate::ui::UiState;
+use tracing::{info, warn};
 
 const COINBASE_WS_URL: &str = "wss://ws-feed.exchange.coinbase.com";
 
@@ -17,8 +18,23 @@ impl CoinbaseStream {
     }
 
     pub async fn start_stream(self) -> anyhow::Result<()> {
+        loop {
+            match self.run_stream_once().await {
+                Ok(_) => {
+                    info!("💰 Coinbase Stream завершен нормально");
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!("💰 Coinbase WS отключен: {}. Моментальное переподключение...", e);
+                    // Моментальное переподключение без задержки
+                }
+            }
+        }
+    }
+
+    async fn run_stream_once(&self) -> anyhow::Result<()> {
         let (ws_stream, _) = connect_async(COINBASE_WS_URL).await?;
-        tracing::info!("✅ Соединение с Coinbase установлено");
+        info!("✅ Соединение с Coinbase установлено");
 
         let (mut write, mut read) = ws_stream.split();
 
@@ -30,7 +46,7 @@ impl CoinbaseStream {
         });
 
         write.send(Message::Text(subscribe_msg.to_string().into())).await?;
-        tracing::info!("📡 Подписка на {} активна", self.coin.coinbase_product());
+        info!("📡 Подписка на {} активна", self.coin.coinbase_product());
 
         while let Some(msg) = read.next().await {
             match msg {
@@ -47,17 +63,16 @@ impl CoinbaseStream {
                     }
                 }
                 Ok(Message::Close(_)) => {
-                    tracing::warn!("Coinbase WebSocket закрыт");
-                    break;
+                    return Err(anyhow::anyhow!("Coinbase WebSocket закрыт сервером"));
                 }
                 Err(e) => {
-                    tracing::error!("Ошибка Coinbase WebSocket: {}", e);
-                    break;
+                    return Err(anyhow::anyhow!("Ошибка Coinbase WebSocket: {}", e));
                 }
                 _ => {}
             }
         }
 
-        Ok(())
+        // Стрим завершился без ошибки - соединение потеряно
+        Err(anyhow::anyhow!("Coinbase соединение потеряно"))
     }
 }

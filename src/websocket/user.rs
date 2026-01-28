@@ -1,6 +1,5 @@
 use futures::StreamExt;
 use std::sync::Arc;
-use std::time::Duration;
 use polymarket_client_sdk::clob::ws::{Client, WsMessage};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::Normal;
@@ -11,7 +10,6 @@ use tracing::{info, warn};
 
 pub struct UserStream {
     engine: Arc<RealEngine>,
-    // ИСПРАВЛЕНИЕ: Указываем точный тип аутентифицированного клиента
     client: Client<Authenticated<Normal>>, 
 }
 
@@ -21,9 +19,6 @@ impl UserStream {
     }
 
     pub async fn start_stream(&self) -> anyhow::Result<()> {
-        let mut reconnect_delay = Duration::from_secs(1);
-        const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
-
         loop {
             match self.run_stream_once().await {
                 Ok(_) => {
@@ -31,10 +26,8 @@ impl UserStream {
                     return Ok(());
                 }
                 Err(e) => {
-                    warn!("👤 User WS отключен: {}. Переподключение через {:?}...", e, reconnect_delay);
-                    tokio::time::sleep(reconnect_delay).await;
-
-                    reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY);
+                    warn!("👤 User WS отключен: {}. Моментальное переподключение...", e);
+                    // Моментальное переподключение без задержки
                 }
             }
         }

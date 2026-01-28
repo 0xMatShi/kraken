@@ -32,8 +32,6 @@ impl DataStream {
 
     pub async fn start_stream(&self, end_date_str: String) -> Result<(), Box<dyn std::error::Error>> {
         let end_date = end_date_str.parse::<DateTime<Utc>>().unwrap_or(Utc::now());
-        let mut reconnect_delay = Duration::from_secs(1);
-        const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
 
         loop {
             if Utc::now() >= end_date {
@@ -49,10 +47,8 @@ impl DataStream {
                     return Ok(());
                 }
                 Err(e) => {
-                    warn!("📉 Market WS отключен: {}. Переподключение через {:?}...", e, reconnect_delay);
-                    tokio::time::sleep(reconnect_delay).await;
-
-                    reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY);
+                    warn!("📉 Market WS отключен: {}. Моментальное переподключение...", e);
+                    // Моментальное переподключение без задержки
                 }
             }
         }
@@ -115,7 +111,7 @@ impl DataStream {
             .collect();
         sorted_asks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Извлекаем 4 уровня для UI
+        // Извлекаем уровни для UI
         let mut ui_bids = [OrderLevel::default(); ORDER_BOOK_DEPTH];
         let mut ui_asks = [OrderLevel::default(); ORDER_BOOK_DEPTH];
 
