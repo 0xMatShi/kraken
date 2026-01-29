@@ -167,8 +167,8 @@ impl RealEngine {
         let spread_cents = prices.spread_cents();
         
         // Спред 4+ цента - ничего не делаем
-        if spread_cents >= 4 {
-            info!("⏸️ Спред {} центов >= 4 - не размещаем", spread_cents);
+        if spread_cents >= 3 {
+            info!("⏸️ Спред {} центов >= 3 - не размещаем", spread_cents);
             return None;
         }
         
@@ -177,13 +177,50 @@ impl RealEngine {
             return None;
         }
         
-        // Спред 2-3 цента - размещаем на сильной стороне
+        // Теперь обрабатываем только спред 2 цента
         let strong_side = prices.strong_side();
         let weak_side = prices.weak_side();
         let weak_bb = prices.bid_for_side(weak_side);
         
         // Цена = 0.99 - weak_bb, чтобы сумма была 0.99
         let target_price = Self::round_price(0.99 - weak_bb);
+        
+        // === НОВЫЕ ПРАВИЛА ПРОВЕРКИ ===
+        
+        // Определяем параметры стакана на сильной стороне
+        let (strong_bid_size_1, strong_bid_size_2) = match strong_side {
+            Side::Up => (prices.up_bid_size, prices.up_bid_size_2),
+            Side::Down => (prices.down_bid_size, prices.down_bid_size_2),
+        };
+        
+        // Параметры слабой стороны
+        let weak_bid_size_value = match weak_side {
+            Side::Up => prices.up_bid_size,
+            Side::Down => prices.down_bid_size,
+        };
+        
+        // ПРАВИЛО 1: На двух бидах сильной стороны должно быть >= 1000 акций в сумме
+        //            И на первом биде минимум 300 акций
+        let total_strong_bids = strong_bid_size_1 + strong_bid_size_2;
+        if total_strong_bids < 1000.0 {
+            info!("❌ Правило 1 не выполнено: сумма бидов на сильной стороне {:.0} < 1000", total_strong_bids);
+            return None;
+        }
+        if strong_bid_size_1 < 300.0 {
+            info!("❌ Правило 1 не выполнено: первый бид на сильной стороне {:.0} < 300", strong_bid_size_1);
+            return None;
+        }
+        
+        info!("✅ Правило 1 выполнено: 1st bid {:.0}, 2nd bid {:.0}, сумма {:.0} >= 1000",
+            strong_bid_size_1, strong_bid_size_2, total_strong_bids);
+        
+        // ПРАВИЛО 2: На потенциальной второй ноге (слабая сторона) должно быть < 200 акций
+        if weak_bid_size_value >= 200.0 {
+            info!("❌ Правило 2 не выполнено: на слабой стороне {:.0} >= 200 акций", weak_bid_size_value);
+            return None;
+        }
+        
+        info!("✅ Правило 2 выполнено: на слабой стороне {:.0} < 200 акций", weak_bid_size_value);
         
         info!("📈 Тренд СИЛЬНОЙ стороны ({:?}): weak_bb={:.2}, target_price={:.2}",
             strong_side, weak_bb, target_price);
