@@ -23,7 +23,7 @@ pub use log_capture::UiLogLayer;
 // Количество уровней стакана для отображения
 pub const ORDER_BOOK_DEPTH: usize = 10;
 // Максимум записей в истории
-const MAX_HISTORY_ENTRIES: usize = 100;
+const MAX_HISTORY_ENTRIES: usize = 50;
 
 /// Тип торговли
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -88,6 +88,14 @@ pub struct EventInfo {
     pub total_seconds: i64,
 }
 
+/// Конфигурация для отображения в UI
+#[derive(Debug, Clone, Default)]
+pub struct UiConfig {
+    pub max_balance: f64,
+    pub size: f64,
+    pub seconds_before_start: i64,
+}
+
 impl EventInfo {
     pub fn remaining_seconds(&self) -> i64 {
         (self.end_date - Utc::now()).num_seconds().max(0)
@@ -139,6 +147,8 @@ pub struct UiStateInner {
     pub trade_history: VecDeque<TradeHistoryEntry>,
     // Открытые ордера
     pub open_orders: Vec<OpenOrder>,
+    // Конфигурация для отображения
+    pub config: UiConfig,
 }
 
 pub type UiState = Arc<Mutex<UiStateInner>>;
@@ -338,6 +348,17 @@ pub fn clear_our_bid_prices(state: &UiState) {
     }
 }
 
+/// Установить конфигурацию для отображения
+pub fn set_config(state: &UiState, max_balance: f64, size: f64, seconds_before_start: i64) {
+    if let Ok(mut s) = state.lock() {
+        s.config = UiConfig {
+            max_balance,
+            size,
+            seconds_before_start,
+        };
+    }
+}
+
 /// Терминал для TUI
 pub type Terminal = ratatui::Terminal<CrosstermBackend<Stdout>>;
 
@@ -368,7 +389,7 @@ pub fn render(frame: &mut Frame, state: &UiState) {
 
     let area = frame.area();
 
-    // Основной layout: левая часть и правая (стакан)
+    // Основной layout: левая часть и правая
     let [left_area, right_area] =
         Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
 
@@ -376,7 +397,7 @@ pub fn render(frame: &mut Frame, state: &UiState) {
     let [event_area, portfolio_area, open_orders_area, history_area] = Layout::vertical([
         Constraint::Length(8),  // Event info (включая URL)
         Constraint::Length(9),  // Portfolio
-        Constraint::Length(14), // Open Orders (увеличено для отображения большего числа ордеров)
+        Constraint::Length(14), // Open Orders
         Constraint::Fill(1),    // History
     ])
     .areas(left_area);
@@ -404,25 +425,17 @@ pub fn render(frame: &mut Frame, state: &UiState) {
     render_open_orders(frame, open_orders_area, &state.open_orders);
     render_history(frame, history_area, &state.trade_history);
 
-    // Правая часть: стаканы UP и DOWN
-    let [up_book_area, down_book_area] =
-        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .areas(right_area);
+    // Правая часть: Configuration (6 строк) + Order Book (остаток)
+    let [config_area, order_book_area] =
+        Layout::vertical([Constraint::Length(6), Constraint::Fill(1)]).areas(right_area);
 
-    render_order_book(
+    render_configuration(frame, config_area, &state.config);
+    render_combined_order_book(
         frame,
-        up_book_area,
-        "UP",
+        order_book_area,
         &state.up_book,
-        Color::Green,
-        &state.our_up_bid_prices,
-    );
-    render_order_book(
-        frame,
-        down_book_area,
-        "DOWN",
         &state.down_book,
-        Color::Red,
+        &state.our_up_bid_prices,
         &state.our_down_bid_prices,
     );
 }
@@ -728,127 +741,6 @@ fn render_portfolio(
     frame.render_widget(paragraph, inner);
 }
 
-/// Рендер стакана
-fn render_order_book(
-    frame: &mut Frame,
-    area: Rect,
-    title: &str,
-    book: &SideOrderBook,
-    color: Color,
-    our_bid_prices: &HashSet<u32>,
-) {
-    let block = Block::default()
-        .title(format!(" {} ORDER BOOK ", title))
-        .title_style(Style::default().fg(color).add_modifier(Modifier::BOLD))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    // Разделяем на asks и bids
-    let [asks_area, divider_area, bids_area] = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(1),
-        Constraint::Fill(1),
-    ])
-    .areas(inner);
-
-    // Заголовок asks
-    let header_style = Style::default()
-        .fg(Color::Gray)
-        .add_modifier(Modifier::BOLD);
-
-    // Asks (красные) - вычисляем кумулятивный total от лучшего ask'а вверх
-    // asks[0] = лучший (самый низкий) ask
-    let mut cumulative_ask = 0.0;
-    let ask_data: Vec<(f64, f64, f64)> = book
-        .asks
-        .iter()
-        .filter(|l| l.size > 0.0)
-        .map(|level| {
-            cumulative_ask += level.price * level.size;
-            (level.price, level.size, cumulative_ask)
-        })
-        .collect();
-
-    // Показываем от высокой к низкой цене (перевернутый порядок для визуала)
-    let ask_rows: Vec<Row> = ask_data
-        .iter()
-        .rev()
-        .map(|(price, size, cum_total)| {
-            let price_cents = (price * 100.0).round() as u32;
-            let has_our_order = our_bid_prices.contains(&price_cents);
-            let price_text = if has_our_order {
-                format!("{:.0}¢⏱", price * 100.0)
-            } else {
-                format!("{:.0}¢ ", price * 100.0) // Пробел для выравнивания
-            };
-            Row::new(vec![
-                Cell::from(price_text).style(Style::default().fg(Color::Red)),
-                Cell::from(format!("{:.2}", size)),
-                Cell::from(format!("${:.2}", cum_total)),
-            ])
-        })
-        .collect();
-
-    let ask_table = Table::new(
-        ask_rows,
-        [
-            Constraint::Percentage(30),
-            Constraint::Percentage(35),
-            Constraint::Percentage(35),
-        ],
-    )
-    .header(Row::new(vec!["Asks", "Shares", "Total"]).style(header_style));
-    frame.render_widget(ask_table, asks_area);
-
-    // Разделитель со spread
-    let best_bid = book.bids.first().map(|l| l.price).unwrap_or(0.0);
-    let best_ask = book.asks.first().map(|l| l.price).unwrap_or(0.0);
-    let spread = ((best_ask - best_bid) * 100.0).max(0.0);
-
-    let divider = Paragraph::new(format!("───── Spread: {:.0}¢ ─────", spread))
-        .style(Style::default().fg(Color::DarkGray))
-        .alignment(Alignment::Center);
-    frame.render_widget(divider, divider_area);
-
-    // Bids (зеленые) - вычисляем кумулятивный total от лучшего bid'а вниз
-    // bids[0] = лучший (самый высокий) bid
-    let mut cumulative_bid = 0.0;
-    let bid_rows: Vec<Row> = book
-        .bids
-        .iter()
-        .filter(|l| l.size > 0.0)
-        .map(|level| {
-            cumulative_bid += level.price * level.size;
-            let price_cents = (level.price * 100.0).round() as u32;
-            let has_our_order = our_bid_prices.contains(&price_cents);
-            let price_text = if has_our_order {
-                format!("{:.0}¢⏱", level.price * 100.0)
-            } else {
-                format!("{:.0}¢ ", level.price * 100.0) // Пробел для выравнивания
-            };
-            Row::new(vec![
-                Cell::from(price_text).style(Style::default().fg(Color::Green)),
-                Cell::from(format!("{:.2}", level.size)),
-                Cell::from(format!("${:.2}", cumulative_bid)),
-            ])
-        })
-        .collect();
-
-    let bid_table = Table::new(
-        bid_rows,
-        [
-            Constraint::Percentage(30),
-            Constraint::Percentage(35),
-            Constraint::Percentage(35),
-        ],
-    )
-    .header(Row::new(vec!["Bids", "Shares", "Total"]).style(header_style));
-    frame.render_widget(bid_table, bids_area);
-}
-
 /// Рендер открытых ордеров
 fn render_open_orders(frame: &mut Frame, area: Rect, orders: &[OpenOrder]) {
     let block = Block::default()
@@ -1002,6 +894,175 @@ fn render_history(frame: &mut Frame, area: Rect, history: &VecDeque<TradeHistory
 
     let paragraph = Paragraph::new(visible_entries);
     frame.render_widget(paragraph, inner);
+}
+
+/// Рендер конфигурации
+fn render_configuration(frame: &mut Frame, area: Rect, config: &UiConfig) {
+    let block = Block::default()
+        .title(" CONFIGURATION ")
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let text = vec![
+        Line::from(vec![
+            Span::styled("max_balance = ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{:.1}", config.max_balance),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("size = ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{:.1}", config.size),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("seconds_before_start = ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{}", config.seconds_before_start),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(text);
+    frame.render_widget(paragraph, inner);
+}
+
+/// Рендер объединенного стакана (только bids для UP и DOWN)
+fn render_combined_order_book(
+    frame: &mut Frame,
+    area: Rect,
+    up_book: &SideOrderBook,
+    down_book: &SideOrderBook,
+    our_up_bid_prices: &HashSet<u32>,
+    our_down_bid_prices: &HashSet<u32>,
+) {
+    let block = Block::default()
+        .title(" ORDER BOOK ")
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Разделяем на UP bids, spread, DOWN bids
+    let [up_bids_area, spread_area, down_bids_area] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(inner);
+
+    let header_style = Style::default()
+        .fg(Color::Gray)
+        .add_modifier(Modifier::BOLD);
+
+    // UP Bids (зеленые)
+    let mut cumulative_up = 0.0;
+    let up_bid_rows: Vec<Row> = up_book
+        .bids
+        .iter()
+        .filter(|l| l.size > 0.0)
+        .map(|level| {
+            cumulative_up += level.price * level.size;
+            let price_cents = (level.price * 100.0).round() as u32;
+            let has_our_order = our_up_bid_prices.contains(&price_cents);
+            let price_text = if has_our_order {
+                format!("{:.0}¢⏱", level.price * 100.0)
+            } else {
+                format!("{:.0}¢", level.price * 100.0)
+            };
+            Row::new(vec![
+                Cell::from(price_text).style(Style::default().fg(Color::Green)),
+                Cell::from(format!("{:.2}", level.size)),
+                Cell::from(format!("${:.2}", cumulative_up)),
+            ])
+        })
+        .collect();
+
+    let up_table = Table::new(
+        up_bid_rows,
+        [
+            Constraint::Percentage(30),
+            Constraint::Percentage(35),
+            Constraint::Percentage(35),
+        ],
+    )
+    .header(Row::new(vec![
+        Cell::from("Up Bids").style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Shares").style(header_style),
+        Cell::from("Total").style(header_style),
+    ]));
+    frame.render_widget(up_table, up_bids_area);
+
+    // Spread
+    let up_best_bid = up_book.bids.first().map(|l| l.price).unwrap_or(0.0);
+    let down_best_bid = down_book.bids.first().map(|l| l.price).unwrap_or(0.0);
+    let spread = ((1.0 - up_best_bid - down_best_bid) * 100.0).abs();
+
+    let spread_text = format!("───── Spread: {:.0}¢ ─────", spread);
+    let spread_widget = Paragraph::new(spread_text)
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center);
+    frame.render_widget(spread_widget, spread_area);
+
+    // DOWN Bids (красные)
+    let mut cumulative_down = 0.0;
+    let down_bid_rows: Vec<Row> = down_book
+        .bids
+        .iter()
+        .filter(|l| l.size > 0.0)
+        .map(|level| {
+            cumulative_down += level.price * level.size;
+            let price_cents = (level.price * 100.0).round() as u32;
+            let has_our_order = our_down_bid_prices.contains(&price_cents);
+            let price_text = if has_our_order {
+                format!("{:.0}¢⏱", level.price * 100.0)
+            } else {
+                format!("{:.0}¢", level.price * 100.0)
+            };
+            Row::new(vec![
+                Cell::from(price_text).style(Style::default().fg(Color::Red)),
+                Cell::from(format!("{:.2}", level.size)),
+                Cell::from(format!("${:.2}", cumulative_down)),
+            ])
+        })
+        .collect();
+
+    let down_table = Table::new(
+        down_bid_rows,
+        [
+            Constraint::Percentage(30),
+            Constraint::Percentage(35),
+            Constraint::Percentage(35),
+        ],
+    )
+    .header(Row::new(vec![
+        Cell::from("Down Bids").style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Cell::from("Shares").style(header_style),
+        Cell::from("Total").style(header_style),
+    ]));
+    frame.render_widget(down_table, down_bids_area);
 }
 
 /// Результат проверки нажатых клавиш

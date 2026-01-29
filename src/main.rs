@@ -119,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
                 ui::set_price_to_beat(&ui_state, price_to_beat);
                 ui::clear_our_bid_prices(&ui_state);
                 ui::clear_open_orders(&ui_state);
+                ui::set_config(&ui_state, app_config.trading.max_balance, app_config.trading.size, app_config.trading.seconds_before_start);
 
                 // Создаем реальный движок
                 let engine = Arc::new(RealEngine::new(
