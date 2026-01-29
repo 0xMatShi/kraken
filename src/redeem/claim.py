@@ -12,7 +12,13 @@ from py_builder_relayer_client.client import RelayClient
 from py_builder_relayer_client.models import SafeTransaction, OperationType
 from py_builder_signing_sdk.config import BuilderConfig
 from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
-from src.redeem.constants import CTF_EXCHANGE_ADDRESS, USDC_ADDRESS, CTF_ABI, RELAYER_URL, CLOB_WS_URL
+from src.redeem.constants import (
+    CTF_EXCHANGE_ADDRESS,
+    USDC_ADDRESS,
+    CTF_ABI,
+    RELAYER_URL,
+    CLOB_WS_URL,
+)
 
 
 load_dotenv()
@@ -38,9 +44,7 @@ class AutoClaim:
 
         # Инициализация Relayer Client
         creds = BuilderApiKeyCreds(
-            key=self.api_key,
-            secret=self.api_secret,
-            passphrase=self.api_passphrase
+            key=self.api_key, secret=self.api_secret, passphrase=self.api_passphrase
         )
         config = BuilderConfig(local_builder_creds=creds)
 
@@ -48,7 +52,7 @@ class AutoClaim:
             relayer_url=RELAYER_URL,
             chain_id=137,
             private_key=self.pk,
-            builder_config=config
+            builder_config=config,
         )
 
         # Web3 для кодирования данных
@@ -57,7 +61,9 @@ class AutoClaim:
         self.usdc_address = Web3.to_checksum_address(USDC_ADDRESS)
         self.contract = self.w3.eth.contract(address=self.ctf_address, abi=CTF_ABI)
 
-    async def find_next_event(self, slug_prefix: str, min_minutes: float = 0, max_minutes: float = 15) -> Optional[Dict[str, Any]]:
+    async def find_next_event(
+        self, slug_prefix: str, min_minutes: float = 0, max_minutes: float = 15
+    ) -> Optional[Dict[str, Any]]:
         """
         Сканирует рынки и находит ближайшее событие в заданном временном окне.
         Возвращает полные данные события или None.
@@ -66,8 +72,9 @@ class AutoClaim:
 
         while True:
             try:
-                events = await self._fetch_active_markets()
-                event = self._filter_events(events, slug_prefix, min_minutes, max_minutes)
+                event = await self._fetch_active_markets(
+                    slug_prefix, min_minutes, max_minutes
+                )
 
                 if event:
                     return event
@@ -78,27 +85,52 @@ class AutoClaim:
                 print(f"❌ Ошибка сканера: {e}")
                 await asyncio.sleep(5)
 
-    async def _fetch_active_markets(self) -> List[Dict[str, Any]]:
-        """Получает список активных рынков через Gamma API"""
-        params = {
-            "active": "true",
-            "closed": "false",
-            "limit": "500",
-            "order": "endDate",
-            "ascending": "true"
-        }
+    async def _fetch_active_markets(
+        self, slug_prefix: str, min_minutes: float, max_minutes: float
+    ) -> Optional[Dict[str, Any]]:
+        """Получает список активных рынков через Gamma API с пагинацией до нахождения нужного события"""
+        offset = 0
+        limit = 500
 
         async with aiohttp.ClientSession() as session:
-            async with session.get(GAMMA_API_URL, params=params) as response:
-                response.raise_for_status()
-                return await response.json()
+            while True:
+                params = {
+                    "active": "true",
+                    "closed": "false",
+                    "limit": str(limit),
+                    "offset": str(offset),
+                    "order": "endDate",
+                    "ascending": "true",
+                }
+
+                async with session.get(GAMMA_API_URL, params=params) as response:
+                    response.raise_for_status()
+                    events = await response.json()
+
+                    # Если получили пустой ответ - больше событий нет
+                    if not events:
+                        return None
+
+                    # Проверяем текущую страницу на наличие нужного события
+                    event = self._filter_events(
+                        events, slug_prefix, min_minutes, max_minutes
+                    )
+                    if event:
+                        return event
+
+                    # Если событий меньше лимита - это последняя страница
+                    if len(events) < limit:
+                        return None
+
+                    # Переходим к следующей странице
+                    offset += limit
 
     def _filter_events(
         self,
         events: List[Dict[str, Any]],
         target_prefix: str,
         min_m: float,
-        max_m: float
+        max_m: float,
     ) -> Optional[Dict[str, Any]]:
         """Фильтрует события по slug prefix и временному окну"""
         now = datetime.now(timezone.utc)
@@ -126,7 +158,9 @@ class AutoClaim:
 
         return None
 
-    async def wait_for_resolution(self, asset_ids: List[str], end_date_str: str) -> Optional[int]:
+    async def wait_for_resolution(
+        self, asset_ids: List[str], end_date_str: str
+    ) -> Optional[int]:
         """
         Подключается к WebSocket и ожидает сообщения market_resolved.
         При разрыве соединения автоматически переподключается.
@@ -156,7 +190,7 @@ class AutoClaim:
                         subscribe_payload = {
                             "assets_ids": asset_ids,
                             "type": "market",
-                            "custom_feature_enabled": True
+                            "custom_feature_enabled": True,
                         }
                         await ws.send_str(json.dumps(subscribe_payload))
 
@@ -185,12 +219,20 @@ class AutoClaim:
                                     if winning_asset_id:
                                         # Определяем индекс победителя
                                         try:
-                                            winner_index = asset_ids.index(winning_asset_id)
-                                            winning_outcome = message.get("winning_outcome", "Unknown")
-                                            print(f"🏆 Событие завершено! Победитель: {winning_outcome} (индекс {winner_index})")
+                                            winner_index = asset_ids.index(
+                                                winning_asset_id
+                                            )
+                                            winning_outcome = message.get(
+                                                "winning_outcome", "Unknown"
+                                            )
+                                            print(
+                                                f"🏆 Событие завершено! Победитель: {winning_outcome} (индекс {winner_index})"
+                                            )
                                             return winner_index
                                         except ValueError:
-                                            print(f"❌ winning_asset_id {winning_asset_id} не найден в списке asset_ids")
+                                            print(
+                                                f"❌ winning_asset_id {winning_asset_id} не найден в списке asset_ids"
+                                            )
                                             return None
 
                             except (json.JSONDecodeError, AttributeError):
@@ -228,12 +270,16 @@ class AutoClaim:
                 print(f"❌ Ошибка получения данных: {e}")
                 return None
 
-    async def claim_winnings(self, condition_id: str, winning_outcome_index: int) -> bool:
+    async def claim_winnings(
+        self, condition_id: str, winning_outcome_index: int
+    ) -> bool:
         """
         Отправляет транзакцию на клейм токенов.
         winning_outcome_index: 0 для YES/UP, 1 для NO/DOWN.
         """
-        print(f"💰 Попытка забрать выигрыш для Condition: {condition_id[:16]}...{condition_id[-8:]}")
+        print(
+            f"💰 Попытка забрать выигрыш для Condition: {condition_id[:16]}...{condition_id[-8:]}"
+        )
 
         try:
             # Подготовка данных
@@ -243,12 +289,7 @@ class AutoClaim:
             # Кодируем вызов функции
             encoded_data = self.contract.encode_abi(
                 abi_element_identifier="redeemPositions",
-                args=[
-                    self.usdc_address,
-                    parent_collection_id,
-                    condition_id,
-                    index_set
-                ]
+                args=[self.usdc_address, parent_collection_id, condition_id, index_set],
             )
 
             # Создаем транзакцию для Relayer
@@ -256,7 +297,7 @@ class AutoClaim:
                 to=self.ctf_address,
                 data=encoded_data,  # type: ignore
                 value="0",
-                operation=OperationType.Call
+                operation=OperationType.Call,
             )
 
             # Отправляем через Relayer (Gasless!)
@@ -281,7 +322,9 @@ class AutoClaim:
             print(f"{'=' * 60}\n")
 
             # 1. Найти ближайшее событие
-            event = await self.find_next_event(slug_prefix, min_minutes=0, max_minutes=15)
+            event = await self.find_next_event(
+                slug_prefix, min_minutes=0, max_minutes=15
+            )
 
             if not event:
                 print("⚠️ События не найдены, продолжаю поиск...")
