@@ -213,6 +213,11 @@ impl RealEngine {
             }
         }
 
+        // ВАЖНО: Проверяем и отменяем устаревшие ордера ПЕРЕД всеми остальными проверками
+        // Это гарантирует, что старые ордера будут отменены даже если условия для
+        // размещения новых ордеров не выполнены (нет тренда, спред 1 цент, и т.д.)
+        self.check_and_cancel_stale_orders(&prices);
+
         // Проверяем, прошло ли достаточно времени с начала события
         {
             let state = self.ui_state.lock().unwrap();
@@ -317,31 +322,34 @@ impl RealEngine {
             }
         }
 
-        // Проверяем, есть ли уже первая нога по более низкой цене на этой стороне
-        // Если есть - нужно отменить её
-        self.check_and_cancel_lower_price_orders(side, target_price);
-
         // Размещаем первую ногу
         super::streams::place_first_leg(self, side, target_price, order_size);
     }
 
-    /// Проверяет и отменяет первые ноги с ценой ниже целевой
-    fn check_and_cancel_lower_price_orders(self: &Arc<Self>, side: Side, target_price: f64) {
-        let target_cents = (target_price * 100.0).round() as u32;
-        let is_up = matches!(side, Side::Up);
+    /// Проверяет и отменяет устаревшие ордера на основе текущих цен
+    /// Вызывается на каждом тике ДО всех остальных проверок
+    fn check_and_cancel_stale_orders(self: &Arc<Self>, prices: &MarketPrices) {
+        // Текущие лучшие биды для каждой стороны
+        let up_best_bid_cents = (prices.up_bid * 100.0).round() as u32;
+        let down_best_bid_cents = (prices.down_bid * 100.0).round() as u32;
         
-        let orders_to_cancel: Vec<String> = {
+        let orders_to_cancel: Vec<(String, f64)> = {
             let first_legs = self.first_legs_by_price.lock().unwrap();
             first_legs.iter()
-                .filter(|((side_is_up, price_cents), _)| {
-                    *side_is_up == is_up && *price_cents < target_cents
+                .filter(|((is_up, price_cents), _)| {
+                    // Определяем текущий лучший бид для этой стороны
+                    let current_best_bid_cents = if *is_up { up_best_bid_cents } else { down_best_bid_cents };
+                    // Отменяем, если цена ордера ниже текущего лучшего бида
+                    *price_cents < current_best_bid_cents
                 })
-                .map(|(_, order_id)| order_id.clone())
+                .map(|((_, price_cents), order_id)| {
+                    (order_id.clone(), *price_cents as f64 / 100.0)
+                })
                 .collect()
         };
 
-        for order_id in orders_to_cancel {
-            info!("🗑️ Отменяем первую ногу {} (цена ниже {:.2})", order_id, target_price);
+        for (order_id, order_price) in orders_to_cancel {
+            info!("🗑️ Отменяем устаревший ордер {} @ {:.2} (цена ниже текущего бида)", order_id, order_price);
             super::streams::cancel_order(self, order_id);
         }
     }
