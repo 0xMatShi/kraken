@@ -387,18 +387,7 @@ pub fn render(frame: &mut Frame, state: &UiState) {
     .areas(left_area);
 
     render_event_info(frame, event_area, &state.event_info, state.trading_mode);
-
-    // Получаем best_bid для расчета PnL
-    let up_best_bid = state.up_book.bids.first().map(|l| l.price).unwrap_or(0.0);
-    let down_best_bid = state.down_book.bids.first().map(|l| l.price).unwrap_or(0.0);
-    render_portfolio(
-        frame,
-        portfolio_area,
-        &state.portfolio,
-        state.trading_mode,
-        up_best_bid,
-        down_best_bid,
-    );
+    render_portfolio(frame, portfolio_area, &state.portfolio, state.trading_mode);
     render_open_orders(frame, open_orders_area, &state.open_orders);
     render_history(frame, history_area, &state.trade_history);
 
@@ -494,8 +483,6 @@ fn render_portfolio(
     area: Rect,
     portfolio: &Portfolio,
     trading_mode: TradingMode,
-    up_best_bid: f64,
-    down_best_bid: f64,
 ) {
     let block = Block::default()
         .title(" PORTFOLIO ")
@@ -515,34 +502,8 @@ fn render_portfolio(
     let total_avg = up_avg + down_avg;
     let total_spent = portfolio.up_spent + portfolio.down_spent;
 
-    // Расчет PnL: (текущий best_bid * количество акций) - потраченная сумма
-    let up_pnl = (up_best_bid * portfolio.up_shares) - portfolio.up_spent;
-    let down_pnl = (down_best_bid * portfolio.down_shares) - portfolio.down_spent;
-    let total_pnl = up_pnl + down_pnl;
-
-    // Хелпер для создания PnL спанов
-    fn pnl_spans(pnl: f64) -> Vec<Span<'static>> {
-        if pnl > 0.0 {
-            vec![
-                Span::styled(" ▲", Style::default().fg(Color::Green)),
-                Span::styled(format!(" +${:.2}", pnl), Style::default().fg(Color::Green)),
-            ]
-        } else if pnl < 0.0 {
-            vec![
-                Span::styled(" ▼", Style::default().fg(Color::Red)),
-                Span::styled(
-                    format!(" -${:.2}", pnl.abs()),
-                    Style::default().fg(Color::Red),
-                ),
-            ]
-        } else {
-            vec![Span::styled(" $0.00", Style::default().fg(Color::Gray))]
-        }
-    }
-
     // Создаем текст с информацией о позициях
-    // Формат: filled/placed shares @ avg  $spent  PnL
-    let mut up_line = vec![
+    let up_line = vec![
         Span::styled("  UP: ", Style::default().fg(Color::Green)),
         Span::raw(format!(
             "{:.1} shares @ avg {:.3}",
@@ -553,11 +514,8 @@ fn render_portfolio(
             Style::default().fg(Color::Gray),
         ),
     ];
-    if portfolio.up_shares > 0.0 {
-        up_line.extend(pnl_spans(up_pnl));
-    }
 
-    let mut down_line = vec![
+    let down_line = vec![
         Span::styled("DOWN: ", Style::default().fg(Color::Red)),
         Span::raw(format!(
             "{:.1} shares @ avg {:.3}",
@@ -568,50 +526,30 @@ fn render_portfolio(
             Style::default().fg(Color::Gray),
         ),
     ];
-    if portfolio.down_shares > 0.0 {
-        down_line.extend(pnl_spans(down_pnl));
-    }
-
-    // Total PnL строка
-    let mut total_pnl_line = vec![Span::styled(
-        "Total PnL:",
-        Style::default().fg(Color::White),
-    )];
-    if portfolio.up_shares > 0.0 || portfolio.down_shares > 0.0 {
-        total_pnl_line.extend(pnl_spans(total_pnl));
-    } else {
-        total_pnl_line.push(Span::styled(" $0.00", Style::default().fg(Color::Gray)));
-    }
 
     let text = vec![
         Line::from(up_line),
         Line::from(down_line),
         Line::from(""),
-        Line::from(
-            vec![
-                Span::styled("Total Avg: ", Style::default().fg(Color::White)),
-                Span::styled(
-                    format!("{:.3}", total_avg),
-                    Style::default().fg(if total_avg < 0.97 {
-                        Color::Green
-                    } else if total_avg < 1.0 {
-                        Color::Yellow
-                    } else {
-                        Color::Red
-                    }),
-                ),
-                Span::raw("  |  "),
-                Span::styled("Spent: ", Style::default().fg(Color::White)),
-                Span::styled(
-                    format!("${:.2}", total_spent),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::raw("  |  "),
-            ]
-            .into_iter()
-            .chain(total_pnl_line)
-            .collect::<Vec<_>>(),
-        ),
+        Line::from(vec![
+            Span::styled("Total Avg: ", Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{:.3}", total_avg),
+                Style::default().fg(if total_avg < 0.97 {
+                    Color::Green
+                } else if total_avg < 1.0 {
+                    Color::Yellow
+                } else {
+                    Color::Red
+                }),
+            ),
+            Span::raw("  |  "),
+            Span::styled("Spent: ", Style::default().fg(Color::White)),
+            Span::styled(
+                format!("${:.2}", total_spent),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
         Line::from(vec![
             Span::styled("Maker: ", Style::default().fg(Color::Gray)),
             Span::raw(format!("{}", portfolio.maker_trades)),
