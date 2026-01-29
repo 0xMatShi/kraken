@@ -138,10 +138,8 @@ pub struct UiStateInner {
     pub up_book: SideOrderBook,
     pub down_book: SideOrderBook,
     pub is_running: bool,
-    pub trading_mode: TradingMode, // Текущий режим работы
-    pub price_to_beat: Option<f64>,
-    pub current_price: Option<f64>,
-    pub our_up_bid_prices: HashSet<u32>, // Цены в центах, где размещены наши UP ордера
+    pub trading_mode: TradingMode,         // Текущий режим работы
+    pub our_up_bid_prices: HashSet<u32>,   // Цены в центах, где размещены наши UP ордера
     pub our_down_bid_prices: HashSet<u32>, // Цены в центах, где размещены наши DOWN ордера
     // История торговли
     pub trade_history: VecDeque<TradeHistoryEntry>,
@@ -302,20 +300,6 @@ pub fn stop_ui(state: &UiState) {
     }
 }
 
-/// Установить price to beat
-pub fn set_price_to_beat(state: &UiState, price: Option<f64>) {
-    if let Ok(mut s) = state.lock() {
-        s.price_to_beat = price;
-    }
-}
-
-/// Установить текущую цену
-pub fn set_current_price(state: &UiState, price: f64) {
-    if let Ok(mut s) = state.lock() {
-        s.current_price = Some(price);
-    }
-}
-
 /// Добавить цену нашего bid ордера
 pub fn add_our_bid_price(state: &UiState, is_up: bool, price: f64) {
     if let Ok(mut s) = state.lock() {
@@ -395,21 +379,14 @@ pub fn render(frame: &mut Frame, state: &UiState) {
 
     // Левая часть: event info, portfolio, open orders, history
     let [event_area, portfolio_area, open_orders_area, history_area] = Layout::vertical([
-        Constraint::Length(8),  // Event info (включая URL)
+        Constraint::Length(6),  // Event info
         Constraint::Length(9),  // Portfolio
         Constraint::Length(14), // Open Orders
         Constraint::Fill(1),    // History
     ])
     .areas(left_area);
 
-    render_event_info(
-        frame,
-        event_area,
-        &state.event_info,
-        state.trading_mode,
-        state.price_to_beat,
-        state.current_price,
-    );
+    render_event_info(frame, event_area, &state.event_info, state.trading_mode);
 
     // Получаем best_bid для расчета PnL
     let up_best_bid = state.up_book.bids.first().map(|l| l.price).unwrap_or(0.0);
@@ -441,14 +418,7 @@ pub fn render(frame: &mut Frame, state: &UiState) {
 }
 
 /// Рендер информации о событии
-fn render_event_info(
-    frame: &mut Frame,
-    area: Rect,
-    info: &EventInfo,
-    trading_mode: TradingMode,
-    price_to_beat: Option<f64>,
-    current_price: Option<f64>,
-) {
+fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, trading_mode: TradingMode) {
     // Заголовок с индикатором режима
     let title = match trading_mode {
         TradingMode::Stop => " MARKET [STOP] ",
@@ -478,17 +448,14 @@ fn render_event_info(
     let remaining = info.remaining_seconds();
     let total = info.total_seconds;
 
-    // Title, URL, time, progress, price labels, prices
-    let [title_area, url_area, time_area, progress_area, price_labels_area, prices_area] =
-        Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .areas(inner);
+    // Title, URL, time, progress
+    let [title_area, url_area, time_area, progress_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
 
     // Название события
     let event_title = Paragraph::new(info.title.as_str()).style(Style::default().fg(Color::White));
@@ -519,70 +486,6 @@ fn render_event_info(
         .ratio(info.progress_ratio())
         .label(format!("{:.0}%", info.progress_ratio() * 100.0));
     frame.render_widget(gauge, progress_area);
-
-    // Price labels - выровненные
-    let price_labels = Line::from(vec![
-        Span::styled(
-            format!("{:<13}", "Price to beat"),
-            Style::default().fg(Color::Gray),
-        ),
-        Span::raw(" | "),
-        Span::styled("Current price", Style::default().fg(Color::Cyan)),
-    ]);
-    let labels_paragraph = Paragraph::new(price_labels);
-    frame.render_widget(labels_paragraph, price_labels_area);
-
-    // Price values - выровненные с индикаторами изменения
-    let price_to_beat_str = price_to_beat
-        .map(|p| format!("${:.2}", p))
-        .unwrap_or_else(|| "N/A".to_string());
-
-    // Формируем строку current price с индикатором
-    let mut price_spans = vec![
-        Span::styled(
-            format!("{:<13}", price_to_beat_str),
-            Style::default().fg(Color::Gray),
-        ),
-        Span::raw(" | "),
-    ];
-
-    if let Some(curr) = current_price {
-        let current_price_str = format!("${:.2}", curr);
-        price_spans.push(Span::styled(
-            current_price_str,
-            Style::default().fg(Color::Cyan),
-        ));
-
-        // Добавляем треугольник и разницу, если есть price_to_beat
-        if let Some(ptb) = price_to_beat {
-            let diff = curr - ptb;
-            if diff > 0.0 {
-                // Цена выше - зеленый треугольник вверх
-                price_spans.push(Span::raw(" "));
-                price_spans.push(Span::styled("▲", Style::default().fg(Color::Green)));
-                price_spans.push(Span::raw(" "));
-                price_spans.push(Span::styled(
-                    format!("+${:.2}", diff),
-                    Style::default().fg(Color::Green),
-                ));
-            } else if diff < 0.0 {
-                // Цена ниже - красный треугольник вниз
-                price_spans.push(Span::raw(" "));
-                price_spans.push(Span::styled("▼", Style::default().fg(Color::Red)));
-                price_spans.push(Span::raw(" "));
-                price_spans.push(Span::styled(
-                    format!("-${:.2}", diff.abs()),
-                    Style::default().fg(Color::Red),
-                ));
-            }
-        }
-    } else {
-        price_spans.push(Span::styled("N/A", Style::default().fg(Color::Cyan)));
-    }
-
-    let price_values = Line::from(price_spans);
-    let values_paragraph = Paragraph::new(price_values);
-    frame.render_widget(values_paragraph, prices_area);
 }
 
 /// Рендер портфолио
@@ -973,25 +876,37 @@ fn render_combined_order_book(
         .fg(Color::Gray)
         .add_modifier(Modifier::BOLD);
 
-    // UP Bids (зеленые)
-    let mut cumulative_up = 0.0;
-    let up_bid_rows: Vec<Row> = up_book
-        .bids
+    // UP Bids (зеленые) - перевернутые, чтобы лучшая цена была внизу у spread
+    // Сначала собираем данные с кумулятивным total
+    let up_bid_data: Vec<(f64, f64, f64, bool)> = {
+        let mut cumulative_up = 0.0;
+        up_book
+            .bids
+            .iter()
+            .filter(|l| l.size > 0.0)
+            .map(|level| {
+                cumulative_up += level.price * level.size;
+                let price_cents = (level.price * 100.0).round() as u32;
+                let has_our_order = our_up_bid_prices.contains(&price_cents);
+                (level.price, level.size, cumulative_up, has_our_order)
+            })
+            .collect()
+    };
+
+    // Переворачиваем: худшие цены сверху, лучшие внизу
+    let up_bid_rows: Vec<Row> = up_bid_data
         .iter()
-        .filter(|l| l.size > 0.0)
-        .map(|level| {
-            cumulative_up += level.price * level.size;
-            let price_cents = (level.price * 100.0).round() as u32;
-            let has_our_order = our_up_bid_prices.contains(&price_cents);
-            let price_text = if has_our_order {
-                format!("{:.0}¢⏱", level.price * 100.0)
+        .rev()
+        .map(|(price, size, cum_total, has_our_order)| {
+            let price_text = if *has_our_order {
+                format!("{:.0}¢⏱", price * 100.0)
             } else {
-                format!("{:.0}¢", level.price * 100.0)
+                format!("{:.0}¢", price * 100.0)
             };
             Row::new(vec![
                 Cell::from(price_text).style(Style::default().fg(Color::Green)),
-                Cell::from(format!("{:.2}", level.size)),
-                Cell::from(format!("${:.2}", cumulative_up)),
+                Cell::from(format!("{:.2}", size)),
+                Cell::from(format!("${:.2}", cum_total)),
             ])
         })
         .collect();

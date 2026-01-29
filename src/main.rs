@@ -6,10 +6,9 @@ pub mod ui;
 
 use std::io::{self, Write};
 use std::sync::Arc;
-use utils::{AutoScanner, PriceTracker, Config};
+use utils::{AutoScanner, Config};
 use websocket::market::DataStream;
 use websocket::user::UserStream;
-use websocket::coinbase::CoinbaseStream;
 use core::RealEngine;
 use chrono::{DateTime, Utc};
 
@@ -56,9 +55,6 @@ async fn main() -> anyhow::Result<()> {
 
     let scanner = AutoScanner::new();
 
-    // Загружаем price tracker
-    let mut price_tracker = PriceTracker::load();
-
     // Главный цикл выбора
     loop {
         // Очищаем экран и показываем меню
@@ -104,19 +100,8 @@ async fn main() -> anyhow::Result<()> {
                 let end_date = target.end_date.parse::<DateTime<Utc>>().unwrap_or(Utc::now());
                 let total_seconds = 900; // Фиксированная длительность события: 15 минут
 
-                // Извлекаем timestamp из slug события
-                let event_timestamp = utils::price_tracker::extract_timestamp_from_slug(&target.slug);
-
-                // Получаем price to beat для этого события
-                let price_to_beat = if let Some(ts) = event_timestamp {
-                    price_tracker.get_price_to_beat(coin, ts)
-                } else {
-                    None
-                };
-
                 // Устанавливаем информацию о событии в UI
                 ui::set_event_info(&ui_state, target.title.clone(), target.slug.clone(), end_date, total_seconds);
-                ui::set_price_to_beat(&ui_state, price_to_beat);
                 ui::clear_our_bid_prices(&ui_state);
                 ui::clear_open_orders(&ui_state);
                 ui::set_config(&ui_state, app_config.trading.max_balance, app_config.trading.size, app_config.trading.seconds_before_start);
@@ -142,9 +127,6 @@ async fn main() -> anyhow::Result<()> {
 
                 let user_stream = UserStream::new(engine.clone(), ws_client.clone());
 
-                // Создаем Coinbase stream для получения текущих цен
-                let coinbase_stream = CoinbaseStream::new(coin, ui_state.clone());
-
                 tracing::info!("Запуск торговой сессии...");
 
                 // Инициализируем терминал для TUI
@@ -163,9 +145,6 @@ async fn main() -> anyhow::Result<()> {
                         }
                         res = user_stream.start_stream() => {
                             if let Err(e) = res { tracing::error!("User stream died: {}", e); }
-                        }
-                        res = coinbase_stream.start_stream() => {
-                            if let Err(e) = res { tracing::error!("Coinbase stream died: {}", e); }
                         }
                     }
                 };
@@ -232,21 +211,6 @@ async fn main() -> anyhow::Result<()> {
 
                 // Восстанавливаем терминал
                 ui::restore_terminal(&mut terminal)?;
-
-                // Сохраняем последнюю цену для следующего события
-                if let Some(ts) = event_timestamp {
-                    let last_price = {
-                        let state = ui_state.lock().unwrap();
-                        state.current_price
-                    };
-
-                    if let Some(price) = last_price {
-                        price_tracker.set_last_price(coin, price, ts);
-                        if let Err(e) = price_tracker.save() {
-                            tracing::error!("Не удалось сохранить price tracker: {}", e);
-                        }
-                    }
-                }
 
                 // Проверяем, запросил ли пользователь выход
                 if user_exit_requested.load(std::sync::atomic::Ordering::SeqCst) {

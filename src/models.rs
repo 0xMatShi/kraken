@@ -95,15 +95,6 @@ impl Coin {
         }
     }
 
-    pub fn coinbase_product(&self) -> &'static str {
-        match self {
-            Coin::BTC => "BTC-USD",
-            Coin::ETH => "ETH-USD",
-            Coin::SOL => "SOL-USD",
-            Coin::XRP => "XRP-USD",
-        }
-    }
-
     pub fn from_index(index: u8) -> Option<Self> {
         match index {
             1 => Some(Coin::BTC),
