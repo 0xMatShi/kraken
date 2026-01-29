@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 pub use log_capture::UiLogLayer;
 
 // Количество уровней стакана для отображения
-pub const ORDER_BOOK_DEPTH: usize = 10;
+pub const ORDER_BOOK_DEPTH: usize = 20;
 // Максимум записей в истории
 const MAX_HISTORY_ENTRIES: usize = 50;
 
