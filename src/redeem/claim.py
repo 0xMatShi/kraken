@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 import aiohttp
 import websockets
@@ -388,6 +389,7 @@ class AutoClaim:
 
 def show_menu():
     """Показывает меню выбора монеты"""
+    os.system("cls" if os.name == "nt" else "clear")
     print("\n" + "=" * 60)
     print("💰 POLYMARKET AUTO-CLAIM BOT")
     print("=" * 60)
