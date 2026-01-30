@@ -200,7 +200,7 @@ impl RealEngine {
             info!("❌ Правило не выполнено: сумма бидов на сильной стороне {:.0} < 1000", total_strong_bids);
             return None;
         }
-        if strong_bid_size_1 < 300.0 {
+        if strong_bid_size_1 < 500.0 {
             info!("❌ Правило не выполнено: первый бид на сильной стороне {:.0} < 300", strong_bid_size_1);
             return None;
         }
