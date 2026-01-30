@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 use std::collections::{HashSet, HashMap};
+use std::time::{Duration, Instant};
 use crate::models::{Portfolio, Side, MarketPrices, Trend, FirstLeg, SecondLeg, TradePair, PriceLock};
 use crate::utils::config::TradingConfig;
 use crate::ui::{self, UiState};
@@ -377,6 +378,76 @@ impl RealEngine {
         }
     }
 
+    /// Пытается переразместить вторую ногу с повышением цены на 0.01
+    /// Вызывается из таймера через 5 секунд после размещения второй ноги
+    fn try_reprice_second_leg(self: &Arc<Self>, first_leg_order_id: &str, second_leg_order_id: &str) {
+        // Проверяем существует ли еще эта пара и вторая нога
+        let reprice_params = {
+            let pairs = self.trade_pairs.lock().unwrap();
+            if let Some(pair) = pairs.get(first_leg_order_id) {
+                if let Some(second_leg) = &pair.second_leg {
+                    // Проверяем что это та же самая нога (по order_id)
+                    if second_leg.order_id == second_leg_order_id {
+                        // Проверяем что не исполнена полностью
+                        if second_leg.filled < second_leg.size {
+                            Some((
+                                second_leg.side,
+                                second_leg.price,
+                                second_leg.size,
+                                pair.first_leg.price,
+                            ))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        let (side, old_price, size, first_leg_price) = match reprice_params {
+            Some(params) => params,
+            None => return, // Нога уже исполнена или отменена
+        };
+
+        let new_price = Self::round_price(old_price + 0.01);
+
+        info!("🔄 Переразмещаем вторую ногу {}: {:?} {:.2} → {:.2}",
+            second_leg_order_id, side, old_price, new_price);
+
+        // Отменяем старый ордер
+        super::streams::cancel_order(self, second_leg_order_id.to_string());
+
+        // Удаляем из mapping
+        {
+            let mut mapping = self.second_leg_to_first.lock().unwrap();
+            mapping.remove(second_leg_order_id);
+        }
+
+        // Удаляем вторую ногу из пары
+        {
+            let mut pairs = self.trade_pairs.lock().unwrap();
+            if let Some(pair) = pairs.get_mut(first_leg_order_id) {
+                pair.second_leg = None;
+            }
+        }
+
+        // Размещаем новую вторую ногу с повышенной ценой
+        super::streams::place_second_leg(
+            self,
+            first_leg_order_id.to_string(),
+            side,
+            new_price,
+            size,
+            first_leg_price,
+        );
+    }
+
     /// Регистрирует первую ногу после получения order_id
     pub fn register_first_leg(&self, order_id: String, side: Side, price: f64, size: f64) {
         let is_up = matches!(side, Side::Up);
@@ -468,8 +539,9 @@ impl RealEngine {
     }
 
     /// Регистрирует вторую ногу после получения order_id
+    /// Запускает таймер переразмещения через 5 секунд
     pub fn register_second_leg(
-        &self,
+        self: &Arc<Self>,
         first_leg_order_id: &str,
         second_leg_order_id: String,
         side: Side,
@@ -484,8 +556,9 @@ impl RealEngine {
             side,
             filled: 0.0,
             first_leg_price,
+            last_placed: Instant::now(),
         };
-        
+
         // Обновляем TradePair
         {
             let mut pairs = self.trade_pairs.lock().unwrap();
@@ -493,14 +566,24 @@ impl RealEngine {
                 pair.second_leg = Some(second_leg);
             }
         }
-        
+
         // Добавляем mapping second -> first
         {
             let mut mapping = self.second_leg_to_first.lock().unwrap();
             mapping.insert(second_leg_order_id.clone(), first_leg_order_id.to_string());
         }
-        
+
         info!("📝 Вторая нога зарегистрирована: {} {:?} @ {:.2}", second_leg_order_id, side, price);
+
+        // Запускаем таймер переразмещения через 5 секунд
+        let engine_clone = Arc::clone(self);
+        let first_id = first_leg_order_id.to_string();
+        let second_id = second_leg_order_id.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            engine_clone.try_reprice_second_leg(&first_id, &second_id);
+        });
     }
 
     /// Обрабатывает полное исполнение второй ноги - освобождает цену
