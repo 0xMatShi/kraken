@@ -355,7 +355,7 @@ impl RealEngine {
         // Текущие лучшие биды для каждой стороны
         let up_best_bid_cents = (prices.up_bid * 100.0).round() as u32;
         let down_best_bid_cents = (prices.down_bid * 100.0).round() as u32;
-        
+
         let orders_to_cancel: Vec<(String, f64)> = {
             let first_legs = self.first_legs_by_price.lock().unwrap();
             first_legs.iter()
@@ -417,21 +417,36 @@ impl RealEngine {
     }
 
     /// Обрабатывает полное исполнение первой ноги и размещает вторую
+    /// Вторая нога размещается по текущему best_bid слабой стороны
     pub fn on_first_leg_filled(self: &Arc<Self>, order_id: &str) {
+        // Получаем текущие рыночные цены (обновляются в process_tick)
+        let current_prices = {
+            let prices_opt = self.last_prices.lock().unwrap();
+            match *prices_opt {
+                Some(prices) => prices,
+                None => {
+                    warn!("❌ Не удалось получить текущие цены для размещения второй ноги");
+                    return;
+                }
+            }
+        };
+
         let trade_pair = {
             let pairs = self.trade_pairs.lock().unwrap();
             pairs.get(order_id).cloned()
         };
-        
+
         if let Some(pair) = trade_pair {
             let first_leg = &pair.first_leg;
             let second_leg_side = first_leg.side.opposite();
-            let second_leg_price = Self::round_price(0.99 - first_leg.price);
+
+            // Берем текущий best_bid слабой стороны
+            let second_leg_price = current_prices.bid_for_side(second_leg_side);
             let second_leg_size = first_leg.size;
-            
-            info!("🎯 Первая нога {} исполнена! Размещаем вторую ногу: {:?} @ {:.2}",
+
+            info!("🎯 Первая нога {} исполнена! Размещаем вторую ногу: {:?} @ {:.2} (текущий best_bid)",
                 order_id, second_leg_side, second_leg_price);
-            
+
             // Удаляем из first_legs_by_price
             {
                 let is_up = matches!(first_leg.side, Side::Up);
@@ -439,7 +454,7 @@ impl RealEngine {
                 let mut first_legs = self.first_legs_by_price.lock().unwrap();
                 first_legs.remove(&(is_up, price_cents));
             }
-            
+
             // Размещаем вторую ногу
             super::streams::place_second_leg(
                 self,
