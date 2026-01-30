@@ -932,7 +932,7 @@ fn render_configuration(frame: &mut Frame, area: Rect, config: &UiConfig) {
             ),
         ]),
         Line::from(vec![
-            Span::styled("seconds_before = ", Style::default().fg(Color::Gray)),
+            Span::styled("seconds_before_start = ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{}", config.seconds_before_start),
                 Style::default().fg(Color::White),
