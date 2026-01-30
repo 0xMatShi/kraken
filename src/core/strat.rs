@@ -418,7 +418,7 @@ impl RealEngine {
 
         // Вычисляем новый интервал таймера (уменьшаем на 1, минимум 2)
         let new_interval = if current_interval > 2 {
-            current_interval - 1
+            current_interval - 2
         } else {
             2
         };
@@ -577,7 +577,7 @@ impl RealEngine {
                 second_leg_price,
                 second_leg_size,
                 first_leg.price,
-                9, // Начальный интервал таймера
+                10, // Начальный интервал таймера
             );
         }
     }
