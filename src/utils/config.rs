@@ -49,6 +49,19 @@ impl Config {
     pub fn save(&self) -> Result<()> {
         let config_path = "config.toml";
 
+        // Форматируем f64 значения явно с одним знаком после запятой минимум
+        let max_balance_str = if self.trading.max_balance.fract() == 0.0 {
+            format!("{:.1}", self.trading.max_balance)
+        } else {
+            format!("{}", self.trading.max_balance)
+        };
+
+        let size_str = if self.trading.size.fract() == 0.0 {
+            format!("{:.1}", self.trading.size)
+        } else {
+            format!("{}", self.trading.size)
+        };
+
         let toml_content = format!(
 r#"# Торговые параметры MMDNA бота
 
@@ -65,8 +78,8 @@ seconds_before_start = {}
 # Стратегия размещения первых ног: "strong" (только на сильной), "weak" (только на слабой), "both" (обе)
 legs_strategy = "{}"
 "#,
-            self.trading.max_balance,
-            self.trading.size,
+            max_balance_str,
+            size_str,
             self.trading.seconds_before_start,
             self.trading.legs_strategy
         );
