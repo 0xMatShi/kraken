@@ -18,10 +18,18 @@ pub struct TradingConfig {
     /// Через сколько секунд после начала события можно начинать торговать
     #[serde(default = "default_seconds_before_start")]
     pub seconds_before_start: i64,
+
+    /// Стратегия размещения первых ног: "strong", "weak", "both"
+    #[serde(default = "default_legs_strategy")]
+    pub legs_strategy: String,
 }
 
 fn default_seconds_before_start() -> i64 {
     20
+}
+
+fn default_legs_strategy() -> String {
+    "both".to_string()
 }
 
 impl Config {
@@ -35,5 +43,37 @@ impl Config {
             .with_context(|| format!("Не удалось распарсить {}", config_path))?;
 
         Ok(config)
+    }
+
+    /// Сохраняет конфигурацию в файл config.toml
+    pub fn save(&self) -> Result<()> {
+        let config_path = "config.toml";
+
+        let toml_content = format!(
+r#"# Торговые параметры MMDNA бота
+
+[trading]
+# Максимальный баланс для торговли (USD)
+max_balance = {}
+
+# Размер одного ордера (количество акций)
+size = {}
+
+# Через сколько секунд после начала события можно начинать торговать
+seconds_before_start = {}
+
+# Стратегия размещения первых ног: "strong" (только на сильной), "weak" (только на слабой), "both" (обе)
+legs_strategy = "{}"
+"#,
+            self.trading.max_balance,
+            self.trading.size,
+            self.trading.seconds_before_start,
+            self.trading.legs_strategy
+        );
+
+        fs::write(config_path, toml_content)
+            .with_context(|| format!("Не удалось записать в файл {}", config_path))?;
+
+        Ok(())
     }
 }

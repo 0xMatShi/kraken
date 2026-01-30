@@ -17,6 +17,123 @@ use polymarket_client_sdk::clob::ws::{Client as WsClient};
 
 use tokio::time::Duration;
 
+/// Интерактивное меню редактирования конфига
+fn edit_config_menu(config: &mut Config) -> anyhow::Result<()> {
+    loop {
+        // Очищаем экран и показываем текущие параметры
+        print!("\x1B[2J\x1B[1;1H");
+        println!("=== Edit Config ===");
+        println!("1. max_balance = {}", config.trading.max_balance);
+        println!("2. size = {}", config.trading.size);
+        println!("3. seconds_before_start = {}", config.trading.seconds_before_start);
+        println!("4. legs_strategy = \"{}\"", config.trading.legs_strategy);
+        println!("5. Save & Exit");
+        println!("6. Cancel (without saving)");
+        print!("> ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+
+        match input.trim() {
+            "1" => {
+                // Редактируем max_balance
+                print!("Enter new max_balance: ");
+                io::stdout().flush()?;
+                let mut value = String::new();
+                io::stdin().read_line(&mut value)?;
+                match value.trim().parse::<f64>() {
+                    Ok(v) if v > 0.0 => {
+                        config.trading.max_balance = v;
+                        println!("✅ max_balance updated to {}", v);
+                    }
+                    _ => {
+                        println!("❌ Invalid value");
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            "2" => {
+                // Редактируем size
+                print!("Enter new size: ");
+                io::stdout().flush()?;
+                let mut value = String::new();
+                io::stdin().read_line(&mut value)?;
+                match value.trim().parse::<f64>() {
+                    Ok(v) if v > 0.0 => {
+                        config.trading.size = v;
+                        println!("✅ size updated to {}", v);
+                    }
+                    _ => {
+                        println!("❌ Invalid value");
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            "3" => {
+                // Редактируем seconds_before_start
+                print!("Enter new seconds_before_start: ");
+                io::stdout().flush()?;
+                let mut value = String::new();
+                io::stdin().read_line(&mut value)?;
+                match value.trim().parse::<i64>() {
+                    Ok(v) if v >= 0 => {
+                        config.trading.seconds_before_start = v;
+                        println!("✅ seconds_before_start updated to {}", v);
+                    }
+                    _ => {
+                        println!("❌ Invalid value");
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            "4" => {
+                // Редактируем legs_strategy
+                print!("\x1B[2J\x1B[1;1H");
+                println!("Select legs_strategy:");
+                println!("1. strong");
+                println!("2. weak");
+                println!("3. both");
+                print!("> ");
+                io::stdout().flush()?;
+                let mut strategy_input = String::new();
+                io::stdin().read_line(&mut strategy_input)?;
+                match strategy_input.trim() {
+                    "1" => {
+                        config.trading.legs_strategy = "strong".to_string();
+                        println!("✅ legs_strategy updated to \"strong\"");
+                    }
+                    "2" => {
+                        config.trading.legs_strategy = "weak".to_string();
+                        println!("✅ legs_strategy updated to \"weak\"");
+                    }
+                    "3" => {
+                        config.trading.legs_strategy = "both".to_string();
+                        println!("✅ legs_strategy updated to \"both\"");
+                    }
+                    _ => {
+                        println!("❌ Invalid choice");
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            "5" => {
+                // Сохраняем и выходим
+                config.save()?;
+                println!("✅ Config saved to config.toml");
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                return Ok(());
+            }
+            "6" => {
+                // Отменяем без сохранения
+                println!("❌ Changes discarded");
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                return Ok(());
+            }
+            _ => continue,
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -28,12 +145,13 @@ async fn main() -> anyhow::Result<()> {
     // Инициализация логгера (сохраняем guard для поддержания записи в файл)
     let _log_guard = utils::logger::init_logger()?;
 
-    // Загружаем торговую конфигурацию
-    let app_config = Config::load()?;
-    tracing::info!("Конфигурация загружена: MAX_BALANCE={:.1}, SIZE={:.1}, SECONDS_BEFORE_START={}",
+    // Загружаем торговую конфигурацию (mut для редактирования)
+    let mut app_config = Config::load()?;
+    tracing::info!("Конфигурация загружена: MAX_BALANCE={:.1}, SIZE={:.1}, SECONDS_BEFORE_START={}, LEGS_STRATEGY={}",
         app_config.trading.max_balance,
         app_config.trading.size,
-        app_config.trading.seconds_before_start
+        app_config.trading.seconds_before_start,
+        app_config.trading.legs_strategy
     );
 
     // Загружаем переменные окружения
@@ -60,7 +178,7 @@ async fn main() -> anyhow::Result<()> {
         // Очищаем экран и показываем меню
         print!("\x1B[2J\x1B[1;1H");
         println!("MMDNA-Bot");
-        println!("1. Start | 2. Exit");
+        println!("1. Start | 2. Edit Config | 3. Exit");
         print!("> "); io::stdout().flush().unwrap();
 
         let mut input = String::new();
@@ -68,7 +186,13 @@ async fn main() -> anyhow::Result<()> {
 
         match input.trim() {
             "1" => {},          // Start
-            "2" => break,       // Exit
+            "2" => {            // Edit Config
+                if let Err(e) = edit_config_menu(&mut app_config) {
+                    tracing::error!("Ошибка редактирования конфига: {}", e);
+                }
+                continue;
+            }
+            "3" => break,       // Exit
             _ => continue,      // Invalid input
         }
 

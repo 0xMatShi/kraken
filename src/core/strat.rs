@@ -130,89 +130,85 @@ impl RealEngine {
     }
 
     /// Определяет тренд на основе изменения цен
-    /// 
+    ///
     /// Тренд сильной стороны: bb слабой стороны уменьшился (сильная становится еще дороже)
+    /// Тренд слабой стороны: bb сильной стороны уменьшился (слабая догоняет)
     pub fn detect_trend(&self, prev: &MarketPrices, current: &MarketPrices) -> Trend {
         let strong_side = current.strong_side();
-        
+
         match strong_side {
             Side::Up => {
-                // UP сильная сторона (up_bid > 0.5)
+                // UP сильная сторона (up_bid > down_bid)
                 // Тренд сильной стороны: down_bid уменьшился
                 if current.down_bid < prev.down_bid {
                     return Trend::Strong;
                 }
+                // Тренд слабой стороны: up_bid уменьшился
+                if current.up_bid < prev.up_bid {
+                    return Trend::Weak;
+                }
             }
             Side::Down => {
-                // DOWN сильная сторона (down_bid > 0.5)
+                // DOWN сильная сторона (down_bid > up_bid)
                 // Тренд сильной стороны: up_bid уменьшился
                 if current.up_bid < prev.up_bid {
                     return Trend::Strong;
                 }
+                // Тренд слабой стороны: down_bid уменьшился
+                if current.down_bid < prev.down_bid {
+                    return Trend::Weak;
+                }
             }
         }
-        
+
         Trend::None
     }
 
     /// Вычисляет цену для размещения первой ноги
     /// Возвращает (сторона размещения, цена) или None если условия не выполнены
-    /// 
-    /// Размещение только на сильной стороне при тренде сильной стороны
+    ///
+    /// Универсальная логика для обоих типов трендов:
+    /// - Trend::Strong: размещаем на сильной стороне
+    /// - Trend::Weak: размещаем на слабой стороне
     pub fn calculate_first_leg_placement(&self, prices: &MarketPrices, trend: Trend) -> Option<(Side, f64)> {
-        // Только тренд сильной стороны
-        if trend != Trend::Strong {
+        // Только если есть тренд
+        if trend == Trend::None {
             return None;
         }
-        
+
         let spread_cents = prices.spread_cents();
-        
+
         // Спред 4+ цента - ничего не делаем
         if spread_cents >= 4 {
             info!("⏸️ Спред {} центов >= 4 - не размещаем", spread_cents);
             return None;
         }
-        
+
         // Спред 1 цент (нормальный) - ничего не делаем
         if spread_cents <= 1 {
             return None;
         }
-        
+
         // Обрабатываем спред 2-3 цента
         let strong_side = prices.strong_side();
         let weak_side = prices.weak_side();
-        let weak_bb = prices.bid_for_side(weak_side);
-        
-        // Цена = 0.99 - weak_bb, чтобы сумма была 0.99
-        let target_price = Self::round_price(0.99 - weak_bb);
-        
-        // === НОВЫЕ ПРАВИЛА ПРОВЕРКИ ===
-        
-        // Определяем параметры стакана на сильной стороне
-        let (strong_bid_size_1, strong_bid_size_2) = match strong_side {
-            Side::Up => (prices.up_bid_size, prices.up_bid_size_2),
-            Side::Down => (prices.down_bid_size, prices.down_bid_size_2),
+
+        // Определяем сторону размещения в зависимости от типа тренда
+        let (placement_side, opposite_side) = match trend {
+            Trend::Strong => (strong_side, weak_side),
+            Trend::Weak => (weak_side, strong_side),
+            Trend::None => return None,
         };
 
-        // ПРАВИЛО : На двух бидах сильной стороны должно быть >= 1000 акций в сумме
-        //           и на первом биде минимум 300 акций
-        let total_strong_bids = strong_bid_size_1 + strong_bid_size_2;
-        if total_strong_bids < 1500.0 {
-            info!("❌ Правило не выполнено: сумма бидов на сильной стороне {:.0} < 1000", total_strong_bids);
-            return None;
-        }
-        if strong_bid_size_1 < 500.0 {
-            info!("❌ Правило не выполнено: первый бид на сильной стороне {:.0} < 300", strong_bid_size_1);
-            return None;
-        }
-        
-        info!("✅ Правило выполнено: 1st bid {:.0}, 2nd bid {:.0}, сумма {:.0} >= 1000",
-            strong_bid_size_1, strong_bid_size_2, total_strong_bids);
-        
-        info!("📈 Тренд СИЛЬНОЙ стороны ({:?}): weak_bb={:.2}, target_price={:.2}",
-            strong_side, weak_bb, target_price);
-        
-        Some((strong_side, target_price))
+        let opposite_bb = prices.bid_for_side(opposite_side);
+
+        // Цена = 0.99 - opposite_bb, чтобы сумма была 0.99
+        let target_price = Self::round_price(0.99 - opposite_bb);
+
+        info!("📈 Тренд {:?} на стороне {:?}: opposite_bb={:.2}, target_price={:.2}",
+            trend, placement_side, opposite_bb, target_price);
+
+        Some((placement_side, target_price))
     }
 
     /// Основной метод стратегии - точка входа для каждого тика рынка
@@ -309,9 +305,26 @@ impl RealEngine {
 
         // Определяем тренд
         let trend = self.detect_trend(&prev, &prices);
-        
+
         if trend == Trend::None {
             info!("⏸️ Нет тренда - не размещаем");
+            return;
+        }
+
+        // Фильтруем тренды по legs_strategy
+        let legs_strategy = &self.config.legs_strategy;
+        let should_trade = match legs_strategy.as_str() {
+            "strong" => trend == Trend::Strong,
+            "weak" => trend == Trend::Weak,
+            "both" => true,
+            _ => {
+                warn!("⚠️ Неизвестная legs_strategy: {}. Используем 'both'", legs_strategy);
+                true
+            }
+        };
+
+        if !should_trade {
+            info!("⏸️ Тренд {:?} не соответствует legs_strategy '{}' - не размещаем", trend, legs_strategy);
             return;
         }
 
