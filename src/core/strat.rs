@@ -449,7 +449,7 @@ impl RealEngine {
         }
 
         // Рынок изменился - переразмещаем по новому best_bid
-        let new_price = Self::round_price(current_best_bid);
+        let new_price = Self::round_price(old_price - 0.01);
 
         info!("🔄 Переразмещаем вторую ногу {}: {:?} {:.2} → {:.2} (best_bid изменился)",
             second_leg_order_id, side, old_price, new_price);
