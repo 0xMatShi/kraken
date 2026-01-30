@@ -167,9 +167,9 @@ impl RealEngine {
         
         let spread_cents = prices.spread_cents();
         
-        // Спред 3+ цента - ничего не делаем
-        if spread_cents >= 3 {
-            info!("⏸️ Спред {} центов >= 3 - не размещаем", spread_cents);
+        // Спред 4+ цента - ничего не делаем
+        if spread_cents >= 4 {
+            info!("⏸️ Спред {} центов >= 4 - не размещаем", spread_cents);
             return None;
         }
         
@@ -178,7 +178,7 @@ impl RealEngine {
             return None;
         }
         
-        // Теперь обрабатываем только спред 2 цента
+        // Обрабатываем спред 2-3 цента
         let strong_side = prices.strong_side();
         let weak_side = prices.weak_side();
         let weak_bb = prices.bid_for_side(weak_side);
@@ -197,11 +197,11 @@ impl RealEngine {
         // ПРАВИЛО : На двух бидах сильной стороны должно быть >= 1000 акций в сумме
         //           и на первом биде минимум 300 акций
         let total_strong_bids = strong_bid_size_1 + strong_bid_size_2;
-        if total_strong_bids < 1.0 {
+        if total_strong_bids < 1000.0 {
             info!("❌ Правило не выполнено: сумма бидов на сильной стороне {:.0} < 1000", total_strong_bids);
             return None;
         }
-        if strong_bid_size_1 < 1.0 {
+        if strong_bid_size_1 < 500.0 {
             info!("❌ Правило не выполнено: первый бид на сильной стороне {:.0} < 300", strong_bid_size_1);
             return None;
         }
