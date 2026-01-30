@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::collections::{HashSet, HashMap};
 use std::time::{Duration, Instant};
-use crate::models::{Portfolio, Side, MarketPrices, Trend, FirstLeg, SecondLeg, TradePair, PriceLock};
+use crate::models::{Portfolio, Side, MarketPrices, Trend, FirstLeg, SecondLeg, TradePair, PriceLock, CumulativeState, CumulativePhase};
 use crate::utils::config::TradingConfig;
 use crate::ui::{self, UiState};
 
@@ -39,6 +39,8 @@ pub struct RealEngine {
     /// Активные первые ноги по цене для отмены при лучшей цене
     /// Ключ: (side_is_up, price_cents) -> order_id
     pub first_legs_by_price: Mutex<HashMap<(bool, u32), String>>,
+    /// Состояние cumulative стратегии
+    pub cumulative_state: Mutex<Option<CumulativeState>>,
 }
 
 impl RealEngine {
@@ -74,6 +76,7 @@ impl RealEngine {
             second_leg_to_first: Mutex::new(HashMap::new()),
             price_lock: Mutex::new(PriceLock::default()),
             first_legs_by_price: Mutex::new(HashMap::new()),
+            cumulative_state: Mutex::new(None),
         }
     }
 
@@ -121,6 +124,7 @@ impl RealEngine {
                 self.trade_pairs.lock().unwrap().clear();
                 self.second_leg_to_first.lock().unwrap().clear();
                 self.first_legs_by_price.lock().unwrap().clear();
+                *self.cumulative_state.lock().unwrap() = None;
                 // price_lock не очищаем - пусть цены остаются заблокированными
             }
             Err(e) => {
@@ -313,6 +317,13 @@ impl RealEngine {
 
         // Фильтруем тренды по legs_strategy
         let legs_strategy = &self.config.legs_strategy;
+
+        // Cumulative стратегия: полностью отдельная логика
+        if legs_strategy == "cumulative" {
+            self.process_cumulative_tick(prices, trend);
+            return;
+        }
+
         let should_trade = match legs_strategy.as_str() {
             "strong" => trend == Trend::Strong,
             "weak" => trend == Trend::Weak,
@@ -388,6 +399,46 @@ impl RealEngine {
         for (order_id, order_price) in orders_to_cancel {
             info!("🗑️ Отменяем устаревший ордер {} @ {:.2} (цена ниже текущего бида)", order_id, order_price);
             super::streams::cancel_order(self, order_id);
+        }
+
+        // Проверяем устаревшие cumulative ордера
+        let mut cum_state = self.cumulative_state.lock().unwrap();
+        if let Some(state) = cum_state.as_mut() {
+            match state.phase {
+                CumulativePhase::AccumulatingFirstLeg => {
+                    // Если цена размещения первой ноги ниже текущего best_bid - отменяем
+                    if let Some(placed_price) = state.first_leg_placed_price {
+                        let best_bid = prices.bid_for_side(state.first_leg_side);
+                        if placed_price < best_bid {
+                            info!("🗑️ [Cumulative] Отменяем устаревшие первые ноги @ {:.2} (best_bid {:.2})", placed_price, best_bid);
+                            let orders: Vec<String> = state.first_leg_orders.iter().cloned().collect();
+                            state.first_leg_placed_price = None;
+                            drop(cum_state);
+                            for order_id in orders {
+                                super::streams::cancel_order(self, order_id);
+                            }
+                            return;
+                        }
+                    }
+                }
+                CumulativePhase::PlacingSecondLeg => {
+                    // Если цена размещения второй ноги ниже текущего best_bid слабой стороны - отменяем
+                    if let Some(placed_price) = state.second_leg_placed_price {
+                        let weak_side = state.first_leg_side.opposite();
+                        let best_bid = prices.bid_for_side(weak_side);
+                        if placed_price < best_bid {
+                            info!("🗑️ [Cumulative] Отменяем устаревшие вторые ноги @ {:.2} (best_bid {:.2})", placed_price, best_bid);
+                            let orders: Vec<String> = state.second_leg_orders.iter().cloned().collect();
+                            state.second_leg_placed_price = None;
+                            drop(cum_state);
+                            for order_id in orders {
+                                super::streams::cancel_order(self, order_id);
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -697,6 +748,46 @@ impl RealEngine {
             }
             
             info!("🔓 Первая нога {} отменена, цена {:.2} разблокирована", order_id, first_leg.price);
+        }
+    }
+
+    /// Вычисляет размеры ордеров для батчевого размещения
+    ///
+    /// Разбивает remaining на порции по unit_size.
+    /// Остаток <= 5.0 прибавляется к последнему ордеру.
+    pub fn calculate_order_sizes(remaining: f64, unit_size: f64) -> Vec<f64> {
+        if remaining <= 0.0 {
+            return vec![];
+        }
+
+        let full_count = (remaining / unit_size).floor() as usize;
+        let remainder = Self::round_price(remaining - full_count as f64 * unit_size);
+
+        if remainder == 0.0 {
+            // Точно делится
+            return vec![unit_size; full_count];
+        }
+
+        if full_count == 0 {
+            // Только остаток
+            return vec![remainder];
+        }
+
+        if remainder > 5.0 {
+            // Остаток достаточно большой - отдельный ордер
+            let mut sizes = vec![unit_size; full_count];
+            sizes.push(remainder);
+            return sizes;
+        }
+
+        // Остаток <= 5.0 - прибавляем к последнему
+        if full_count >= 2 {
+            let mut sizes = vec![unit_size; full_count - 1];
+            sizes.push(Self::round_price(unit_size + remainder));
+            sizes
+        } else {
+            // full_count == 1
+            vec![Self::round_price(unit_size + remainder)]
         }
     }
 

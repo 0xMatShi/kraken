@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 pub use log_capture::UiLogLayer;
 
 // Количество уровней стакана для отображения
-pub const ORDER_BOOK_DEPTH: usize = 20;
+pub const ORDER_BOOK_DEPTH: usize = 19;
 // Максимум записей в истории
 const MAX_HISTORY_ENTRIES: usize = 50;
 
@@ -93,6 +93,7 @@ pub struct EventInfo {
 pub struct UiConfig {
     pub max_balance: f64,
     pub size: f64,
+    pub max_size_side: f64,
     pub seconds_before_start: i64,
     pub legs_strategy: String,
 }
@@ -364,11 +365,12 @@ pub fn clear_our_bid_prices(state: &UiState) {
 }
 
 /// Установить конфигурацию для отображения
-pub fn set_config(state: &UiState, max_balance: f64, size: f64, seconds_before_start: i64, legs_strategy: String) {
+pub fn set_config(state: &UiState, max_balance: f64, size: f64, max_size_side: f64, seconds_before_start: i64, legs_strategy: String) {
     if let Ok(mut s) = state.lock() {
         s.config = UiConfig {
             max_balance,
             size,
+            max_size_side,
             seconds_before_start,
             legs_strategy,
         };
@@ -424,7 +426,7 @@ pub fn render(frame: &mut Frame, state: &UiState) {
     render_history(frame, history_area, &state.trade_history);
 
     // Правая часть: Configuration (6 строк) или Hedge (12 строк) + Order Book (остаток)
-    let config_height = if state.trading_mode == TradingMode::Hedge { 12 } else { 6 };
+    let config_height = if state.trading_mode == TradingMode::Hedge { 12 } else { 7 };
     let [config_area, order_book_area] =
         Layout::vertical([Constraint::Length(config_height), Constraint::Fill(1)]).areas(right_area);
 
@@ -928,6 +930,13 @@ fn render_configuration(frame: &mut Frame, area: Rect, config: &UiConfig) {
             Span::styled("size = ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{:.1}", config.size),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("max_size_side = ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{:.1}", config.max_size_side),
                 Style::default().fg(Color::White),
             ),
         ]),

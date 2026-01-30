@@ -15,6 +15,10 @@ pub struct TradingConfig {
     /// Размер одного ордера (количество акций)
     pub size: f64,
 
+    /// Максимальный размер позиции на одной стороне (для cumulative стратегии)
+    #[serde(default = "default_max_size_side")]
+    pub max_size_side: f64,
+
     /// Через сколько секунд после начала события можно начинать торговать
     #[serde(default = "default_seconds_before_start")]
     pub seconds_before_start: i64,
@@ -26,6 +30,10 @@ pub struct TradingConfig {
 
 fn default_seconds_before_start() -> i64 {
     20
+}
+
+fn default_max_size_side() -> f64 {
+    50.0
 }
 
 fn default_legs_strategy() -> String {
@@ -62,6 +70,12 @@ impl Config {
             format!("{}", self.trading.size)
         };
 
+        let max_size_side_str = if self.trading.max_size_side.fract() == 0.0 {
+            format!("{:.1}", self.trading.max_size_side)
+        } else {
+            format!("{}", self.trading.max_size_side)
+        };
+
         let toml_content = format!(
 r#"# Торговые параметры MMDNA бота
 
@@ -72,14 +86,18 @@ max_balance = {}
 # Размер одного ордера (количество акций)
 size = {}
 
+# Максимальный размер позиции на одной стороне (для cumulative стратегии)
+max_size_side = {}
+
 # Через сколько секунд после начала события можно начинать торговать
 seconds_before_start = {}
 
-# Стратегия размещения первых ног: "strong" (только на сильной), "weak" (только на слабой), "both" (обе)
+# Стратегия размещения первых ног: "strong" (только на сильной), "weak" (только на слабой), "both" (обе), "cumulative"
 legs_strategy = "{}"
 "#,
             max_balance_str,
             size_str,
+            max_size_side_str,
             self.trading.seconds_before_start,
             self.trading.legs_strategy
         );

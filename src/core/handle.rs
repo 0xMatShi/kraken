@@ -142,6 +142,18 @@ fn match_and_process_taker_leg(engine: &Arc<RealEngine>, taker_order_id: &str) {
             return;
         }
 
+        // Проверяем cumulative ордера
+        if let Some(is_first) = engine.is_cumulative_order(taker_order_id) {
+            if is_first {
+                info!("🎯 Taker fill: найдена cumulative ПЕРВАЯ нога {}", taker_order_id);
+                // Для taker fill cumulative первой ноги - считаем полностью исполненной
+                // (taker fill = весь ордер исполнен разом)
+            } else {
+                info!("🎯 Taker fill: найдена cumulative ВТОРАЯ нога {}", taker_order_id);
+            }
+            return;
+        }
+
         // Ещё не зарегистрирована - ждём
         std::thread::sleep(poll_interval);
     }
@@ -272,8 +284,26 @@ pub fn handle_ws_order(
                                 // Вторая нога исполнена - освобождаем цену
                                 engine.on_second_leg_filled(&order_id);
                             }
+
+                            // Проверяем cumulative ордера
+                            if let Some(is_first) = engine.is_cumulative_order(&order_id) {
+                                if is_first {
+                                    engine.on_cumulative_first_leg_fill(&order_id, size_for_portfolio, true);
+                                } else {
+                                    engine.on_cumulative_second_leg_fill(&order_id, size_for_portfolio, true);
+                                }
+                            }
                         } else {
                             drop(orders_info);
+
+                            // Partial fill: обновляем cumulative
+                            if let Some(is_first) = engine.is_cumulative_order(&order_id) {
+                                if is_first {
+                                    engine.on_cumulative_first_leg_fill(&order_id, size_for_portfolio, false);
+                                } else {
+                                    engine.on_cumulative_second_leg_fill(&order_id, size_for_portfolio, false);
+                                }
+                            }
                         }
 
                         if size_for_portfolio > 0.0 {
@@ -355,6 +385,11 @@ pub fn handle_ws_order(
             if is_first_leg {
                 // Первая нога отменена - освобождаем цену
                 engine.on_first_leg_cancelled(&order_id);
+            }
+
+            // Проверяем cumulative ордера
+            if !is_first_leg {
+                engine.on_cumulative_order_cancelled(&order_id);
             }
 
             warn!(

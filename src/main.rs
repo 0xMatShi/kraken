@@ -25,10 +25,11 @@ fn edit_config_menu(config: &mut Config) -> anyhow::Result<()> {
         println!("=== Edit Config ===");
         println!("1. max_balance = {}", config.trading.max_balance);
         println!("2. size = {}", config.trading.size);
-        println!("3. seconds_before_start = {}", config.trading.seconds_before_start);
-        println!("4. legs_strategy = \"{}\"", config.trading.legs_strategy);
-        println!("5. Save & Exit");
-        println!("6. Cancel (without saving)");
+        println!("3. max_size_side = {}", config.trading.max_size_side);
+        println!("4. seconds_before_start = {}", config.trading.seconds_before_start);
+        println!("5. legs_strategy = \"{}\"", config.trading.legs_strategy);
+        println!("6. Save & Exit");
+        println!("7. Cancel (without saving)");
         print!("> ");
         io::stdout().flush()?;
 
@@ -71,6 +72,23 @@ fn edit_config_menu(config: &mut Config) -> anyhow::Result<()> {
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
             "3" => {
+                // Редактируем max_size_side
+                print!("Enter new max_size_side: ");
+                io::stdout().flush()?;
+                let mut value = String::new();
+                io::stdin().read_line(&mut value)?;
+                match value.trim().parse::<f64>() {
+                    Ok(v) if v > 0.0 => {
+                        config.trading.max_size_side = v;
+                        println!("✅ max_size_side updated to {}", v);
+                    }
+                    _ => {
+                        println!("❌ Invalid value");
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            "4" => {
                 // Редактируем seconds_before_start
                 print!("Enter new seconds_before_start: ");
                 io::stdout().flush()?;
@@ -87,13 +105,14 @@ fn edit_config_menu(config: &mut Config) -> anyhow::Result<()> {
                 }
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
-            "4" => {
+            "5" => {
                 // Редактируем legs_strategy
                 print!("\x1B[2J\x1B[1;1H");
                 println!("Select legs_strategy:");
                 println!("1. strong");
                 println!("2. weak");
                 println!("3. both");
+                println!("4. cumulative");
                 print!("> ");
                 io::stdout().flush()?;
                 let mut strategy_input = String::new();
@@ -111,20 +130,24 @@ fn edit_config_menu(config: &mut Config) -> anyhow::Result<()> {
                         config.trading.legs_strategy = "both".to_string();
                         println!("✅ legs_strategy updated to \"both\"");
                     }
+                    "4" => {
+                        config.trading.legs_strategy = "cumulative".to_string();
+                        println!("✅ legs_strategy updated to \"cumulative\"");
+                    }
                     _ => {
                         println!("❌ Invalid choice");
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
-            "5" => {
+            "6" => {
                 // Сохраняем и выходим
                 config.save()?;
                 println!("✅ Config saved to config.toml");
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 return Ok(());
             }
-            "6" => {
+            "7" => {
                 // Отменяем без сохранения
                 println!("❌ Changes discarded");
                 std::thread::sleep(std::time::Duration::from_secs(1));
@@ -228,7 +251,7 @@ async fn main() -> anyhow::Result<()> {
                 ui::set_event_info(&ui_state, target.title.clone(), target.slug.clone(), end_date, total_seconds);
                 ui::clear_our_bid_prices(&ui_state);
                 ui::clear_open_orders(&ui_state);
-                ui::set_config(&ui_state, app_config.trading.max_balance, app_config.trading.size, app_config.trading.seconds_before_start, app_config.trading.legs_strategy.clone());
+                ui::set_config(&ui_state, app_config.trading.max_balance, app_config.trading.size, app_config.trading.max_size_side, app_config.trading.seconds_before_start, app_config.trading.legs_strategy.clone());
 
                 // Создаем реальный движок
                 let engine = Arc::new(RealEngine::new(

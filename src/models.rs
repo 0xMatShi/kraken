@@ -117,6 +117,26 @@ pub enum Trend {
     None,
 }
 
+/// Фаза cumulative стратегии
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CumulativePhase {
+    AccumulatingFirstLeg,
+    PlacingSecondLeg,
+}
+
+/// Состояние cumulative стратегии
+#[derive(Debug)]
+pub struct CumulativeState {
+    pub phase: CumulativePhase,
+    pub first_leg_side: Side,
+    pub first_leg_filled: f64,
+    pub first_leg_orders: HashSet<String>,
+    pub first_leg_placed_price: Option<f64>, // предотвращает дублирование размещения на одной цене
+    pub second_leg_filled: f64,
+    pub second_leg_orders: HashSet<String>,
+    pub second_leg_placed_price: Option<f64>,
+}
+
 /// Состояние первой ноги торговой пары
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -307,6 +327,14 @@ impl MarketPrices {
         match side {
             Side::Up => self.up_bid,
             Side::Down => self.down_bid,
+        }
+    }
+
+    /// Получить размер лучшего бида для указанной стороны
+    pub fn bid_size_for_side(&self, side: Side) -> f64 {
+        match side {
+            Side::Up => self.up_bid_size,
+            Side::Down => self.down_bid_size,
         }
     }
 }
