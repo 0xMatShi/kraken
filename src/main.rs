@@ -228,7 +228,7 @@ async fn main() -> anyhow::Result<()> {
                 ui::set_event_info(&ui_state, target.title.clone(), target.slug.clone(), end_date, total_seconds);
                 ui::clear_our_bid_prices(&ui_state);
                 ui::clear_open_orders(&ui_state);
-                ui::set_config(&ui_state, app_config.trading.max_balance, app_config.trading.size, app_config.trading.seconds_before_start);
+                ui::set_config(&ui_state, app_config.trading.max_balance, app_config.trading.size, app_config.trading.seconds_before_start, app_config.trading.legs_strategy.clone());
 
                 // Создаем реальный движок
                 let engine = Arc::new(RealEngine::new(

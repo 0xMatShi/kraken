@@ -94,6 +94,7 @@ pub struct UiConfig {
     pub max_balance: f64,
     pub size: f64,
     pub seconds_before_start: i64,
+    pub legs_strategy: String,
 }
 
 impl EventInfo {
@@ -363,12 +364,13 @@ pub fn clear_our_bid_prices(state: &UiState) {
 }
 
 /// Установить конфигурацию для отображения
-pub fn set_config(state: &UiState, max_balance: f64, size: f64, seconds_before_start: i64) {
+pub fn set_config(state: &UiState, max_balance: f64, size: f64, seconds_before_start: i64, legs_strategy: String) {
     if let Ok(mut s) = state.lock() {
         s.config = UiConfig {
             max_balance,
             size,
             seconds_before_start,
+            legs_strategy,
         };
     }
 }
@@ -930,10 +932,17 @@ fn render_configuration(frame: &mut Frame, area: Rect, config: &UiConfig) {
             ),
         ]),
         Line::from(vec![
-            Span::styled("seconds_before_start = ", Style::default().fg(Color::Gray)),
+            Span::styled("seconds_before = ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{}", config.seconds_before_start),
                 Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("legs_strategy = ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("\"{}\"", config.legs_strategy),
+                Style::default().fg(Color::Yellow),
             ),
         ]),
     ];
