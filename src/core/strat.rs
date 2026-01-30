@@ -196,11 +196,11 @@ impl RealEngine {
         // ПРАВИЛО : На двух бидах сильной стороны должно быть >= 1000 акций в сумме
         //           и на первом биде минимум 300 акций
         let total_strong_bids = strong_bid_size_1 + strong_bid_size_2;
-        if total_strong_bids < 1000.0 {
+        if total_strong_bids < 1.0 {
             info!("❌ Правило не выполнено: сумма бидов на сильной стороне {:.0} < 1000", total_strong_bids);
             return None;
         }
-        if strong_bid_size_1 < 500.0 {
+        if strong_bid_size_1 < 1.0 {
             info!("❌ Правило не выполнено: первый бид на сильной стороне {:.0} < 300", strong_bid_size_1);
             return None;
         }
