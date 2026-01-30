@@ -159,16 +159,15 @@ async fn main() -> anyhow::Result<()> {
                             (state.trading_mode, state.hedge_input_state.clone())
                         };
 
-                        // Если в режиме ввода hedge, обрабатываем ввод цифр
-                        if !matches!(hedge_input, ui::HedgeInputState::None) {
-                            if let Some(new_state) = ui::handle_hedge_input(&hedge_input) {
-                                let mut state = ui_state_clone.lock().unwrap();
-                                state.hedge_input_state = new_state;
-                            }
+                        // Проверка нажатых клавиш и обработка ввода hedge
+                        let (key_action, new_hedge_state) = ui::check_key_action(current_mode, &hedge_input);
+
+                        // Обновляем состояние hedge если изменилось
+                        if let Some(new_state) = new_hedge_state {
+                            let mut state = ui_state_clone.lock().unwrap();
+                            state.hedge_input_state = new_state;
                         }
 
-                        // Проверка нажатых клавиш
-                        let key_action = ui::check_key_action(current_mode, &hedge_input);
                         match key_action {
                             ui::KeyAction::Exit => {
                                 user_exit_flag.store(true, std::sync::atomic::Ordering::SeqCst);

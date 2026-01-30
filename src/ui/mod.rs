@@ -421,9 +421,10 @@ pub fn render(frame: &mut Frame, state: &UiState) {
     render_open_orders(frame, open_orders_area, &state.open_orders);
     render_history(frame, history_area, &state.trade_history);
 
-    // Правая часть: Configuration/Hedge (6 строк) + Order Book (остаток)
+    // Правая часть: Configuration (6 строк) или Hedge (12 строк) + Order Book (остаток)
+    let config_height = if state.trading_mode == TradingMode::Hedge { 12 } else { 6 };
     let [config_area, order_book_area] =
-        Layout::vertical([Constraint::Length(12), Constraint::Fill(1)]).areas(right_area);
+        Layout::vertical([Constraint::Length(config_height), Constraint::Fill(1)]).areas(right_area);
 
     // Показываем окно Hedge вместо Configuration в режиме Hedge
     if state.trading_mode == TradingMode::Hedge {
@@ -1094,86 +1095,85 @@ pub enum KeyAction {
     CancelHedgeInput,   // 'n' - отменить ввод
 }
 
-/// Обрабатывает ввод текста для hedge (цифры, backspace)
-/// Возвращает обновленное состояние или None если ничего не изменилось
-pub fn handle_hedge_input(current_state: &HedgeInputState) -> Option<HedgeInputState> {
+/// Проверка нажатия клавиш и обработка ввода hedge
+/// Возвращает (KeyAction, Option<HedgeInputState>)
+/// - KeyAction - действие для обработки
+/// - Option<HedgeInputState> - новое состояние ввода hedge если изменилось
+pub fn check_key_action(current_mode: TradingMode, hedge_input: &HedgeInputState) -> (KeyAction, Option<HedgeInputState>) {
     if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
         if let Ok(Event::Key(key)) = event::read() {
             if key.kind == KeyEventKind::Press {
-                match current_state {
+                // Сначала обрабатываем ввод текста в режиме hedge (цифры, backspace)
+                match hedge_input {
                     HedgeInputState::RequestingUp(input) | HedgeInputState::RequestingDown(input) => {
-                        let mut new_input = input.clone();
                         match key.code {
                             KeyCode::Char(c) if c.is_ascii_digit() || c == '.' => {
+                                let mut new_input = input.clone();
                                 new_input.push(c);
-                                return Some(match current_state {
+                                let new_state = match hedge_input {
                                     HedgeInputState::RequestingUp(_) => HedgeInputState::RequestingUp(new_input),
                                     HedgeInputState::RequestingDown(_) => HedgeInputState::RequestingDown(new_input),
                                     _ => unreachable!(),
-                                });
+                                };
+                                return (KeyAction::None, Some(new_state));
                             }
                             KeyCode::Backspace => {
+                                let mut new_input = input.clone();
                                 new_input.pop();
-                                return Some(match current_state {
+                                let new_state = match hedge_input {
                                     HedgeInputState::RequestingUp(_) => HedgeInputState::RequestingUp(new_input),
                                     HedgeInputState::RequestingDown(_) => HedgeInputState::RequestingDown(new_input),
                                     _ => unreachable!(),
-                                });
+                                };
+                                return (KeyAction::None, Some(new_state));
                             }
-                            _ => {}
+                            _ => {
+                                // Для других клавиш продолжаем обработку ниже
+                            }
                         }
                     }
                     _ => {}
                 }
-            }
-        }
-    }
-    None
-}
 
-/// Проверка нажатия клавиш: 'q' для выхода, Space для режимов, 'c'/'x' для отмены ордеров, 'b' для Hedge
-pub fn check_key_action(current_mode: TradingMode, hedge_input: &HedgeInputState) -> KeyAction {
-    if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
-        if let Ok(Event::Key(key)) = event::read() {
-            if key.kind == KeyEventKind::Press {
+                // Обрабатываем остальные клавиши
                 match key.code {
-                    KeyCode::Char('q') => return KeyAction::Exit,
-                    KeyCode::Char(' ') => return KeyAction::ToggleTrading,
-                    KeyCode::Char('c') => return KeyAction::ActivateCancelling,
+                    KeyCode::Char('q') => return (KeyAction::Exit, None),
+                    KeyCode::Char(' ') => return (KeyAction::ToggleTrading, None),
+                    KeyCode::Char('c') => return (KeyAction::ActivateCancelling, None),
                     KeyCode::Char('b') => {
                         // 'b' переключает Hedge режим (только когда не в режиме ввода)
                         if *hedge_input == HedgeInputState::None {
-                            return KeyAction::ToggleHedge;
+                            return (KeyAction::ToggleHedge, None);
                         }
                     }
                     KeyCode::Char('n') => {
                         // 'n' отменяет ввод hedge (остаемся в режиме Hedge)
                         if !matches!(hedge_input, HedgeInputState::None) {
-                            return KeyAction::CancelHedgeInput;
+                            return (KeyAction::CancelHedgeInput, None);
                         }
                     }
                     KeyCode::Char('x') => {
                         // x работает только в режиме Cancelling
                         if current_mode == TradingMode::Cancelling {
-                            return KeyAction::CancelAllOrders;
+                            return (KeyAction::CancelAllOrders, None);
                         }
                     }
                     KeyCode::Char('u') => {
                         // u работает только в режиме Hedge
                         if current_mode == TradingMode::Hedge && *hedge_input == HedgeInputState::None {
-                            return KeyAction::RequestUpHedge;
+                            return (KeyAction::RequestUpHedge, None);
                         }
                     }
                     KeyCode::Char('d') => {
                         // d работает только в режиме Hedge
                         if current_mode == TradingMode::Hedge && *hedge_input == HedgeInputState::None {
-                            return KeyAction::RequestDownHedge;
+                            return (KeyAction::RequestDownHedge, None);
                         }
                     }
                     KeyCode::Char('y') => {
                         // y подтверждает ввод hedge
                         if !matches!(hedge_input, HedgeInputState::None) {
-                            return KeyAction::ConfirmHedge;
+                            return (KeyAction::ConfirmHedge, None);
                         }
                     }
                     _ => {}
@@ -1181,5 +1181,5 @@ pub fn check_key_action(current_mode: TradingMode, hedge_input: &HedgeInputState
             }
         }
     }
-    KeyAction::None
+    (KeyAction::None, None)
 }
