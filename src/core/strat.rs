@@ -227,8 +227,8 @@ impl RealEngine {
         };
 
         match trading_mode {
-            ui::TradingMode::Stop | ui::TradingMode::Cancelling => {
-                // Stop/Cancelling режим: ничего не делаем, только обновляем prev_prices
+            ui::TradingMode::Stop | ui::TradingMode::Cancelling | ui::TradingMode::Hedge => {
+                // Stop/Cancelling/Hedge режим: ничего не делаем, только обновляем prev_prices
                 *self.prev_prices.lock().unwrap() = Some(prices);
                 return;
             }
@@ -379,7 +379,7 @@ impl RealEngine {
     }
 
     /// Пытается переразместить вторую ногу с повышением цены на 0.01
-    /// Вызывается из таймера через 5 секунд после размещения второй ноги
+    /// Вызывается из таймера после размещения второй ноги
     fn try_reprice_second_leg(self: &Arc<Self>, first_leg_order_id: &str, second_leg_order_id: &str) {
         // Проверяем существует ли еще эта пара и вторая нога
         let reprice_params = {
@@ -395,6 +395,7 @@ impl RealEngine {
                                 second_leg.price,
                                 second_leg.size,
                                 pair.first_leg.price,
+                                second_leg.timer_interval_secs,
                             ))
                         } else {
                             None
@@ -410,9 +411,16 @@ impl RealEngine {
             }
         };
 
-        let (side, old_price, size, first_leg_price) = match reprice_params {
+        let (side, old_price, size, first_leg_price, current_interval) = match reprice_params {
             Some(params) => params,
             None => return, // Нога уже исполнена или отменена
+        };
+
+        // Вычисляем новый интервал таймера (уменьшаем на 1, минимум 2)
+        let new_interval = if current_interval > 2 {
+            current_interval - 1
+        } else {
+            2
         };
 
         // Получаем текущие рыночные цены
@@ -432,16 +440,16 @@ impl RealEngine {
 
         // Если цена второй ноги == текущий best_bid, то не переразмещаем
         if (old_price - current_best_bid).abs() == 0.0 {
-            info!("✅ Вторая нога {} уже на best_bid {:.2} - перезапускаем таймер",
-                second_leg_order_id, current_best_bid);
+            info!("✅ Вторая нога {} уже на best_bid {:.2} - перезапускаем таймер на {}s",
+                second_leg_order_id, current_best_bid, new_interval);
 
-            // Запускаем новый таймер на 5 секунд
+            // Запускаем новый таймер с уменьшенным интервалом
             let engine_clone = Arc::clone(self);
             let first_id = first_leg_order_id.to_string();
             let second_id = second_leg_order_id.to_string();
 
             tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(new_interval)).await;
                 engine_clone.try_reprice_second_leg(&first_id, &second_id);
             });
 
@@ -451,8 +459,8 @@ impl RealEngine {
         // Рынок изменился - переразмещаем по новому best_bid
         let new_price = Self::round_price(old_price + 0.01);
 
-        info!("🔄 Переразмещаем вторую ногу {}: {:?} {:.2} → {:.2} (best_bid изменился)",
-            second_leg_order_id, side, old_price, new_price);
+        info!("🔄 Переразмещаем вторую ногу {}: {:?} {:.2} → {:.2} | новый таймер: {}s",
+            second_leg_order_id, side, old_price, new_price, new_interval);
 
         // Отменяем старый ордер
         super::streams::cancel_order(self, second_leg_order_id.to_string());
@@ -471,7 +479,7 @@ impl RealEngine {
             }
         }
 
-        // Размещаем новую вторую ногу с повышенной ценой
+        // Размещаем новую вторую ногу с повышенной ценой и уменьшенным интервалом таймера
         super::streams::place_second_leg(
             self,
             first_leg_order_id.to_string(),
@@ -479,6 +487,7 @@ impl RealEngine {
             new_price,
             size,
             first_leg_price,
+            new_interval,
         );
     }
 
@@ -560,7 +569,7 @@ impl RealEngine {
                 first_legs.remove(&(is_up, price_cents));
             }
 
-            // Размещаем вторую ногу
+            // Размещаем вторую ногу с начальным таймером 9 секунд
             super::streams::place_second_leg(
                 self,
                 order_id.to_string(),
@@ -568,12 +577,13 @@ impl RealEngine {
                 second_leg_price,
                 second_leg_size,
                 first_leg.price,
+                9, // Начальный интервал таймера
             );
         }
     }
 
     /// Регистрирует вторую ногу после получения order_id
-    /// Запускает таймер переразмещения через 5 секунд
+    /// Запускает таймер переразмещения с указанным интервалом
     pub fn register_second_leg(
         self: &Arc<Self>,
         first_leg_order_id: &str,
@@ -582,6 +592,7 @@ impl RealEngine {
         price: f64,
         size: f64,
         first_leg_price: f64,
+        timer_interval_secs: u64,
     ) {
         let second_leg = SecondLeg {
             order_id: second_leg_order_id.clone(),
@@ -591,6 +602,7 @@ impl RealEngine {
             filled: 0.0,
             first_leg_price,
             last_placed: Instant::now(),
+            timer_interval_secs,
         };
 
         // Обновляем TradePair
@@ -607,15 +619,16 @@ impl RealEngine {
             mapping.insert(second_leg_order_id.clone(), first_leg_order_id.to_string());
         }
 
-        info!("📝 Вторая нога зарегистрирована: {} {:?} @ {:.2}", second_leg_order_id, side, price);
+        info!("📝 Вторая нога зарегистрирована: {} {:?} @ {:.2} | таймер: {}s",
+            second_leg_order_id, side, price, timer_interval_secs);
 
-        // Запускаем таймер переразмещения через 5 секунд
+        // Запускаем таймер переразмещения с указанным интервалом
         let engine_clone = Arc::clone(self);
         let first_id = first_leg_order_id.to_string();
         let second_id = second_leg_order_id.clone();
 
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(timer_interval_secs)).await;
             engine_clone.try_reprice_second_leg(&first_id, &second_id);
         });
     }

@@ -153,18 +153,29 @@ async fn main() -> anyhow::Result<()> {
                 let engine_for_ui = engine.clone();
                 let ui_task = async {
                     loop {
-                        // Получаем текущий режим для check_key_action
-                        let current_mode = ui::get_trading_mode(&ui_state_clone);
-                        
+                        // Получаем текущий режим и состояние hedge для check_key_action
+                        let (current_mode, hedge_input) = {
+                            let state = ui_state_clone.lock().unwrap();
+                            (state.trading_mode, state.hedge_input_state.clone())
+                        };
+
+                        // Если в режиме ввода hedge, обрабатываем ввод цифр
+                        if !matches!(hedge_input, ui::HedgeInputState::None) {
+                            if let Some(new_state) = ui::handle_hedge_input(&hedge_input) {
+                                let mut state = ui_state_clone.lock().unwrap();
+                                state.hedge_input_state = new_state;
+                            }
+                        }
+
                         // Проверка нажатых клавиш
-                        let key_action = ui::check_key_action(current_mode);
+                        let key_action = ui::check_key_action(current_mode, &hedge_input);
                         match key_action {
                             ui::KeyAction::Exit => {
                                 user_exit_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                                 ui::stop_ui(&ui_state_clone);
                                 break;
                             }
-                            ui::KeyAction::ToggleTrading | ui::KeyAction::ActivateCancelling => {
+                            ui::KeyAction::ToggleTrading | ui::KeyAction::ActivateCancelling | ui::KeyAction::ToggleHedge => {
                                 // Переключаем режим
                                 ui::switch_trading_mode(&ui_state_clone, key_action);
                             }
@@ -177,6 +188,55 @@ async fn main() -> anyhow::Result<()> {
                                         engine_cancel.cancel_all_orders().await;
                                     });
                                 }
+                            }
+                            ui::KeyAction::RequestUpHedge => {
+                                // Начинаем ввод количества UP
+                                let mut state = ui_state_clone.lock().unwrap();
+                                state.hedge_input_state = ui::HedgeInputState::RequestingUp(String::new());
+                            }
+                            ui::KeyAction::RequestDownHedge => {
+                                // Начинаем ввод количества DOWN
+                                let mut state = ui_state_clone.lock().unwrap();
+                                state.hedge_input_state = ui::HedgeInputState::RequestingDown(String::new());
+                            }
+                            ui::KeyAction::ConfirmHedge => {
+                                // Разместить hedge ордер
+                                let (side, input) = {
+                                    let state = ui_state_clone.lock().unwrap();
+                                    match &state.hedge_input_state {
+                                        ui::HedgeInputState::RequestingUp(s) => (Some(crate::models::Side::Up), s.clone()),
+                                        ui::HedgeInputState::RequestingDown(s) => (Some(crate::models::Side::Down), s.clone()),
+                                        _ => (None, String::new()),
+                                    }
+                                };
+
+                                if let Some(side) = side {
+                                    // Парсим введенное количество
+                                    match input.parse::<f64>() {
+                                        Ok(size) if size > 0.0 => {
+                                            tracing::info!("✅ Размещаем hedge ордер: {:?} Size: {:.2}", side, size);
+
+                                            // Размещаем hedge ордер
+                                            let engine_hedge = engine_for_ui.clone();
+                                            tokio::spawn(async move {
+                                                crate::core::streams::place_hedge_order(&engine_hedge, side, size);
+                                            });
+
+                                            // Очищаем состояние ввода
+                                            let mut state = ui_state_clone.lock().unwrap();
+                                            state.hedge_input_state = ui::HedgeInputState::None;
+                                        }
+                                        _ => {
+                                            tracing::warn!("❌ Некорректное количество: '{}'", input);
+                                        }
+                                    }
+                                }
+                            }
+                            ui::KeyAction::CancelHedgeInput => {
+                                // Отменяем ввод, остаемся в режиме Hedge
+                                let mut state = ui_state_clone.lock().unwrap();
+                                state.hedge_input_state = ui::HedgeInputState::None;
+                                tracing::info!("❌ Ввод hedge отменен");
                             }
                             ui::KeyAction::None => {}
                         }

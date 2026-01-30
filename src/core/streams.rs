@@ -80,7 +80,7 @@ pub fn place_first_leg(
 }
 
 /// Размещает вторую ногу торговой пары
-/// 
+///
 /// Вызывается после полного исполнения первой ноги (из handle.rs через engine)
 pub fn place_second_leg(
     engine: &Arc<RealEngine>,
@@ -89,6 +89,7 @@ pub fn place_second_leg(
     price: f64,
     size: f64,
     first_leg_price: f64,
+    timer_interval_secs: u64,
 ) {
     let is_up = matches!(side, Side::Up);
     
@@ -145,6 +146,7 @@ pub fn place_second_leg(
                         rounded_price,
                         size,
                         first_leg_price,
+                        timer_interval_secs,
                     );
                 } else {
                     warn!("⚠️ Ордер второй ноги размещен но order_id пустой");
@@ -168,6 +170,70 @@ pub fn cancel_order(engine: &Arc<RealEngine>, order_id: String) {
             },
             Err(e) => {
                 warn!("⚠️ Ошибка отмены ордера {}: {}", order_id, e);
+            },
+        }
+    });
+}
+
+/// Размещает hedge ордер (покупка по рынку через GTC limit @ 0.99)
+///
+/// Используется для ручного хеджирования позиции в режиме Hedge
+pub fn place_hedge_order(
+    engine: &Arc<RealEngine>,
+    side: Side,
+    size: f64,
+) {
+    let is_up = matches!(side, Side::Up);
+
+    let token_id = if is_up {
+        Arc::clone(&engine.up_token)
+    } else {
+        Arc::clone(&engine.down_token)
+    };
+
+    let client = engine.client.clone();
+    let signer = engine.signer.clone();
+
+    tokio::spawn(async move {
+        // Цена 0.99 гарантирует моментальное исполнение как taker
+        let price = 0.99;
+        let price_dec: Decimal = format!("{:.2}", price).parse().unwrap();
+        let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
+
+        // GTC ордер - без экспирации
+        let order = match client.limit_order()
+            .token_id(token_id.as_ref())
+            .price(price_dec)
+            .size(size_dec)
+            .side(PolySide::Buy)
+            .order_type(OrderType::GTC)
+            .build().await {
+                Ok(o) => o,
+                Err(e) => {
+                    warn!("❌ Ошибка создания hedge ордера: {}", e);
+                    return;
+                }
+            };
+
+        let signed = match client.sign(&signer, order).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("❌ Ошибка подписи hedge ордера: {}", e);
+                return;
+            }
+        };
+
+        match client.post_order(signed).await {
+            Ok(response) => {
+                if !response.order_id.is_empty() {
+                    info!("🛡️ HEDGE ордер размещен: {:?} @ {:.2} | Size: {:.2} | order_id={}",
+                        side, price, size, response.order_id);
+                } else {
+                    warn!("⚠️ Hedge ордер размещен но order_id пустой");
+                }
+            },
+            Err(e) => {
+                warn!("❌ Ошибка размещения hedge ордера {:?} @ {:.2}: {}", side, price, e);
             },
         }
     });

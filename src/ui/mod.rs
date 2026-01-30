@@ -122,11 +122,26 @@ pub enum TradingMode {
     Stop,       // Софт стоит афк
     RealRun,    // Реальная торговля за деньги
     Cancelling, // Режим отмены ордеров (нажать x для отмены всех)
+    Hedge,      // Режим ручного хеджирования (покупка по рынку)
 }
 
 impl Default for TradingMode {
     fn default() -> Self {
         TradingMode::Stop // По умолчанию Stop
+    }
+}
+
+/// Состояние ввода hedge
+#[derive(Debug, Clone, PartialEq)]
+pub enum HedgeInputState {
+    None,                      // Не в режиме ввода
+    RequestingUp(String),      // Вводим количество для UP
+    RequestingDown(String),    // Вводим количество для DOWN
+}
+
+impl Default for HedgeInputState {
+    fn default() -> Self {
+        HedgeInputState::None
     }
 }
 
@@ -147,6 +162,8 @@ pub struct UiStateInner {
     pub open_orders: Vec<OpenOrder>,
     // Конфигурация для отображения
     pub config: UiConfig,
+    // Состояние ввода hedge
+    pub hedge_input_state: HedgeInputState,
 }
 
 pub type UiState = Arc<Mutex<UiStateInner>>;
@@ -241,14 +258,27 @@ pub fn switch_trading_mode(state: &UiState, action: KeyAction) -> bool {
                         s.trading_mode = TradingMode::Stop;
                         tracing::info!("⏸️ Режим: STOP (софт стоит афк)");
                     }
-                    TradingMode::Cancelling => {
-                        // Из Cancelling нельзя переключить Space-ом
+                    TradingMode::Cancelling | TradingMode::Hedge => {
+                        // Из Cancelling/Hedge нельзя переключить Space-ом
                     }
                 }
             }
             KeyAction::ActivateCancelling => {
                 s.trading_mode = TradingMode::Cancelling;
                 tracing::info!("🟡 Режим: CANCELLING (нажмите x для отмены ордеров)");
+            }
+            KeyAction::ToggleHedge => {
+                match s.trading_mode {
+                    TradingMode::Hedge => {
+                        s.trading_mode = TradingMode::Stop;
+                        tracing::info!("⏸️ Режим: STOP (выход из Hedge)");
+                    }
+                    _ => {
+                        s.trading_mode = TradingMode::Hedge;
+                        s.hedge_input_state = HedgeInputState::None;
+                        tracing::info!("🔵 Режим: HEDGE (нажмите u/d для покупки)");
+                    }
+                }
             }
             KeyAction::CancelAllOrders => {
                 // Отменить ордера и вернуться в Stop
@@ -391,11 +421,16 @@ pub fn render(frame: &mut Frame, state: &UiState) {
     render_open_orders(frame, open_orders_area, &state.open_orders);
     render_history(frame, history_area, &state.trade_history);
 
-    // Правая часть: Configuration (6 строк) + Order Book (остаток)
+    // Правая часть: Configuration/Hedge (6 строк) + Order Book (остаток)
     let [config_area, order_book_area] =
-        Layout::vertical([Constraint::Length(6), Constraint::Fill(1)]).areas(right_area);
+        Layout::vertical([Constraint::Length(12), Constraint::Fill(1)]).areas(right_area);
 
-    render_configuration(frame, config_area, &state.config);
+    // Показываем окно Hedge вместо Configuration в режиме Hedge
+    if state.trading_mode == TradingMode::Hedge {
+        render_hedge(frame, config_area, &state.hedge_input_state);
+    } else {
+        render_configuration(frame, config_area, &state.config);
+    }
     render_combined_order_book(
         frame,
         order_book_area,
@@ -413,12 +448,14 @@ fn render_event_info(frame: &mut Frame, area: Rect, info: &EventInfo, trading_mo
         TradingMode::Stop => " MARKET [STOP] ",
         TradingMode::RealRun => " MARKET [REAL RUN] ",
         TradingMode::Cancelling => " MARKET [CANCELLING] ",
+        TradingMode::Hedge => " MARKET [HEDGE] ",
     };
 
     let title_color = match trading_mode {
         TradingMode::Stop => Color::DarkGray,
         TradingMode::RealRun => Color::Green,
         TradingMode::Cancelling => Color::Yellow,
+        TradingMode::Hedge => Color::Blue,
     };
 
     let block = Block::default()
@@ -566,17 +603,141 @@ fn render_portfolio(
                     TradingMode::Stop => "STOP",
                     TradingMode::RealRun => "REAL RUN",
                     TradingMode::Cancelling => "CANCELLING (x to cancel)",
+                    TradingMode::Hedge => "HEDGE (u/d to buy, b to exit)",
                 },
                 Style::default()
                     .fg(match trading_mode {
                         TradingMode::Stop => Color::DarkGray,
                         TradingMode::RealRun => Color::Green,
                         TradingMode::Cancelling => Color::Yellow,
+                        TradingMode::Hedge => Color::Blue,
                     })
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
     ];
+
+    let paragraph = Paragraph::new(text);
+    frame.render_widget(paragraph, inner);
+}
+
+/// Рендер окна Hedge (вместо Configuration в режиме Hedge)
+fn render_hedge(frame: &mut Frame, area: Rect, hedge_input: &HedgeInputState) {
+    let block = Block::default()
+        .title(" HEDGE ")
+        .title_style(
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let text = match hedge_input {
+        HedgeInputState::RequestingUp(input) => {
+            vec![
+                Line::from(vec![
+                    Span::styled("Mode: ", Style::default().fg(Color::White)),
+                    Span::styled("Manual Hedging", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Enter UP shares to buy:", Style::default().fg(Color::Yellow)),
+                ]),
+                Line::from(vec![
+                    Span::styled("> ", Style::default().fg(Color::White)),
+                    Span::styled(
+                        if input.is_empty() { "_" } else { input },
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Price: ", Style::default().fg(Color::Gray)),
+                    Span::styled("0.99 ", Style::default().fg(Color::Green)),
+                    Span::styled("(instant fill)", Style::default().fg(Color::DarkGray)),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Press ", Style::default().fg(Color::Gray)),
+                    Span::styled("'y'", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled(" to confirm or ", Style::default().fg(Color::Gray)),
+                    Span::styled("'n'", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::styled(" to cancel", Style::default().fg(Color::Gray)),
+                ]),
+            ]
+        }
+        HedgeInputState::RequestingDown(input) => {
+            vec![
+                Line::from(vec![
+                    Span::styled("Mode: ", Style::default().fg(Color::White)),
+                    Span::styled("Manual Hedging", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Enter DOWN shares to buy:", Style::default().fg(Color::Yellow)),
+                ]),
+                Line::from(vec![
+                    Span::styled("> ", Style::default().fg(Color::White)),
+                    Span::styled(
+                        if input.is_empty() { "_" } else { input },
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Price: ", Style::default().fg(Color::Gray)),
+                    Span::styled("0.99 ", Style::default().fg(Color::Green)),
+                    Span::styled("(instant fill)", Style::default().fg(Color::DarkGray)),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Press ", Style::default().fg(Color::Gray)),
+                    Span::styled("'y'", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled(" to confirm or ", Style::default().fg(Color::Gray)),
+                    Span::styled("'n'", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::styled(" to cancel", Style::default().fg(Color::Gray)),
+                ]),
+            ]
+        }
+        HedgeInputState::None => {
+            vec![
+                Line::from(vec![
+                    Span::styled("Mode: ", Style::default().fg(Color::White)),
+                    Span::styled("Manual Hedging", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Instructions:", Style::default().fg(Color::Yellow)),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Press ", Style::default().fg(Color::Gray)),
+                    Span::styled("'u'", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled(" to buy UP shares", Style::default().fg(Color::Gray)),
+                ]),
+                Line::from(vec![
+                    Span::styled("Press ", Style::default().fg(Color::Gray)),
+                    Span::styled("'d'", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::styled(" to buy DOWN shares", Style::default().fg(Color::Gray)),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Press ", Style::default().fg(Color::Gray)),
+                    Span::styled("'b'", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::styled(" to exit Hedge mode", Style::default().fg(Color::Gray)),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Note: ", Style::default().fg(Color::Yellow)),
+                    Span::styled("Orders placed @ 0.99 for instant fill", Style::default().fg(Color::DarkGray)),
+                ]),
+            ]
+        }
+    };
 
     let paragraph = Paragraph::new(text);
     frame.render_widget(paragraph, inner);
@@ -926,10 +1087,52 @@ pub enum KeyAction {
     ToggleTrading,      // Space - переключить Stop/RealRun
     ActivateCancelling, // 'c' - войти в режим Cancelling
     CancelAllOrders,    // 'x' - отменить все ордера (только в Cancelling)
+    ToggleHedge,        // 'b' - переключить режим Hedge
+    RequestUpHedge,     // 'u' - запросить количество UP для покупки (только в Hedge)
+    RequestDownHedge,   // 'd' - запросить количество DOWN для покупки (только в Hedge)
+    ConfirmHedge,       // 'y' - подтвердить покупку
+    CancelHedgeInput,   // 'n' - отменить ввод
 }
 
-/// Проверка нажатия клавиш: 'q' для выхода, Space для режимов, 'c'/'x' для отмены ордеров
-pub fn check_key_action(current_mode: TradingMode) -> KeyAction {
+/// Обрабатывает ввод текста для hedge (цифры, backspace)
+/// Возвращает обновленное состояние или None если ничего не изменилось
+pub fn handle_hedge_input(current_state: &HedgeInputState) -> Option<HedgeInputState> {
+    if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
+        if let Ok(Event::Key(key)) = event::read() {
+            if key.kind == KeyEventKind::Press {
+                match current_state {
+                    HedgeInputState::RequestingUp(input) | HedgeInputState::RequestingDown(input) => {
+                        let mut new_input = input.clone();
+                        match key.code {
+                            KeyCode::Char(c) if c.is_ascii_digit() || c == '.' => {
+                                new_input.push(c);
+                                return Some(match current_state {
+                                    HedgeInputState::RequestingUp(_) => HedgeInputState::RequestingUp(new_input),
+                                    HedgeInputState::RequestingDown(_) => HedgeInputState::RequestingDown(new_input),
+                                    _ => unreachable!(),
+                                });
+                            }
+                            KeyCode::Backspace => {
+                                new_input.pop();
+                                return Some(match current_state {
+                                    HedgeInputState::RequestingUp(_) => HedgeInputState::RequestingUp(new_input),
+                                    HedgeInputState::RequestingDown(_) => HedgeInputState::RequestingDown(new_input),
+                                    _ => unreachable!(),
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Проверка нажатия клавиш: 'q' для выхода, Space для режимов, 'c'/'x' для отмены ордеров, 'b' для Hedge
+pub fn check_key_action(current_mode: TradingMode, hedge_input: &HedgeInputState) -> KeyAction {
     if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
         if let Ok(Event::Key(key)) = event::read() {
             if key.kind == KeyEventKind::Press {
@@ -937,10 +1140,40 @@ pub fn check_key_action(current_mode: TradingMode) -> KeyAction {
                     KeyCode::Char('q') => return KeyAction::Exit,
                     KeyCode::Char(' ') => return KeyAction::ToggleTrading,
                     KeyCode::Char('c') => return KeyAction::ActivateCancelling,
+                    KeyCode::Char('b') => {
+                        // 'b' переключает Hedge режим (только когда не в режиме ввода)
+                        if *hedge_input == HedgeInputState::None {
+                            return KeyAction::ToggleHedge;
+                        }
+                    }
+                    KeyCode::Char('n') => {
+                        // 'n' отменяет ввод hedge (остаемся в режиме Hedge)
+                        if !matches!(hedge_input, HedgeInputState::None) {
+                            return KeyAction::CancelHedgeInput;
+                        }
+                    }
                     KeyCode::Char('x') => {
                         // x работает только в режиме Cancelling
                         if current_mode == TradingMode::Cancelling {
                             return KeyAction::CancelAllOrders;
+                        }
+                    }
+                    KeyCode::Char('u') => {
+                        // u работает только в режиме Hedge
+                        if current_mode == TradingMode::Hedge && *hedge_input == HedgeInputState::None {
+                            return KeyAction::RequestUpHedge;
+                        }
+                    }
+                    KeyCode::Char('d') => {
+                        // d работает только в режиме Hedge
+                        if current_mode == TradingMode::Hedge && *hedge_input == HedgeInputState::None {
+                            return KeyAction::RequestDownHedge;
+                        }
+                    }
+                    KeyCode::Char('y') => {
+                        // y подтверждает ввод hedge
+                        if !matches!(hedge_input, HedgeInputState::None) {
+                            return KeyAction::ConfirmHedge;
                         }
                     }
                     _ => {}
