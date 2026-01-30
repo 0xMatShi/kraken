@@ -415,9 +415,43 @@ impl RealEngine {
             None => return, // Нога уже исполнена или отменена
         };
 
-        let new_price = Self::round_price(old_price + 0.01);
+        // Получаем текущие рыночные цены
+        let current_prices = {
+            let prices_opt = self.last_prices.lock().unwrap();
+            match *prices_opt {
+                Some(prices) => prices,
+                None => {
+                    warn!("❌ Не удалось получить текущие цены для переразмещения второй ноги");
+                    return;
+                }
+            }
+        };
 
-        info!("🔄 Переразмещаем вторую ногу {}: {:?} {:.2} → {:.2}",
+        // Определяем текущий best_bid слабой стороны
+        let current_best_bid = current_prices.bid_for_side(side);
+
+        // Если цена второй ноги == текущий best_bid, то не переразмещаем
+        if (old_price - current_best_bid).abs() == 0.0 {
+            info!("✅ Вторая нога {} уже на best_bid {:.2} - перезапускаем таймер",
+                second_leg_order_id, current_best_bid);
+
+            // Запускаем новый таймер на 5 секунд
+            let engine_clone = Arc::clone(self);
+            let first_id = first_leg_order_id.to_string();
+            let second_id = second_leg_order_id.to_string();
+
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                engine_clone.try_reprice_second_leg(&first_id, &second_id);
+            });
+
+            return;
+        }
+
+        // Рынок изменился - переразмещаем по новому best_bid
+        let new_price = Self::round_price(current_best_bid);
+
+        info!("🔄 Переразмещаем вторую ногу {}: {:?} {:.2} → {:.2} (best_bid изменился)",
             second_leg_order_id, side, old_price, new_price);
 
         // Отменяем старый ордер
