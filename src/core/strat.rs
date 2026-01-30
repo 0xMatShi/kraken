@@ -98,8 +98,8 @@ impl RealEngine {
 
         info!("💰 Profit Check: UP profit: ${:.2} | DOWN profit: ${:.2}", up_profit, down_profit);
 
-        // Если обе стороны имеют прибыль > $5
-        if up_profit > 3.0 && down_profit > 3.0 {
+        // Если обе стороны имеют прибыль > $2
+        if up_profit > 2.0 && down_profit > 2.0 {
             info!("🎉 PROFIT TARGET REACHED! UP: ${:.2} | DOWN: ${:.2}", up_profit, down_profit);
             return true;
         }
@@ -166,7 +166,7 @@ impl RealEngine {
         
         let spread_cents = prices.spread_cents();
         
-        // Спред 4+ цента - ничего не делаем
+        // Спред 3+ цента - ничего не делаем
         if spread_cents >= 3 {
             info!("⏸️ Спред {} центов >= 3 - не размещаем", spread_cents);
             return None;
@@ -192,7 +192,7 @@ impl RealEngine {
             Side::Up => (prices.up_bid_size, prices.up_bid_size_2),
             Side::Down => (prices.down_bid_size, prices.down_bid_size_2),
         };
-    
+
         // ПРАВИЛО : На двух бидах сильной стороны должно быть >= 1000 акций в сумме
         //            И на первом биде минимум 300 акций
         let total_strong_bids = strong_bid_size_1 + strong_bid_size_2;
