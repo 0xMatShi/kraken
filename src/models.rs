@@ -153,13 +153,13 @@ pub struct FirstLeg {
 #[allow(dead_code)]
 pub struct SecondLeg {
     pub order_id: String,
-    pub price: f64,           // Цена размещения = 0.99 - first_leg_price
-    pub size: f64,            // Размер = размер первой ноги
-    pub side: Side,           // Противоположная сторона от первой ноги
-    pub filled: f64,          // Сколько исполнено
-    pub first_leg_price: f64, // Цена первой ноги (для блокировки)
+    pub price: f64,                      // Цена размещения = 0.99 - first_leg_price
+    pub size: f64,                       // Размер = размер первой ноги
+    pub side: Side,                      // Противоположная сторона от первой ноги
+    pub filled: f64,                     // Сколько исполнено
+    pub first_leg_price: f64,            // Цена первой ноги (для блокировки)
     pub last_placed: std::time::Instant, // Время последнего размещения/переразмещения
-    pub timer_interval_secs: u64, // Интервал таймера переразмещения (9, 8, 7, ... 1)
+    pub timer_interval_secs: u64,        // Интервал таймера переразмещения (9, 8, 7, ... 1)
 }
 
 /// Полная торговая пара (первая нога + вторая нога)

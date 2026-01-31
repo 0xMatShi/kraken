@@ -1,10 +1,10 @@
+use time::macros::format_description;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::fmt::time::OffsetTime;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
-use time::macros::format_description;
 
 /// Инициализирует систему логирования
 /// Логи пишутся в файл ./logs/app.log и в UI
@@ -19,10 +19,8 @@ pub fn init_logger() -> anyhow::Result<tracing_appender::non_blocking::WorkerGua
     );
 
     // Фильтр логов: по умолчанию WARN для всех библиотек, INFO для нашего проекта
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| {
-            EnvFilter::new("warn,mmdnca=info")
-        });
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,mmdnca=info"));
 
     // Создаем неблокирующий файловый appender (один файл без ротации)
     let file_appender = tracing_appender::rolling::never("./logs", "app.log");

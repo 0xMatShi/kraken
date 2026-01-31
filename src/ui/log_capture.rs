@@ -1,6 +1,6 @@
 use tracing::{Event, Subscriber};
-use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context;
 
 /// Tracing Layer - теперь не отправляет логи в UI, только для файлового логирования
 /// UI теперь использует отдельную систему истории торговли

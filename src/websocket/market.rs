@@ -1,13 +1,12 @@
-use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use crate::models::{BookMessage, SubscribeMessage, MarketPrices};
 use crate::core::RealEngine;
-use crate::ui::{self, UiState, OrderLevel, ORDER_BOOK_DEPTH};
-use std::sync::{Arc, Mutex};
+use crate::models::{BookMessage, MarketPrices, SubscribeMessage};
+use crate::ui::{self, ORDER_BOOK_DEPTH, OrderLevel, UiState};
 use chrono::{DateTime, Utc};
-use tokio::time::{interval, Duration};
+use futures_util::{SinkExt, StreamExt};
+use std::sync::{Arc, Mutex};
+use tokio::time::{Duration, interval};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{info, warn};
-
 
 pub struct DataStream {
     up_token: String,
@@ -19,7 +18,13 @@ pub struct DataStream {
 }
 
 impl DataStream {
-    pub fn new(up: String, down: String, engine: Arc<RealEngine>, ws_url: String, ui_state: UiState) -> Self {
+    pub fn new(
+        up: String,
+        down: String,
+        engine: Arc<RealEngine>,
+        ws_url: String,
+        ui_state: UiState,
+    ) -> Self {
         Self {
             up_token: up,
             down_token: down,
@@ -30,7 +35,10 @@ impl DataStream {
         }
     }
 
-    pub async fn start_stream(&self, end_date_str: String) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn start_stream(
+        &self,
+        end_date_str: String,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let end_date = end_date_str.parse::<DateTime<Utc>>().unwrap_or(Utc::now());
 
         loop {
@@ -47,21 +55,29 @@ impl DataStream {
                     return Ok(());
                 }
                 Err(e) => {
-                    warn!("📉 Market WS отключен: {}. Моментальное переподключение...", e);
+                    warn!(
+                        "📉 Market WS отключен: {}. Моментальное переподключение...",
+                        e
+                    );
                     // Моментальное переподключение без задержки
                 }
             }
         }
     }
 
-    async fn run_stream_once(&self, end_date: DateTime<Utc>) -> Result<(), Box<dyn std::error::Error>> {
+    async fn run_stream_once(
+        &self,
+        end_date: DateTime<Utc>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let (mut ws_stream, _) = connect_async(&self.ws_url).await?;
 
         let sub = SubscribeMessage {
             assets_ids: vec![self.up_token.clone(), self.down_token.clone()],
             msg_type: "market".to_string(),
         };
-        ws_stream.send(Message::Text(serde_json::to_string(&sub)?.into())).await?;
+        ws_stream
+            .send(Message::Text(serde_json::to_string(&sub)?.into()))
+            .await?;
 
         info!("✅ Market WS подключен");
 
@@ -101,14 +117,10 @@ impl DataStream {
         let mut p = self.prices.lock().unwrap();
 
         // Сортируем bids по убыванию цены, asks по возрастанию
-        let mut sorted_bids: Vec<_> = book.bids.iter()
-            .map(|o| (o.price, o.size))
-            .collect();
+        let mut sorted_bids: Vec<_> = book.bids.iter().map(|o| (o.price, o.size)).collect();
         sorted_bids.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        let mut sorted_asks: Vec<_> = book.asks.iter()
-            .map(|o| (o.price, o.size))
-            .collect();
+        let mut sorted_asks: Vec<_> = book.asks.iter().map(|o| (o.price, o.size)).collect();
         sorted_asks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
         // Извлекаем уровни для UI
@@ -116,10 +128,16 @@ impl DataStream {
         let mut ui_asks = [OrderLevel::default(); ORDER_BOOK_DEPTH];
 
         for (i, (price, size)) in sorted_bids.iter().take(ORDER_BOOK_DEPTH).enumerate() {
-            ui_bids[i] = OrderLevel { price: *price, size: *size };
+            ui_bids[i] = OrderLevel {
+                price: *price,
+                size: *size,
+            };
         }
         for (i, (price, size)) in sorted_asks.iter().take(ORDER_BOOK_DEPTH).enumerate() {
-            ui_asks[i] = OrderLevel { price: *price, size: *size };
+            ui_asks[i] = OrderLevel {
+                price: *price,
+                size: *size,
+            };
         }
 
         // Обновляем MarketPrices (лучший bid/ask и второй уровень bid)
@@ -128,15 +146,33 @@ impl DataStream {
         let best_ask = sorted_asks.first().copied();
 
         if book.asset_id == self.up_token {
-            if let Some(b) = best_bid { p.up_bid = b.0; p.up_bid_size = b.1; }
-            if let Some(b2) = second_bid { p.up_bid_2 = b2.0; p.up_bid_size_2 = b2.1; }
-            if let Some(a) = best_ask { p.up_ask = a.0; p.up_ask_size = a.1; }
+            if let Some(b) = best_bid {
+                p.up_bid = b.0;
+                p.up_bid_size = b.1;
+            }
+            if let Some(b2) = second_bid {
+                p.up_bid_2 = b2.0;
+                p.up_bid_size_2 = b2.1;
+            }
+            if let Some(a) = best_ask {
+                p.up_ask = a.0;
+                p.up_ask_size = a.1;
+            }
             // Обновляем UI state для UP стакана
             ui::update_up_book(&self.ui_state, ui_bids, ui_asks);
         } else {
-            if let Some(b) = best_bid { p.down_bid = b.0; p.down_bid_size = b.1; }
-            if let Some(b2) = second_bid { p.down_bid_2 = b2.0; p.down_bid_size_2 = b2.1; }
-            if let Some(a) = best_ask { p.down_ask = a.0; p.down_ask_size = a.1; }
+            if let Some(b) = best_bid {
+                p.down_bid = b.0;
+                p.down_bid_size = b.1;
+            }
+            if let Some(b2) = second_bid {
+                p.down_bid_2 = b2.0;
+                p.down_bid_size_2 = b2.1;
+            }
+            if let Some(a) = best_ask {
+                p.down_ask = a.0;
+                p.down_ask_size = a.1;
+            }
             // Обновляем UI state для DOWN стакана
             ui::update_down_book(&self.ui_state, ui_bids, ui_asks);
         }

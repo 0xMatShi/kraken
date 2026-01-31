@@ -1,19 +1,19 @@
-mod models;
-mod websocket;
 mod core;
-mod utils;
+mod models;
 pub mod ui;
+mod utils;
+mod websocket;
 
+use chrono::{DateTime, Utc};
+use core::RealEngine;
 use std::io::{self, Write};
 use std::sync::Arc;
 use utils::{AutoScanner, Config};
 use websocket::market::DataStream;
 use websocket::user::UserStream;
-use core::RealEngine;
-use chrono::{DateTime, Utc};
 
+use polymarket_client_sdk::clob::ws::Client as WsClient;
 use polymarket_client_sdk::clob::{Client, Config as ClobConfig};
-use polymarket_client_sdk::clob::ws::{Client as WsClient};
 
 use tokio::time::Duration;
 
@@ -26,7 +26,10 @@ fn edit_config_menu(config: &mut Config) -> anyhow::Result<()> {
         println!("1. max_balance = {}", config.trading.max_balance);
         println!("2. size = {}", config.trading.size);
         println!("3. max_size_side = {}", config.trading.max_size_side);
-        println!("4. seconds_before_start = {}", config.trading.seconds_before_start);
+        println!(
+            "4. seconds_before_start = {}",
+            config.trading.seconds_before_start
+        );
         println!("5. legs_strategy = \"{}\"", config.trading.legs_strategy);
         println!("6. Save & Exit");
         println!("7. Cancel (without saving)");
@@ -170,7 +173,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Загружаем торговую конфигурацию (mut для редактирования)
     let mut app_config = Config::load()?;
-    tracing::info!("Конфигурация загружена: MAX_BALANCE={:.1}, SIZE={:.1}, SECONDS_BEFORE_START={}, LEGS_STRATEGY={}",
+    tracing::info!(
+        "Конфигурация загружена: MAX_BALANCE={:.1}, SIZE={:.1}, SECONDS_BEFORE_START={}, LEGS_STRATEGY={}",
         app_config.trading.max_balance,
         app_config.trading.size,
         app_config.trading.seconds_before_start,
@@ -190,7 +194,8 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Аутентификация CLOB успешна");
 
-    let ws_client = WsClient::default().authenticate(env_config.credentials, env_config.funder_address)?;
+    let ws_client =
+        WsClient::default().authenticate(env_config.credentials, env_config.funder_address)?;
 
     tracing::info!("Аутентификация WsUser успешна");
 
@@ -202,28 +207,31 @@ async fn main() -> anyhow::Result<()> {
         print!("\x1B[2J\x1B[1;1H");
         println!("MMDNA-Bot");
         println!("1. Start | 2. Edit Config | 3. Exit");
-        print!("> "); io::stdout().flush().unwrap();
+        print!("> ");
+        io::stdout().flush().unwrap();
 
         let mut input = String::new();
         io::stdin().read_line(&mut input).unwrap();
 
         match input.trim() {
-            "1" => {},          // Start
-            "2" => {            // Edit Config
+            "1" => {} // Start
+            "2" => {
+                // Edit Config
                 if let Err(e) = edit_config_menu(&mut app_config) {
                     tracing::error!("Ошибка редактирования конфига: {}", e);
                 }
                 continue;
             }
-            "3" => break,       // Exit
-            _ => continue,      // Invalid input
+            "3" => break,  // Exit
+            _ => continue, // Invalid input
         }
 
         // Меню выбора монеты
         print!("\x1B[2J\x1B[1;1H");
         println!("Select Coin:");
         println!("1. BTC | 2. ETH | 3. SOL | 4. XRP");
-        print!("> "); io::stdout().flush().unwrap();
+        print!("> ");
+        io::stdout().flush().unwrap();
 
         let mut coin_input = String::new();
         io::stdin().read_line(&mut coin_input).unwrap();
@@ -242,16 +250,35 @@ async fn main() -> anyhow::Result<()> {
         // Автоматический цикл торговли для выбранной монеты
         loop {
             // Ищем подходящий рынок
-            if let Some(target) = scanner.find_next_target(coin.slug_prefix(), 0.0, 15.0).await {
+            if let Some(target) = scanner
+                .find_next_target(coin.slug_prefix(), 0.0, 15.0)
+                .await
+            {
                 // Парсим дату окончания
-                let end_date = target.end_date.parse::<DateTime<Utc>>().unwrap_or(Utc::now());
+                let end_date = target
+                    .end_date
+                    .parse::<DateTime<Utc>>()
+                    .unwrap_or(Utc::now());
                 let total_seconds = 900; // Фиксированная длительность события: 15 минут
 
                 // Устанавливаем информацию о событии в UI
-                ui::set_event_info(&ui_state, target.title.clone(), target.slug.clone(), end_date, total_seconds);
+                ui::set_event_info(
+                    &ui_state,
+                    target.title.clone(),
+                    target.slug.clone(),
+                    end_date,
+                    total_seconds,
+                );
                 ui::clear_our_bid_prices(&ui_state);
                 ui::clear_open_orders(&ui_state);
-                ui::set_config(&ui_state, app_config.trading.max_balance, app_config.trading.size, app_config.trading.max_size_side, app_config.trading.seconds_before_start, app_config.trading.legs_strategy.clone());
+                ui::set_config(
+                    &ui_state,
+                    app_config.trading.max_balance,
+                    app_config.trading.size,
+                    app_config.trading.max_size_side,
+                    app_config.trading.seconds_before_start,
+                    app_config.trading.legs_strategy.clone(),
+                );
 
                 // Создаем реальный движок
                 let engine = Arc::new(RealEngine::new(
@@ -307,7 +334,8 @@ async fn main() -> anyhow::Result<()> {
                         };
 
                         // Проверка нажатых клавиш и обработка ввода hedge
-                        let (key_action, new_hedge_state) = ui::check_key_action(current_mode, &hedge_input);
+                        let (key_action, new_hedge_state) =
+                            ui::check_key_action(current_mode, &hedge_input);
 
                         // Обновляем состояние hedge если изменилось
                         if let Some(new_state) = new_hedge_state {
@@ -321,13 +349,16 @@ async fn main() -> anyhow::Result<()> {
                                 ui::stop_ui(&ui_state_clone);
                                 break;
                             }
-                            ui::KeyAction::ToggleTrading | ui::KeyAction::ActivateCancelling | ui::KeyAction::ToggleHedge => {
+                            ui::KeyAction::ToggleTrading
+                            | ui::KeyAction::ActivateCancelling
+                            | ui::KeyAction::ToggleHedge => {
                                 // Переключаем режим
                                 ui::switch_trading_mode(&ui_state_clone, key_action);
                             }
                             ui::KeyAction::CancelAllOrders => {
                                 // Отменяем все ордера и переключаем режим
-                                let should_cancel = ui::switch_trading_mode(&ui_state_clone, key_action);
+                                let should_cancel =
+                                    ui::switch_trading_mode(&ui_state_clone, key_action);
                                 if should_cancel {
                                     let engine_cancel = engine_for_ui.clone();
                                     tokio::spawn(async move {
@@ -338,20 +369,26 @@ async fn main() -> anyhow::Result<()> {
                             ui::KeyAction::RequestUpHedge => {
                                 // Начинаем ввод количества UP
                                 let mut state = ui_state_clone.lock().unwrap();
-                                state.hedge_input_state = ui::HedgeInputState::RequestingUp(String::new());
+                                state.hedge_input_state =
+                                    ui::HedgeInputState::RequestingUp(String::new());
                             }
                             ui::KeyAction::RequestDownHedge => {
                                 // Начинаем ввод количества DOWN
                                 let mut state = ui_state_clone.lock().unwrap();
-                                state.hedge_input_state = ui::HedgeInputState::RequestingDown(String::new());
+                                state.hedge_input_state =
+                                    ui::HedgeInputState::RequestingDown(String::new());
                             }
                             ui::KeyAction::ConfirmHedge => {
                                 // Разместить hedge ордер
                                 let (side, input) = {
                                     let state = ui_state_clone.lock().unwrap();
                                     match &state.hedge_input_state {
-                                        ui::HedgeInputState::RequestingUp(s) => (Some(crate::models::Side::Up), s.clone()),
-                                        ui::HedgeInputState::RequestingDown(s) => (Some(crate::models::Side::Down), s.clone()),
+                                        ui::HedgeInputState::RequestingUp(s) => {
+                                            (Some(crate::models::Side::Up), s.clone())
+                                        }
+                                        ui::HedgeInputState::RequestingDown(s) => {
+                                            (Some(crate::models::Side::Down), s.clone())
+                                        }
                                         _ => (None, String::new()),
                                     }
                                 };
@@ -360,12 +397,20 @@ async fn main() -> anyhow::Result<()> {
                                     // Парсим введенное количество
                                     match input.parse::<f64>() {
                                         Ok(size) if size > 0.0 => {
-                                            tracing::info!("✅ Размещаем hedge ордер: {:?} Size: {:.2}", side, size);
+                                            tracing::info!(
+                                                "✅ Размещаем hedge ордер: {:?} Size: {:.2}",
+                                                side,
+                                                size
+                                            );
 
                                             // Размещаем hedge ордер
                                             let engine_hedge = engine_for_ui.clone();
                                             tokio::spawn(async move {
-                                                crate::core::streams::place_hedge_order(&engine_hedge, side, size);
+                                                crate::core::streams::place_hedge_order(
+                                                    &engine_hedge,
+                                                    side,
+                                                    size,
+                                                );
                                             });
 
                                             // Очищаем состояние ввода
@@ -373,7 +418,10 @@ async fn main() -> anyhow::Result<()> {
                                             state.hedge_input_state = ui::HedgeInputState::None;
                                         }
                                         _ => {
-                                            tracing::warn!("❌ Некорректное количество: '{}'", input);
+                                            tracing::warn!(
+                                                "❌ Некорректное количество: '{}'",
+                                                input
+                                            );
                                         }
                                     }
                                 }
@@ -396,9 +444,11 @@ async fn main() -> anyhow::Result<()> {
                         }
 
                         // Рендерим UI
-                        terminal.draw(|frame| {
-                            ui::render(frame, &ui_state_clone);
-                        }).ok();
+                        terminal
+                            .draw(|frame| {
+                                ui::render(frame, &ui_state_clone);
+                            })
+                            .ok();
 
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }

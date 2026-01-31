@@ -1,8 +1,8 @@
-use std::sync::Arc;
-use std::collections::HashSet;
-use tracing::info;
-use crate::models::{MarketPrices, Trend, CumulativeState, CumulativePhase};
 use super::strat::RealEngine;
+use crate::models::{CumulativePhase, CumulativeState, MarketPrices, Trend};
+use std::collections::HashSet;
+use std::sync::Arc;
+use tracing::info;
 
 impl RealEngine {
     /// Основной тик cumulative стратегии
@@ -10,7 +10,7 @@ impl RealEngine {
     /// Фазы:
     /// 1. AccumulatingFirstLeg - набираем позицию на сильной стороне
     /// 2. PlacingSecondLeg - сбрасываем на слабой стороне
-    pub fn process_cumulative_tick(self: &Arc<Self>, prices: MarketPrices, trend: Trend) {
+    pub fn process_cumulative(self: &Arc<Self>, prices: MarketPrices, trend: Trend) {
         let spread = prices.spread_cents();
 
         let mut cum_state = self.cumulative_state.lock().unwrap();
@@ -30,8 +30,10 @@ impl RealEngine {
                 let total_spent = port.up_spent + port.down_spent;
                 let potential_cost = 0.99 * self.config.max_size_side;
                 if total_spent + potential_cost > self.config.max_balance {
-                    info!("⏸️ [Cumulative] Max balance достигнут: {:.2} + {:.2} > {:.2}",
-                        total_spent, potential_cost, self.config.max_balance);
+                    info!(
+                        "⏸️ [Cumulative] Max balance достигнут: {:.2} + {:.2} > {:.2}",
+                        total_spent, potential_cost, self.config.max_balance
+                    );
                     return;
                 }
             }
@@ -40,7 +42,10 @@ impl RealEngine {
             let weak_bb = prices.bid_for_side(prices.weak_side());
             let target_price = Self::round_price(0.99 - weak_bb);
 
-            info!("🚀 [Cumulative] Начинаем новый цикл: {:?} side @ {:.2}", strong_side, target_price);
+            info!(
+                "🚀 [Cumulative] Начинаем новый цикл: {:?} side @ {:.2}",
+                strong_side, target_price
+            );
 
             let state = CumulativeState {
                 phase: CumulativePhase::AccumulatingFirstLeg,
@@ -61,7 +66,11 @@ impl RealEngine {
             cum_state.as_mut().unwrap().first_leg_placed_price = Some(target_price);
             drop(cum_state);
 
-            info!("📦 [Cumulative] Размещаем {} ордеров первой ноги @ {:.2}", sizes.len(), target_price);
+            info!(
+                "📦 [Cumulative] Размещаем {} ордеров первой ноги @ {:.2}",
+                sizes.len(),
+                target_price
+            );
             for size in sizes {
                 super::streams::place_cumulative_first_leg(self, strong_side, target_price, size);
             }
@@ -77,11 +86,14 @@ impl RealEngine {
                 // Проверяем, набрали ли мы достаточно (остаток < 5 считаем набранным)
                 let first_remaining = self.config.max_size_side - state.first_leg_filled;
                 if state.first_leg_filled > 0.0 && first_remaining < 5.0 {
-                    info!("✅ [Cumulative] Первая нога набрана: {:.2}/{:.2} (остаток {:.2} < 5). Переходим к второй ноге.",
-                        state.first_leg_filled, self.config.max_size_side, first_remaining);
+                    info!(
+                        "✅ [Cumulative] Первая нога набрана: {:.2}/{:.2} (остаток {:.2} < 5). Переходим к второй ноге.",
+                        state.first_leg_filled, self.config.max_size_side, first_remaining
+                    );
 
                     // Отменяем все pending первые ноги
-                    let orders_to_cancel: Vec<String> = state.first_leg_orders.iter().cloned().collect();
+                    let orders_to_cancel: Vec<String> =
+                        state.first_leg_orders.iter().cloned().collect();
                     state.phase = CumulativePhase::PlacingSecondLeg;
                     state.first_leg_placed_price = None;
 
@@ -95,11 +107,16 @@ impl RealEngine {
                 }
 
                 // Можем разместить ещё, если есть тренд Strong + spread 2-3 + нет размещений
-                if trend == Trend::Strong && spread >= 2 && spread < 4 && state.first_leg_placed_price.is_none() {
+                if trend == Trend::Strong
+                    && spread >= 2
+                    && spread < 4
+                    && state.first_leg_placed_price.is_none()
+                {
                     let weak_bb = prices.bid_for_side(prices.weak_side());
                     let target_price = Self::round_price(0.99 - weak_bb);
 
-                    let remaining = Self::round_price(self.config.max_size_side - state.first_leg_filled);
+                    let remaining =
+                        Self::round_price(self.config.max_size_side - state.first_leg_filled);
                     let sizes = Self::calculate_order_sizes(remaining, self.config.size);
 
                     if sizes.is_empty() {
@@ -109,10 +126,19 @@ impl RealEngine {
                     state.first_leg_placed_price = Some(target_price);
                     drop(cum_state);
 
-                    info!("📦 [Cumulative] Доразмещаем {} ордеров первой ноги @ {:.2} (remaining: {:.2})",
-                        sizes.len(), target_price, remaining);
+                    info!(
+                        "📦 [Cumulative] Доразмещаем {} ордеров первой ноги @ {:.2} (remaining: {:.2})",
+                        sizes.len(),
+                        target_price,
+                        remaining
+                    );
                     for size in sizes {
-                        super::streams::place_cumulative_first_leg(self, prices.strong_side(), target_price, size);
+                        super::streams::place_cumulative_first_leg(
+                            self,
+                            prices.strong_side(),
+                            target_price,
+                            size,
+                        );
                     }
                 }
             }
@@ -120,8 +146,10 @@ impl RealEngine {
                 // Проверяем, закрыли ли мы полностью (остаток < 5 считаем закрытым)
                 let second_remaining = state.first_leg_filled - state.second_leg_filled;
                 if state.second_leg_filled > 0.0 && second_remaining < 5.0 {
-                    info!("🎉 [Cumulative] Цикл завершен! First: {:.2} | Second: {:.2} (остаток {:.2} < 5)",
-                        state.first_leg_filled, state.second_leg_filled, second_remaining);
+                    info!(
+                        "🎉 [Cumulative] Цикл завершен! First: {:.2} | Second: {:.2} (остаток {:.2} < 5)",
+                        state.first_leg_filled, state.second_leg_filled, second_remaining
+                    );
                     *cum_state = None;
                     return;
                 }
@@ -158,8 +186,13 @@ impl RealEngine {
                     state.second_leg_placed_price = Some(price);
                     drop(cum_state);
 
-                    info!("📦 [Cumulative] Размещаем {} ордеров второй ноги {:?} @ {:.2} (remaining: {:.2})",
-                        sizes.len(), weak_side, price, remaining);
+                    info!(
+                        "📦 [Cumulative] Размещаем {} ордеров второй ноги {:?} @ {:.2} (remaining: {:.2})",
+                        sizes.len(),
+                        weak_side,
+                        price,
+                        remaining
+                    );
                     for size in sizes {
                         super::streams::place_cumulative_second_leg(self, weak_side, price, size);
                     }
@@ -173,10 +206,14 @@ impl RealEngine {
                         return; // Цена не изменилась
                     }
 
-                    info!("🔄 [Cumulative] Переразмещаем вторые ноги: {:.2} → {:.2}", current_price, new_price);
+                    info!(
+                        "🔄 [Cumulative] Переразмещаем вторые ноги: {:.2} → {:.2}",
+                        current_price, new_price
+                    );
 
                     // Отменяем старые
-                    let orders_to_cancel: Vec<String> = state.second_leg_orders.iter().cloned().collect();
+                    let orders_to_cancel: Vec<String> =
+                        state.second_leg_orders.iter().cloned().collect();
                     state.second_leg_placed_price = None;
 
                     let remaining = Self::round_price(first_leg_filled - second_leg_filled);
@@ -200,10 +237,16 @@ impl RealEngine {
                         }
                     }
 
-                    info!("📦 [Cumulative] Переразмещаем {} ордеров второй ноги {:?} @ {:.2}",
-                        sizes.len(), weak_side, new_price);
+                    info!(
+                        "📦 [Cumulative] Переразмещаем {} ордеров второй ноги {:?} @ {:.2}",
+                        sizes.len(),
+                        weak_side,
+                        new_price
+                    );
                     for size in sizes {
-                        super::streams::place_cumulative_second_leg(self, weak_side, new_price, size);
+                        super::streams::place_cumulative_second_leg(
+                            self, weak_side, new_price, size,
+                        );
                     }
                 }
             }
@@ -229,28 +272,48 @@ impl RealEngine {
     }
 
     /// Обработка fill cumulative первой ноги
-    pub fn on_cumulative_first_leg_fill(&self, order_id: &str, fill_size: f64, is_fully_filled: bool) {
+    pub fn on_cumulative_first_leg_fill(
+        &self,
+        order_id: &str,
+        fill_size: f64,
+        is_fully_filled: bool,
+    ) {
         let mut cum_state = self.cumulative_state.lock().unwrap();
         if let Some(state) = cum_state.as_mut() {
             state.first_leg_filled += fill_size;
             if is_fully_filled {
                 state.first_leg_orders.remove(order_id);
             }
-            info!("📊 [Cumulative] Первая нога fill: +{:.2} = {:.2}/{:.2} (orders: {})",
-                fill_size, state.first_leg_filled, self.config.max_size_side, state.first_leg_orders.len());
+            info!(
+                "📊 [Cumulative] Первая нога fill: +{:.2} = {:.2}/{:.2} (orders: {})",
+                fill_size,
+                state.first_leg_filled,
+                self.config.max_size_side,
+                state.first_leg_orders.len()
+            );
         }
     }
 
     /// Обработка fill cumulative второй ноги
-    pub fn on_cumulative_second_leg_fill(&self, order_id: &str, fill_size: f64, is_fully_filled: bool) {
+    pub fn on_cumulative_second_leg_fill(
+        &self,
+        order_id: &str,
+        fill_size: f64,
+        is_fully_filled: bool,
+    ) {
         let mut cum_state = self.cumulative_state.lock().unwrap();
         if let Some(state) = cum_state.as_mut() {
             state.second_leg_filled += fill_size;
             if is_fully_filled {
                 state.second_leg_orders.remove(order_id);
             }
-            info!("📊 [Cumulative] Вторая нога fill: +{:.2} = {:.2}/{:.2} (orders: {})",
-                fill_size, state.second_leg_filled, state.first_leg_filled, state.second_leg_orders.len());
+            info!(
+                "📊 [Cumulative] Вторая нога fill: +{:.2} = {:.2}/{:.2} (orders: {})",
+                fill_size,
+                state.second_leg_filled,
+                state.first_leg_filled,
+                state.second_leg_orders.len()
+            );
         }
     }
 
@@ -262,14 +325,20 @@ impl RealEngine {
                 if state.first_leg_orders.is_empty() {
                     state.first_leg_placed_price = None;
                 }
-                info!("🗑️ [Cumulative] Первая нога отменена: {} (remaining orders: {})",
-                    order_id, state.first_leg_orders.len());
+                info!(
+                    "🗑️ [Cumulative] Первая нога отменена: {} (remaining orders: {})",
+                    order_id,
+                    state.first_leg_orders.len()
+                );
             } else if state.second_leg_orders.remove(order_id) {
                 if state.second_leg_orders.is_empty() {
                     state.second_leg_placed_price = None;
                 }
-                info!("🗑️ [Cumulative] Вторая нога отменена: {} (remaining orders: {})",
-                    order_id, state.second_leg_orders.len());
+                info!(
+                    "🗑️ [Cumulative] Вторая нога отменена: {} (remaining orders: {})",
+                    order_id,
+                    state.second_leg_orders.len()
+                );
             }
         }
     }

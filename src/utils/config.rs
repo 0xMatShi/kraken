@@ -77,7 +77,7 @@ impl Config {
         };
 
         let toml_content = format!(
-r#"# Торговые параметры MMDNA бота
+            r#"# Торговые параметры MMDNA бота
 
 [trading]
 # Максимальный баланс для торговли (USD)

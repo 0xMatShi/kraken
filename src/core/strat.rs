@@ -1,14 +1,17 @@
-use std::sync::{Arc, Mutex};
-use std::collections::{HashSet, HashMap};
-use std::time::{Duration, Instant};
-use crate::models::{Portfolio, Side, MarketPrices, Trend, FirstLeg, SecondLeg, TradePair, PriceLock, CumulativeState, CumulativePhase};
-use crate::utils::config::TradingConfig;
+use crate::models::{
+    CumulativePhase, CumulativeState, FirstLeg, MarketPrices, Portfolio, PriceLock, SecondLeg,
+    Side, TradePair, Trend,
+};
 use crate::ui::{self, UiState};
+use crate::utils::config::TradingConfig;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use polymarket_client_sdk::clob::Client;
+use alloy::signers::local::PrivateKeySigner;
 use polymarket_client_sdk::auth::Normal;
 use polymarket_client_sdk::auth::state::Authenticated;
-use alloy::signers::local::PrivateKeySigner;
+use polymarket_client_sdk::clob::Client;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -20,13 +23,13 @@ pub struct RealEngine {
     pub down_token: Arc<str>,
     pub seen_trades: Mutex<HashSet<String>>,
     pub seen_orders: Mutex<HashSet<String>>,
-    pub active_orders_info: Mutex<HashMap<String, (f64, bool, f64, f64)>>,  // order_id -> (price, is_up, original_size, accumulated_filled)
+    pub active_orders_info: Mutex<HashMap<String, (f64, bool, f64, f64)>>, // order_id -> (price, is_up, original_size, accumulated_filled)
     pub our_api_key: Uuid,
     pub config: TradingConfig,
     pub ui_state: UiState,
     pub last_prices: Mutex<Option<MarketPrices>>,
     pub profit_target_reached: Mutex<bool>,
-    
+
     // === НОВАЯ СТРАТЕГИЯ ===
     /// Предыдущие цены для определения тренда
     pub prev_prices: Mutex<Option<MarketPrices>>,
@@ -100,11 +103,17 @@ impl RealEngine {
         let up_profit = port.up_shares - total_spent;
         let down_profit = port.down_shares - total_spent;
 
-        info!("💰 Profit Check: UP profit: ${:.2} | DOWN profit: ${:.2}", up_profit, down_profit);
+        info!(
+            "💰 Profit Check: UP profit: ${:.2} | DOWN profit: ${:.2}",
+            up_profit, down_profit
+        );
 
         // Если обе стороны имеют прибыль > $2
         if up_profit > 2.0 && down_profit > 2.0 {
-            info!("🎉 PROFIT TARGET REACHED! UP: ${:.2} | DOWN: ${:.2}", up_profit, down_profit);
+            info!(
+                "🎉 PROFIT TARGET REACHED! UP: ${:.2} | DOWN: ${:.2}",
+                up_profit, down_profit
+            );
             return true;
         }
 
@@ -174,7 +183,11 @@ impl RealEngine {
     /// Универсальная логика для обоих типов трендов:
     /// - Trend::Strong: размещаем на сильной стороне
     /// - Trend::Weak: размещаем на слабой стороне
-    pub fn calculate_first_leg_placement(&self, prices: &MarketPrices, trend: Trend) -> Option<(Side, f64)> {
+    pub fn calculate_first_leg_placement(
+        &self,
+        prices: &MarketPrices,
+        trend: Trend,
+    ) -> Option<(Side, f64)> {
         // Только если есть тренд
         if trend == Trend::None {
             return None;
@@ -209,8 +222,10 @@ impl RealEngine {
         // Цена = 0.99 - opposite_bb, чтобы сумма была 0.99
         let target_price = Self::round_price(0.99 - opposite_bb);
 
-        info!("📈 Тренд {:?} на стороне {:?}: opposite_bb={:.2}, target_price={:.2}",
-            trend, placement_side, opposite_bb, target_price);
+        info!(
+            "📈 Тренд {:?} на стороне {:?}: opposite_bb={:.2}, target_price={:.2}",
+            trend, placement_side, opposite_bb, target_price
+        );
 
         Some((placement_side, target_price))
     }
@@ -247,7 +262,7 @@ impl RealEngine {
             let state = self.ui_state.lock().unwrap();
             let elapsed = state.event_info.elapsed_seconds();
             let min_elapsed = self.config.seconds_before_start;
-            
+
             if elapsed < min_elapsed {
                 // Слишком рано для торговли, обновляем prev_prices и выходим
                 drop(state); // Освобождаем лок перед обновлением prev_prices
@@ -288,16 +303,18 @@ impl RealEngine {
         let up_bid = prices.up_bid;
         let down_bid = prices.down_bid;
         let spread = prices.spread_cents();
-        
-        info!("📊 Тик: UP bid {:.3} | DOWN bid {:.3} | Spread: {} центов",
-            up_bid, down_bid, spread);
+
+        info!(
+            "📊 Тик: UP bid {:.3} | DOWN bid {:.3} | Spread: {} центов",
+            up_bid, down_bid, spread
+        );
 
         // Получаем предыдущие цены для определения тренда
         let prev_prices_opt = self.prev_prices.lock().unwrap().clone();
-        
+
         // Обновляем prev_prices для следующего тика
         *self.prev_prices.lock().unwrap() = Some(prices);
-        
+
         // Если нет предыдущих цен - это первый тик, пропускаем
         let prev = match prev_prices_opt {
             Some(p) => p,
@@ -320,7 +337,7 @@ impl RealEngine {
 
         // Cumulative стратегия: полностью отдельная логика
         if legs_strategy == "cumulative" {
-            self.process_cumulative_tick(prices, trend);
+            self.process_cumulative(prices, trend);
             return;
         }
 
@@ -329,13 +346,19 @@ impl RealEngine {
             "weak" => trend == Trend::Weak,
             "both" => true,
             _ => {
-                warn!("⚠️ Неизвестная legs_strategy: {}. Используем 'both'", legs_strategy);
+                warn!(
+                    "⚠️ Неизвестная legs_strategy: {}. Используем 'both'",
+                    legs_strategy
+                );
                 true
             }
         };
 
         if !should_trade {
-            info!("⏸️ Тренд {:?} не соответствует legs_strategy '{}' - не размещаем", trend, legs_strategy);
+            info!(
+                "⏸️ Тренд {:?} не соответствует legs_strategy '{}' - не размещаем",
+                trend, legs_strategy
+            );
             return;
         }
 
@@ -351,7 +374,10 @@ impl RealEngine {
         {
             let lock = self.price_lock.lock().unwrap();
             if lock.is_locked(side, target_price) {
-                info!("🔒 Цена {:.2} на {:?} заблокирована - не размещаем", target_price, side);
+                info!(
+                    "🔒 Цена {:.2} на {:?} заблокирована - не размещаем",
+                    target_price, side
+                );
                 return;
             }
         }
@@ -364,8 +390,10 @@ impl RealEngine {
             // Потенциальная стоимость пары: first_leg + second_leg = target_price + (0.99 - target_price) = 0.99
             let pair_cost = 0.99 * order_size;
             if total_spent + pair_cost > self.config.max_balance {
-                info!("⏸️ Max balance достигнут: {:.2} + {:.2} > {:.2}",
-                    total_spent, pair_cost, self.config.max_balance);
+                info!(
+                    "⏸️ Max balance достигнут: {:.2} + {:.2} > {:.2}",
+                    total_spent, pair_cost, self.config.max_balance
+                );
                 return;
             }
         }
@@ -383,21 +411,27 @@ impl RealEngine {
 
         let orders_to_cancel: Vec<(String, f64)> = {
             let first_legs = self.first_legs_by_price.lock().unwrap();
-            first_legs.iter()
+            first_legs
+                .iter()
                 .filter(|((is_up, price_cents), _)| {
                     // Определяем текущий лучший бид для этой стороны
-                    let current_best_bid_cents = if *is_up { up_best_bid_cents } else { down_best_bid_cents };
+                    let current_best_bid_cents = if *is_up {
+                        up_best_bid_cents
+                    } else {
+                        down_best_bid_cents
+                    };
                     // Отменяем, если цена ордера ниже текущего лучшего бида
                     *price_cents < current_best_bid_cents
                 })
-                .map(|((_, price_cents), order_id)| {
-                    (order_id.clone(), *price_cents as f64 / 100.0)
-                })
+                .map(|((_, price_cents), order_id)| (order_id.clone(), *price_cents as f64 / 100.0))
                 .collect()
         };
 
         for (order_id, order_price) in orders_to_cancel {
-            info!("🗑️ Отменяем устаревший ордер {} @ {:.2} (цена ниже текущего бида)", order_id, order_price);
+            info!(
+                "🗑️ Отменяем устаревший ордер {} @ {:.2} (цена ниже текущего бида)",
+                order_id, order_price
+            );
             super::streams::cancel_order(self, order_id);
         }
 
@@ -410,8 +444,12 @@ impl RealEngine {
                     if let Some(placed_price) = state.first_leg_placed_price {
                         let best_bid = prices.bid_for_side(state.first_leg_side);
                         if placed_price < best_bid {
-                            info!("🗑️ [Cumulative] Отменяем устаревшие первые ноги @ {:.2} (best_bid {:.2})", placed_price, best_bid);
-                            let orders: Vec<String> = state.first_leg_orders.iter().cloned().collect();
+                            info!(
+                                "🗑️ [Cumulative] Отменяем устаревшие первые ноги @ {:.2} (best_bid {:.2})",
+                                placed_price, best_bid
+                            );
+                            let orders: Vec<String> =
+                                state.first_leg_orders.iter().cloned().collect();
                             state.first_leg_placed_price = None;
                             drop(cum_state);
                             for order_id in orders {
@@ -427,8 +465,12 @@ impl RealEngine {
                         let weak_side = state.first_leg_side.opposite();
                         let best_bid = prices.bid_for_side(weak_side);
                         if placed_price < best_bid {
-                            info!("🗑️ [Cumulative] Отменяем устаревшие вторые ноги @ {:.2} (best_bid {:.2})", placed_price, best_bid);
-                            let orders: Vec<String> = state.second_leg_orders.iter().cloned().collect();
+                            info!(
+                                "🗑️ [Cumulative] Отменяем устаревшие вторые ноги @ {:.2} (best_bid {:.2})",
+                                placed_price, best_bid
+                            );
+                            let orders: Vec<String> =
+                                state.second_leg_orders.iter().cloned().collect();
                             state.second_leg_placed_price = None;
                             drop(cum_state);
                             for order_id in orders {
@@ -444,7 +486,11 @@ impl RealEngine {
 
     /// Пытается переразместить вторую ногу с повышением цены на 0.01
     /// Вызывается из таймера после размещения второй ноги
-    fn try_reprice_second_leg(self: &Arc<Self>, first_leg_order_id: &str, second_leg_order_id: &str) {
+    fn try_reprice_second_leg(
+        self: &Arc<Self>,
+        first_leg_order_id: &str,
+        second_leg_order_id: &str,
+    ) {
         // Проверяем существует ли еще эта пара и вторая нога
         let reprice_params = {
             let pairs = self.trade_pairs.lock().unwrap();
@@ -504,8 +550,10 @@ impl RealEngine {
 
         // Если цена второй ноги == текущий best_bid, то не переразмещаем
         if (old_price - current_best_bid).abs() == 0.0 {
-            info!("✅ Вторая нога {} уже на best_bid {:.2} - перезапускаем таймер на {}s",
-                second_leg_order_id, current_best_bid, new_interval);
+            info!(
+                "✅ Вторая нога {} уже на best_bid {:.2} - перезапускаем таймер на {}s",
+                second_leg_order_id, current_best_bid, new_interval
+            );
 
             // Запускаем новый таймер с уменьшенным интервалом
             let engine_clone = Arc::clone(self);
@@ -523,8 +571,10 @@ impl RealEngine {
         // Рынок изменился - переразмещаем по новому best_bid
         let new_price = Self::round_price(old_price + 0.02);
 
-        info!("🔄 Переразмещаем вторую ногу {}: {:?} {:.2} → {:.2} | новый таймер: {}s",
-            second_leg_order_id, side, old_price, new_price, new_interval);
+        info!(
+            "🔄 Переразмещаем вторую ногу {}: {:?} {:.2} → {:.2} | новый таймер: {}s",
+            second_leg_order_id, side, old_price, new_price, new_interval
+        );
 
         // Отменяем старый ордер
         super::streams::cancel_order(self, second_leg_order_id.to_string());
@@ -559,19 +609,19 @@ impl RealEngine {
     pub fn register_first_leg(&self, order_id: String, side: Side, price: f64, size: f64) {
         let is_up = matches!(side, Side::Up);
         let price_cents = (price * 100.0).round() as u32;
-        
+
         // Блокируем цену
         {
             let mut lock = self.price_lock.lock().unwrap();
             lock.lock(side, price);
         }
-        
+
         // Добавляем в first_legs_by_price
         {
             let mut first_legs = self.first_legs_by_price.lock().unwrap();
             first_legs.insert((is_up, price_cents), order_id.clone());
         }
-        
+
         // Создаем TradePair
         let first_leg = FirstLeg {
             order_id: order_id.clone(),
@@ -580,24 +630,26 @@ impl RealEngine {
             side,
             filled: 0.0,
         };
-        
+
         let trade_pair = TradePair {
             first_leg,
             second_leg: None,
         };
-        
+
         {
             let mut pairs = self.trade_pairs.lock().unwrap();
             pairs.insert(order_id.clone(), trade_pair);
         }
-        
-        info!("📝 Первая нога зарегистрирована: {} {:?} @ {:.2}", order_id, side, price);
+
+        info!(
+            "📝 Первая нога зарегистрирована: {} {:?} @ {:.2}",
+            order_id, side, price
+        );
     }
 
     /// Обрабатывает полное исполнение первой ноги и размещает вторую
     /// Вторая нога размещается по текущему best_bid слабой стороны
     pub fn on_first_leg_filled(self: &Arc<Self>, order_id: &str) {
-
         let trade_pair = {
             let pairs = self.trade_pairs.lock().unwrap();
             pairs.get(order_id).cloned()
@@ -611,8 +663,10 @@ impl RealEngine {
             let second_leg_price = 0.98 - first_leg.price;
             let second_leg_size = first_leg.size;
 
-            info!("🎯 Первая нога {} исполнена! Размещаем вторую ногу: {:?} @ {:.2} (текущий best_bid)",
-                order_id, second_leg_side, second_leg_price);
+            info!(
+                "🎯 Первая нога {} исполнена! Размещаем вторую ногу: {:?} @ {:.2} (текущий best_bid)",
+                order_id, second_leg_side, second_leg_price
+            );
 
             // Удаляем из first_legs_by_price
             {
@@ -672,8 +726,10 @@ impl RealEngine {
             mapping.insert(second_leg_order_id.clone(), first_leg_order_id.to_string());
         }
 
-        info!("📝 Вторая нога зарегистрирована: {} {:?} @ {:.2} | таймер: {}s",
-            second_leg_order_id, side, price, timer_interval_secs);
+        info!(
+            "📝 Вторая нога зарегистрирована: {} {:?} @ {:.2} | таймер: {}s",
+            second_leg_order_id, side, price, timer_interval_secs
+        );
 
         // Запускаем таймер переразмещения с указанным интервалом
         let engine_clone = Arc::clone(self);
@@ -693,24 +749,29 @@ impl RealEngine {
             let mapping = self.second_leg_to_first.lock().unwrap();
             mapping.get(second_leg_order_id).cloned()
         };
-        
+
         if let Some(first_id) = first_leg_order_id {
             // Получаем TradePair для извлечения цены первой ноги
             let first_leg_price = {
                 let pairs = self.trade_pairs.lock().unwrap();
-                pairs.get(&first_id).map(|p| (p.first_leg.price, p.first_leg.side))
+                pairs
+                    .get(&first_id)
+                    .map(|p| (p.first_leg.price, p.first_leg.side))
             };
-            
+
             if let Some((price, side)) = first_leg_price {
                 // Освобождаем цену
                 {
                     let mut lock = self.price_lock.lock().unwrap();
                     lock.unlock(side, price);
                 }
-                
-                info!("🔓 Цена {:.2} на {:?} разблокирована - пара завершена", price, side);
+
+                info!(
+                    "🔓 Цена {:.2} на {:?} разблокирована - пара завершена",
+                    price, side
+                );
             }
-            
+
             // Очищаем структуры
             {
                 let mut pairs = self.trade_pairs.lock().unwrap();
@@ -729,10 +790,10 @@ impl RealEngine {
             let mut pairs = self.trade_pairs.lock().unwrap();
             pairs.remove(order_id)
         };
-        
+
         if let Some(pair) = trade_pair {
             let first_leg = &pair.first_leg;
-            
+
             // Удаляем из first_legs_by_price
             {
                 let is_up = matches!(first_leg.side, Side::Up);
@@ -740,14 +801,17 @@ impl RealEngine {
                 let mut first_legs = self.first_legs_by_price.lock().unwrap();
                 first_legs.remove(&(is_up, price_cents));
             }
-            
+
             // Освобождаем цену
             {
                 let mut lock = self.price_lock.lock().unwrap();
                 lock.unlock(first_leg.side, first_leg.price);
             }
-            
-            info!("🔓 Первая нога {} отменена, цена {:.2} разблокирована", order_id, first_leg.price);
+
+            info!(
+                "🔓 Первая нога {} отменена, цена {:.2} разблокирована",
+                order_id, first_leg.price
+            );
         }
     }
 
@@ -794,8 +858,16 @@ impl RealEngine {
     /// Финализация сессии - генерация отчета
     pub fn finalize(&self, final_prices: &MarketPrices) {
         let port = self.portfolio.lock().unwrap();
-        let winner = if final_prices.up_bid > 0.5 { Side::Up } else { Side::Down };
-        let winning_shares = if winner == Side::Up { port.up_shares } else { port.down_shares };
+        let winner = if final_prices.up_bid > 0.5 {
+            Side::Up
+        } else {
+            Side::Down
+        };
+        let winning_shares = if winner == Side::Up {
+            port.up_shares
+        } else {
+            port.down_shares
+        };
         let total_spent = port.up_spent + port.down_spent;
         let pnl = winning_shares - total_spent;
 

@@ -1,9 +1,9 @@
-use std::str::FromStr as _;
 use alloy::primitives::Address;
-use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer as _;
+use alloy::signers::local::PrivateKeySigner;
 use polymarket_client_sdk::auth::Credentials;
 use polymarket_client_sdk::{POLYGON, PRIVATE_KEY_VAR};
+use std::str::FromStr as _;
 use uuid::Uuid;
 
 /// Структура с переменными окружения
@@ -22,7 +22,8 @@ pub fn load_env_config() -> anyhow::Result<EnvConfig> {
     let api_passphrase = std::env::var("POLYMARKET_API_PASSPHRASE")?;
     let private_key = std::env::var(PRIVATE_KEY_VAR).expect("Нужен PRIVATE_KEY_VAR в .env");
     let funder_addr_str = std::env::var("FUNDER_ADDRESS").expect("Нужен FUNDER_ADDRESS в .env");
-    let funder_address: Address = funder_addr_str.parse()
+    let funder_address: Address = funder_addr_str
+        .parse()
         .expect("Неверный формат адреса в FUNDER_ADDRESS (должен начинаться с 0x...)");
     let ws_market_url = std::env::var("CLOB_WS_MARKET").expect("Нужен CLOB_WS_MARKET в .env");
 

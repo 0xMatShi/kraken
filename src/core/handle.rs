@@ -100,7 +100,7 @@ pub fn handle_ws_trade(
 }
 
 /// Пытается найти и обработать ногу для taker ордера
-/// 
+///
 /// WebSocket событие о taker fill может прийти раньше, чем API ответ с order_id.
 /// Поэтому в бесконечном цикле (с таймаутом) проверяем, зарегистрирована ли нога
 /// с данным order_id, и если да - вызываем соответствующий обработчик.
@@ -109,12 +109,18 @@ fn match_and_process_taker_leg(engine: &Arc<RealEngine>, taker_order_id: &str) {
     let timeout = Duration::from_secs(10); // 5 секунд таймаут
     let poll_interval = Duration::from_millis(5);
 
-    info!("🔍 Начинаем поиск ноги для taker order_id: {}", taker_order_id);
+    info!(
+        "🔍 Начинаем поиск ноги для taker order_id: {}",
+        taker_order_id
+    );
 
     loop {
         // Проверяем таймаут
         if start.elapsed() > timeout {
-            warn!("⏱️ Таймаут поиска ноги для taker order_id: {}", taker_order_id);
+            warn!(
+                "⏱️ Таймаут поиска ноги для taker order_id: {}",
+                taker_order_id
+            );
             return;
         }
 
@@ -145,11 +151,17 @@ fn match_and_process_taker_leg(engine: &Arc<RealEngine>, taker_order_id: &str) {
         // Проверяем cumulative ордера
         if let Some(is_first) = engine.is_cumulative_order(taker_order_id) {
             if is_first {
-                info!("🎯 Taker fill: найдена cumulative ПЕРВАЯ нога {}", taker_order_id);
+                info!(
+                    "🎯 Taker fill: найдена cumulative ПЕРВАЯ нога {}",
+                    taker_order_id
+                );
                 // Для taker fill cumulative первой ноги - считаем полностью исполненной
                 // (taker fill = весь ордер исполнен разом)
             } else {
-                info!("🎯 Taker fill: найдена cumulative ВТОРАЯ нога {}", taker_order_id);
+                info!(
+                    "🎯 Taker fill: найдена cumulative ВТОРАЯ нога {}",
+                    taker_order_id
+                );
             }
             return;
         }
@@ -288,9 +300,17 @@ pub fn handle_ws_order(
                             // Проверяем cumulative ордера
                             if let Some(is_first) = engine.is_cumulative_order(&order_id) {
                                 if is_first {
-                                    engine.on_cumulative_first_leg_fill(&order_id, size_for_portfolio, true);
+                                    engine.on_cumulative_first_leg_fill(
+                                        &order_id,
+                                        size_for_portfolio,
+                                        true,
+                                    );
                                 } else {
-                                    engine.on_cumulative_second_leg_fill(&order_id, size_for_portfolio, true);
+                                    engine.on_cumulative_second_leg_fill(
+                                        &order_id,
+                                        size_for_portfolio,
+                                        true,
+                                    );
                                 }
                             }
                         } else {
@@ -299,9 +319,17 @@ pub fn handle_ws_order(
                             // Partial fill: обновляем cumulative
                             if let Some(is_first) = engine.is_cumulative_order(&order_id) {
                                 if is_first {
-                                    engine.on_cumulative_first_leg_fill(&order_id, size_for_portfolio, false);
+                                    engine.on_cumulative_first_leg_fill(
+                                        &order_id,
+                                        size_for_portfolio,
+                                        false,
+                                    );
                                 } else {
-                                    engine.on_cumulative_second_leg_fill(&order_id, size_for_portfolio, false);
+                                    engine.on_cumulative_second_leg_fill(
+                                        &order_id,
+                                        size_for_portfolio,
+                                        false,
+                                    );
                                 }
                             }
                         }

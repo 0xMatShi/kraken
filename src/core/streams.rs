@@ -1,21 +1,16 @@
-use std::sync::Arc;
-use tracing::{info, warn};
+use super::strat::RealEngine;
+use crate::models::Side;
 use polymarket_client_sdk::clob::types::{OrderType, Side as PolySide};
 use polymarket_client_sdk::types::Decimal;
-use crate::models::Side;
-use super::strat::RealEngine;
+use std::sync::Arc;
+use tracing::{info, warn};
 
 /// Размещает первую ногу торговой пары
-/// 
+///
 /// Вызывается из process_tick() после определения тренда и целевой цены
-pub fn place_first_leg(
-    engine: &Arc<RealEngine>,
-    side: Side,
-    price: f64,
-    size: f64,
-) {
+pub fn place_first_leg(engine: &Arc<RealEngine>, side: Side, price: f64, size: f64) {
     let is_up = matches!(side, Side::Up);
-    
+
     let token_id = if is_up {
         Arc::clone(&engine.up_token)
     } else {
@@ -33,19 +28,22 @@ pub fn place_first_leg(
         let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
         // GTC ордер - без экспирации
-        let order = match client.limit_order()
+        let order = match client
+            .limit_order()
             .token_id(token_id.as_ref())
             .price(price_dec)
             .size(size_dec)
             .side(PolySide::Buy)
             .order_type(OrderType::GTC)
-            .build().await {
-                Ok(o) => o,
-                Err(e) => {
-                    warn!("❌ Ошибка создания ордера первой ноги: {}", e);
-                    return;
-                }
-            };
+            .build()
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                warn!("❌ Ошибка создания ордера первой ноги: {}", e);
+                return;
+            }
+        };
 
         let signed = match client.sign(&signer, order).await {
             Ok(s) => s,
@@ -58,8 +56,10 @@ pub fn place_first_leg(
         match client.post_order(signed).await {
             Ok(response) => {
                 if !response.order_id.is_empty() {
-                    info!("📝 ПЕРВАЯ НОГА размещена: {:?} @ {:.2} | order_id={}",
-                        side_clone, rounded_price, response.order_id);
+                    info!(
+                        "📝 ПЕРВАЯ НОГА размещена: {:?} @ {:.2} | order_id={}",
+                        side_clone, rounded_price, response.order_id
+                    );
 
                     // Регистрируем первую ногу в engine
                     engine_clone.register_first_leg(
@@ -71,10 +71,13 @@ pub fn place_first_leg(
                 } else {
                     warn!("⚠️ Ордер первой ноги размещен но order_id пустой");
                 }
-            },
+            }
             Err(e) => {
-                warn!("❌ Ошибка размещения первой ноги {:?} @ {:.2}: {}", side_clone, rounded_price, e);
-            },
+                warn!(
+                    "❌ Ошибка размещения первой ноги {:?} @ {:.2}: {}",
+                    side_clone, rounded_price, e
+                );
+            }
         }
     });
 }
@@ -92,7 +95,7 @@ pub fn place_second_leg(
     timer_interval_secs: u64,
 ) {
     let is_up = matches!(side, Side::Up);
-    
+
     let token_id = if is_up {
         Arc::clone(&engine.up_token)
     } else {
@@ -110,19 +113,22 @@ pub fn place_second_leg(
         let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
         // GTC ордер - без экспирации
-        let order = match client.limit_order()
+        let order = match client
+            .limit_order()
             .token_id(token_id.as_ref())
             .price(price_dec)
             .size(size_dec)
             .side(PolySide::Buy)
             .order_type(OrderType::GTC)
-            .build().await {
-                Ok(o) => o,
-                Err(e) => {
-                    warn!("❌ Ошибка создания ордера второй ноги: {}", e);
-                    return;
-                }
-            };
+            .build()
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                warn!("❌ Ошибка создания ордера второй ноги: {}", e);
+                return;
+            }
+        };
 
         let signed = match client.sign(&signer, order).await {
             Ok(s) => s,
@@ -135,8 +141,10 @@ pub fn place_second_leg(
         match client.post_order(signed).await {
             Ok(response) => {
                 if !response.order_id.is_empty() {
-                    info!("📝 ВТОРАЯ НОГА размещена: {:?} @ {:.2} | order_id={} (first_leg: {})",
-                        side_clone, rounded_price, response.order_id, first_leg_order_id);
+                    info!(
+                        "📝 ВТОРАЯ НОГА размещена: {:?} @ {:.2} | order_id={} (first_leg: {})",
+                        side_clone, rounded_price, response.order_id, first_leg_order_id
+                    );
 
                     // Регистрируем вторую ногу в engine
                     engine_clone.register_second_leg(
@@ -151,21 +159,19 @@ pub fn place_second_leg(
                 } else {
                     warn!("⚠️ Ордер второй ноги размещен но order_id пустой");
                 }
-            },
+            }
             Err(e) => {
-                warn!("❌ Ошибка размещения второй ноги {:?} @ {:.2}: {}", side_clone, rounded_price, e);
-            },
+                warn!(
+                    "❌ Ошибка размещения второй ноги {:?} @ {:.2}: {}",
+                    side_clone, rounded_price, e
+                );
+            }
         }
     });
 }
 
 /// Размещает cumulative первую ногу
-pub fn place_cumulative_first_leg(
-    engine: &Arc<RealEngine>,
-    side: Side,
-    price: f64,
-    size: f64,
-) {
+pub fn place_cumulative_first_leg(engine: &Arc<RealEngine>, side: Side, price: f64, size: f64) {
     let is_up = matches!(side, Side::Up);
 
     let token_id = if is_up {
@@ -184,19 +190,22 @@ pub fn place_cumulative_first_leg(
         let price_dec: Decimal = format!("{:.2}", rounded_price).parse().unwrap();
         let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
-        let order = match client.limit_order()
+        let order = match client
+            .limit_order()
             .token_id(token_id.as_ref())
             .price(price_dec)
             .size(size_dec)
             .side(PolySide::Buy)
             .order_type(OrderType::GTC)
-            .build().await {
-                Ok(o) => o,
-                Err(e) => {
-                    warn!("❌ [Cumulative] Ошибка создания ордера первой ноги: {}", e);
-                    return;
-                }
-            };
+            .build()
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                warn!("❌ [Cumulative] Ошибка создания ордера первой ноги: {}", e);
+                return;
+            }
+        };
 
         let signed = match client.sign(&signer, order).await {
             Ok(s) => s,
@@ -209,27 +218,27 @@ pub fn place_cumulative_first_leg(
         match client.post_order(signed).await {
             Ok(response) => {
                 if !response.order_id.is_empty() {
-                    info!("📝 [Cumulative] ПЕРВАЯ НОГА размещена: {:?} @ {:.2} size={:.2} | order_id={}",
-                        side_clone, rounded_price, size, response.order_id);
+                    info!(
+                        "📝 [Cumulative] ПЕРВАЯ НОГА размещена: {:?} @ {:.2} size={:.2} | order_id={}",
+                        side_clone, rounded_price, size, response.order_id
+                    );
                     engine_clone.register_cumulative_first_leg(response.order_id);
                 } else {
                     warn!("⚠️ [Cumulative] Ордер первой ноги размещен но order_id пустой");
                 }
-            },
+            }
             Err(e) => {
-                warn!("❌ [Cumulative] Ошибка размещения первой ноги {:?} @ {:.2}: {}", side_clone, rounded_price, e);
-            },
+                warn!(
+                    "❌ [Cumulative] Ошибка размещения первой ноги {:?} @ {:.2}: {}",
+                    side_clone, rounded_price, e
+                );
+            }
         }
     });
 }
 
 /// Размещает cumulative вторую ногу
-pub fn place_cumulative_second_leg(
-    engine: &Arc<RealEngine>,
-    side: Side,
-    price: f64,
-    size: f64,
-) {
+pub fn place_cumulative_second_leg(engine: &Arc<RealEngine>, side: Side, price: f64, size: f64) {
     let is_up = matches!(side, Side::Up);
 
     let token_id = if is_up {
@@ -248,19 +257,22 @@ pub fn place_cumulative_second_leg(
         let price_dec: Decimal = format!("{:.2}", rounded_price).parse().unwrap();
         let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
-        let order = match client.limit_order()
+        let order = match client
+            .limit_order()
             .token_id(token_id.as_ref())
             .price(price_dec)
             .size(size_dec)
             .side(PolySide::Buy)
             .order_type(OrderType::GTC)
-            .build().await {
-                Ok(o) => o,
-                Err(e) => {
-                    warn!("❌ [Cumulative] Ошибка создания ордера второй ноги: {}", e);
-                    return;
-                }
-            };
+            .build()
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                warn!("❌ [Cumulative] Ошибка создания ордера второй ноги: {}", e);
+                return;
+            }
+        };
 
         let signed = match client.sign(&signer, order).await {
             Ok(s) => s,
@@ -273,16 +285,21 @@ pub fn place_cumulative_second_leg(
         match client.post_order(signed).await {
             Ok(response) => {
                 if !response.order_id.is_empty() {
-                    info!("📝 [Cumulative] ВТОРАЯ НОГА размещена: {:?} @ {:.2} size={:.2} | order_id={}",
-                        side_clone, rounded_price, size, response.order_id);
+                    info!(
+                        "📝 [Cumulative] ВТОРАЯ НОГА размещена: {:?} @ {:.2} size={:.2} | order_id={}",
+                        side_clone, rounded_price, size, response.order_id
+                    );
                     engine_clone.register_cumulative_second_leg(response.order_id);
                 } else {
                     warn!("⚠️ [Cumulative] Ордер второй ноги размещен но order_id пустой");
                 }
-            },
+            }
             Err(e) => {
-                warn!("❌ [Cumulative] Ошибка размещения второй ноги {:?} @ {:.2}: {}", side_clone, rounded_price, e);
-            },
+                warn!(
+                    "❌ [Cumulative] Ошибка размещения второй ноги {:?} @ {:.2}: {}",
+                    side_clone, rounded_price, e
+                );
+            }
         }
     });
 }
@@ -295,10 +312,10 @@ pub fn cancel_order(engine: &Arc<RealEngine>, order_id: String) {
         match client.cancel_order(&order_id).await {
             Ok(_) => {
                 info!("🗑️ Ордер отменен: {}", order_id);
-            },
+            }
             Err(e) => {
                 warn!("⚠️ Ошибка отмены ордера {}: {}", order_id, e);
-            },
+            }
         }
     });
 }
@@ -306,11 +323,7 @@ pub fn cancel_order(engine: &Arc<RealEngine>, order_id: String) {
 /// Размещает hedge ордер (покупка по рынку через GTC limit @ 0.99)
 ///
 /// Используется для ручного хеджирования позиции в режиме Hedge
-pub fn place_hedge_order(
-    engine: &Arc<RealEngine>,
-    side: Side,
-    size: f64,
-) {
+pub fn place_hedge_order(engine: &Arc<RealEngine>, side: Side, size: f64) {
     let is_up = matches!(side, Side::Up);
 
     let token_id = if is_up {
@@ -329,19 +342,22 @@ pub fn place_hedge_order(
         let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
         // GTC ордер - без экспирации
-        let order = match client.limit_order()
+        let order = match client
+            .limit_order()
             .token_id(token_id.as_ref())
             .price(price_dec)
             .size(size_dec)
             .side(PolySide::Buy)
             .order_type(OrderType::GTC)
-            .build().await {
-                Ok(o) => o,
-                Err(e) => {
-                    warn!("❌ Ошибка создания hedge ордера: {}", e);
-                    return;
-                }
-            };
+            .build()
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                warn!("❌ Ошибка создания hedge ордера: {}", e);
+                return;
+            }
+        };
 
         let signed = match client.sign(&signer, order).await {
             Ok(s) => s,
@@ -354,15 +370,20 @@ pub fn place_hedge_order(
         match client.post_order(signed).await {
             Ok(response) => {
                 if !response.order_id.is_empty() {
-                    info!("🛡️ HEDGE ордер размещен: {:?} @ {:.2} | Size: {:.2} | order_id={}",
-                        side, price, size, response.order_id);
+                    info!(
+                        "🛡️ HEDGE ордер размещен: {:?} @ {:.2} | Size: {:.2} | order_id={}",
+                        side, price, size, response.order_id
+                    );
                 } else {
                     warn!("⚠️ Hedge ордер размещен но order_id пустой");
                 }
-            },
+            }
             Err(e) => {
-                warn!("❌ Ошибка размещения hedge ордера {:?} @ {:.2}: {}", side, price, e);
-            },
+                warn!(
+                    "❌ Ошибка размещения hedge ордера {:?} @ {:.2}: {}",
+                    side, price, e
+                );
+            }
         }
     });
 }

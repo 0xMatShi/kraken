@@ -1,16 +1,15 @@
-use futures::StreamExt;
-use std::sync::Arc;
-use polymarket_client_sdk::clob::ws::{Client, WsMessage};
-use polymarket_client_sdk::auth::state::Authenticated;
-use polymarket_client_sdk::auth::Normal;
 use crate::core::RealEngine;
 use crate::core::handle;
+use futures::StreamExt;
+use polymarket_client_sdk::auth::Normal;
+use polymarket_client_sdk::auth::state::Authenticated;
+use polymarket_client_sdk::clob::ws::{Client, WsMessage};
+use std::sync::Arc;
 use tracing::{info, warn};
-
 
 pub struct UserStream {
     engine: Arc<RealEngine>,
-    client: Client<Authenticated<Normal>>, 
+    client: Client<Authenticated<Normal>>,
 }
 
 impl UserStream {
@@ -26,7 +25,10 @@ impl UserStream {
                     return Ok(());
                 }
                 Err(e) => {
-                    warn!("👤 User WS отключен: {}. Моментальное переподключение...", e);
+                    warn!(
+                        "👤 User WS отключен: {}. Моментальное переподключение...",
+                        e
+                    );
                     // Моментальное переподключение без задержки
                 }
             }
@@ -45,8 +47,8 @@ impl UserStream {
         while let Some(event) = stream.next().await {
             match event {
                 Ok(WsMessage::Trade(trade)) => {
-                    use rust_decimal::prelude::ToPrimitive;
                     use polymarket_client_sdk::clob::types::Side as PolySide;
+                    use rust_decimal::prelude::ToPrimitive;
 
                     // ФИЛЬТР: Игнорируем SELL трейды (чужие taker'ы в наши maker ордера)
                     // Наши maker fills обрабатываются через Order UPDATE события
@@ -82,22 +84,20 @@ impl UserStream {
                     let asset_id = order.asset_id.to_string();
 
                     // size_matched показывает сколько было исполнено (для UPDATE событий)
-                    let size_matched: Option<f64> = order.size_matched
-                        .and_then(|d| d.to_f64());
+                    let size_matched: Option<f64> = order.size_matched.and_then(|d| d.to_f64());
 
                     // original_size показывает оригинальный размер ордера (для PLACEMENT событий)
-                    let original_size: Option<f64> = order.original_size
-                        .and_then(|d| d.to_f64());
+                    let original_size: Option<f64> = order.original_size.and_then(|d| d.to_f64());
 
                     handle::handle_ws_order(
-                        &self.engine, 
-                        order_id, 
-                        msg_type, 
-                        price, 
-                        order.side, 
-                        &asset_id, 
-                        size_matched, 
-                        original_size
+                        &self.engine,
+                        order_id,
+                        msg_type,
+                        price,
+                        order.side,
+                        &asset_id,
+                        size_matched,
+                        original_size,
                     );
                 }
                 Ok(_) => {}
