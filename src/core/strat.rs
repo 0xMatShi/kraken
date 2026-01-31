@@ -427,12 +427,14 @@ impl RealEngine {
                 .collect()
         };
 
-        for (order_id, order_price) in orders_to_cancel {
+        if !orders_to_cancel.is_empty() {
             info!(
-                "🗑️ Отменяем устаревший ордер {} @ {:.2} (цена ниже текущего бида)",
-                order_id, order_price
+                "🗑️ Отменяем {} устаревших ордеров (цена ниже текущего бида)",
+                orders_to_cancel.len()
             );
-            super::streams::cancel_order(self, order_id);
+            let order_ids: Vec<String> =
+                orders_to_cancel.iter().map(|(id, _)| id.clone()).collect();
+            super::streams::cancel_orders(self, order_ids);
         }
 
         // Проверяем устаревшие cumulative ордера
@@ -452,8 +454,8 @@ impl RealEngine {
                                 state.first_leg_orders.iter().cloned().collect();
                             state.first_leg_placed_price = None;
                             drop(cum_state);
-                            for order_id in orders {
-                                super::streams::cancel_order(self, order_id);
+                            if !orders.is_empty() {
+                                super::streams::cancel_orders(self, orders);
                             }
                             return;
                         }
@@ -473,8 +475,8 @@ impl RealEngine {
                                 state.second_leg_orders.iter().cloned().collect();
                             state.second_leg_placed_price = None;
                             drop(cum_state);
-                            for order_id in orders {
-                                super::streams::cancel_order(self, order_id);
+                            if !orders.is_empty() {
+                                super::streams::cancel_orders(self, orders);
                             }
                             return;
                         }

@@ -320,6 +320,29 @@ pub fn cancel_order(engine: &Arc<RealEngine>, order_id: String) {
     });
 }
 
+/// Отменяет несколько ордеров батчевым запросом
+pub fn cancel_orders(engine: &Arc<RealEngine>, order_ids: Vec<String>) {
+    if order_ids.is_empty() {
+        return;
+    }
+
+    let client = engine.client.clone();
+    let count = order_ids.len();
+
+    tokio::spawn(async move {
+        let order_ids_refs: Vec<&str> = order_ids.iter().map(|s| s.as_str()).collect();
+
+        match client.cancel_orders(&order_ids_refs).await {
+            Ok(_) => {
+                info!("🗑️ Батчевая отмена: {} ордеров отменено", count);
+            }
+            Err(e) => {
+                warn!("⚠️ Ошибка батчевой отмены {} ордеров: {}", count, e);
+            }
+        }
+    });
+}
+
 /// Размещает hedge ордер (покупка по рынку через GTC limit @ 0.99)
 ///
 /// Используется для ручного хеджирования позиции в режиме Hedge
