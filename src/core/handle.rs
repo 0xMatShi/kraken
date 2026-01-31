@@ -94,7 +94,7 @@ pub fn handle_ws_trade(
     if let Some(order_id) = taker_order_id {
         let engine_clone = Arc::clone(engine);
         tokio::spawn(async move {
-            match_and_process_taker_leg(&engine_clone, &order_id);
+            match_and_process_taker_leg(&engine_clone, &order_id, size);
         });
     }
 }
@@ -104,7 +104,7 @@ pub fn handle_ws_trade(
 /// WebSocket событие о taker fill может прийти раньше, чем API ответ с order_id.
 /// Поэтому в бесконечном цикле (с таймаутом) проверяем, зарегистрирована ли нога
 /// с данным order_id, и если да - вызываем соответствующий обработчик.
-fn match_and_process_taker_leg(engine: &Arc<RealEngine>, taker_order_id: &str) {
+fn match_and_process_taker_leg(engine: &Arc<RealEngine>, taker_order_id: &str, size: f64) {
     let start = Instant::now();
     let timeout = Duration::from_secs(10); // 5 секунд таймаут
     let poll_interval = Duration::from_millis(5);
@@ -157,11 +157,14 @@ fn match_and_process_taker_leg(engine: &Arc<RealEngine>, taker_order_id: &str) {
                 );
                 // Для taker fill cumulative первой ноги - считаем полностью исполненной
                 // (taker fill = весь ордер исполнен разом)
+                engine.on_cumulative_first_leg_fill(taker_order_id, size, true);
             } else {
                 info!(
                     "🎯 Taker fill: найдена cumulative ВТОРАЯ нога {}",
                     taker_order_id
                 );
+                // Для taker fill cumulative второй ноги - считаем полностью исполненной
+                engine.on_cumulative_second_leg_fill(taker_order_id, size, true);
             }
             return;
         }

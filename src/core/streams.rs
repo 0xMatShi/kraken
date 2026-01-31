@@ -170,8 +170,17 @@ pub fn place_second_leg(
     });
 }
 
-/// Размещает cumulative первую ногу
-pub fn place_cumulative_first_leg(engine: &Arc<RealEngine>, side: Side, price: f64, size: f64) {
+/// Размещает cumulative первую ногу батчевым запросом
+pub fn place_cumulative_first_leg(
+    engine: &Arc<RealEngine>,
+    side: Side,
+    price: f64,
+    sizes: Vec<f64>,
+) {
+    if sizes.is_empty() {
+        return;
+    }
+
     let is_up = matches!(side, Side::Up);
 
     let token_id = if is_up {
@@ -188,48 +197,71 @@ pub fn place_cumulative_first_leg(engine: &Arc<RealEngine>, side: Side, price: f
     tokio::spawn(async move {
         let rounded_price = RealEngine::round_price(price);
         let price_dec: Decimal = format!("{:.2}", rounded_price).parse().unwrap();
-        let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
-        let order = match client
-            .limit_order()
-            .token_id(token_id.as_ref())
-            .price(price_dec)
-            .size(size_dec)
-            .side(PolySide::Buy)
-            .order_type(OrderType::GTC)
-            .build()
-            .await
-        {
-            Ok(o) => o,
-            Err(e) => {
-                warn!("❌ [Cumulative] Ошибка создания ордера первой ноги: {}", e);
-                return;
-            }
-        };
+        // Создаем и подписываем все ордера
+        let mut signed_orders = Vec::new();
+        let total_size: f64 = sizes.iter().sum();
 
-        let signed = match client.sign(&signer, order).await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("❌ [Cumulative] Ошибка подписи ордера первой ноги: {}", e);
-                return;
-            }
-        };
+        for size in &sizes {
+            let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
-        match client.post_order(signed).await {
-            Ok(response) => {
-                if !response.order_id.is_empty() {
-                    info!(
-                        "📝 [Cumulative] ПЕРВАЯ НОГА размещена: {:?} @ {:.2} size={:.2} | order_id={}",
-                        side_clone, rounded_price, size, response.order_id
+            let order = match client
+                .limit_order()
+                .token_id(token_id.as_ref())
+                .price(price_dec)
+                .size(size_dec)
+                .side(PolySide::Buy)
+                .order_type(OrderType::GTC)
+                .build()
+                .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    warn!(
+                        "❌ [Cumulative] Ошибка создания ордера первой ноги size={:.2}: {}",
+                        size, e
                     );
-                    engine_clone.register_cumulative_first_leg(response.order_id);
-                } else {
-                    warn!("⚠️ [Cumulative] Ордер первой ноги размещен но order_id пустой");
+                    continue;
                 }
+            };
+
+            let signed = match client.sign(&signer, order).await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(
+                        "❌ [Cumulative] Ошибка подписи ордера первой ноги size={:.2}: {}",
+                        size, e
+                    );
+                    continue;
+                }
+            };
+
+            signed_orders.push(signed);
+        }
+
+        if signed_orders.is_empty() {
+            warn!("⚠️ [Cumulative] Не удалось подготовить ни одного ордера первой ноги");
+            return;
+        }
+
+        // Размещаем все ордера батчевым запросом
+        match client.post_orders(signed_orders).await {
+            Ok(responses) => {
+                let mut success_count = 0;
+                for response in responses {
+                    if !response.order_id.is_empty() {
+                        engine_clone.register_cumulative_first_leg(response.order_id);
+                        success_count += 1;
+                    }
+                }
+                info!(
+                    "📝 [Cumulative] ПЕРВАЯ НОГА размещена батчем: {:?} @ {:.2} | {} ордеров | total_size={:.2}",
+                    side_clone, rounded_price, success_count, total_size
+                );
             }
             Err(e) => {
                 warn!(
-                    "❌ [Cumulative] Ошибка размещения первой ноги {:?} @ {:.2}: {}",
+                    "❌ [Cumulative] Ошибка батчевого размещения первой ноги {:?} @ {:.2}: {}",
                     side_clone, rounded_price, e
                 );
             }
@@ -237,8 +269,17 @@ pub fn place_cumulative_first_leg(engine: &Arc<RealEngine>, side: Side, price: f
     });
 }
 
-/// Размещает cumulative вторую ногу
-pub fn place_cumulative_second_leg(engine: &Arc<RealEngine>, side: Side, price: f64, size: f64) {
+/// Размещает cumulative вторую ногу батчевым запросом
+pub fn place_cumulative_second_leg(
+    engine: &Arc<RealEngine>,
+    side: Side,
+    price: f64,
+    sizes: Vec<f64>,
+) {
+    if sizes.is_empty() {
+        return;
+    }
+
     let is_up = matches!(side, Side::Up);
 
     let token_id = if is_up {
@@ -255,48 +296,71 @@ pub fn place_cumulative_second_leg(engine: &Arc<RealEngine>, side: Side, price: 
     tokio::spawn(async move {
         let rounded_price = RealEngine::round_price(price);
         let price_dec: Decimal = format!("{:.2}", rounded_price).parse().unwrap();
-        let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
-        let order = match client
-            .limit_order()
-            .token_id(token_id.as_ref())
-            .price(price_dec)
-            .size(size_dec)
-            .side(PolySide::Buy)
-            .order_type(OrderType::GTC)
-            .build()
-            .await
-        {
-            Ok(o) => o,
-            Err(e) => {
-                warn!("❌ [Cumulative] Ошибка создания ордера второй ноги: {}", e);
-                return;
-            }
-        };
+        // Создаем и подписываем все ордера
+        let mut signed_orders = Vec::new();
+        let total_size: f64 = sizes.iter().sum();
 
-        let signed = match client.sign(&signer, order).await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("❌ [Cumulative] Ошибка подписи ордера второй ноги: {}", e);
-                return;
-            }
-        };
+        for size in &sizes {
+            let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
 
-        match client.post_order(signed).await {
-            Ok(response) => {
-                if !response.order_id.is_empty() {
-                    info!(
-                        "📝 [Cumulative] ВТОРАЯ НОГА размещена: {:?} @ {:.2} size={:.2} | order_id={}",
-                        side_clone, rounded_price, size, response.order_id
+            let order = match client
+                .limit_order()
+                .token_id(token_id.as_ref())
+                .price(price_dec)
+                .size(size_dec)
+                .side(PolySide::Buy)
+                .order_type(OrderType::GTC)
+                .build()
+                .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    warn!(
+                        "❌ [Cumulative] Ошибка создания ордера второй ноги size={:.2}: {}",
+                        size, e
                     );
-                    engine_clone.register_cumulative_second_leg(response.order_id);
-                } else {
-                    warn!("⚠️ [Cumulative] Ордер второй ноги размещен но order_id пустой");
+                    continue;
                 }
+            };
+
+            let signed = match client.sign(&signer, order).await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(
+                        "❌ [Cumulative] Ошибка подписи ордера второй ноги size={:.2}: {}",
+                        size, e
+                    );
+                    continue;
+                }
+            };
+
+            signed_orders.push(signed);
+        }
+
+        if signed_orders.is_empty() {
+            warn!("⚠️ [Cumulative] Не удалось подготовить ни одного ордера второй ноги");
+            return;
+        }
+
+        // Размещаем все ордера батчевым запросом
+        match client.post_orders(signed_orders).await {
+            Ok(responses) => {
+                let mut success_count = 0;
+                for response in responses {
+                    if !response.order_id.is_empty() {
+                        engine_clone.register_cumulative_second_leg(response.order_id);
+                        success_count += 1;
+                    }
+                }
+                info!(
+                    "📝 [Cumulative] ВТОРАЯ НОГА размещена батчем: {:?} @ {:.2} | {} ордеров | total_size={:.2}",
+                    side_clone, rounded_price, success_count, total_size
+                );
             }
             Err(e) => {
                 warn!(
-                    "❌ [Cumulative] Ошибка размещения второй ноги {:?} @ {:.2}: {}",
+                    "❌ [Cumulative] Ошибка батчевого размещения второй ноги {:?} @ {:.2}: {}",
                     side_clone, rounded_price, e
                 );
             }

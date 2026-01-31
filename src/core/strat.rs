@@ -267,7 +267,6 @@ impl RealEngine {
                 // Слишком рано для торговли, обновляем prev_prices и выходим
                 drop(state); // Освобождаем лок перед обновлением prev_prices
                 *self.prev_prices.lock().unwrap() = Some(prices);
-                info!("⏳ Ждем начала торговли: {} / {} сек", elapsed, min_elapsed);
                 return;
             }
         }
@@ -299,16 +298,6 @@ impl RealEngine {
             return;
         }
 
-        // Логируем текущее состояние стакана
-        let up_bid = prices.up_bid;
-        let down_bid = prices.down_bid;
-        let spread = prices.spread_cents();
-
-        info!(
-            "📊 Тик: UP bid {:.3} | DOWN bid {:.3} | Spread: {} центов",
-            up_bid, down_bid, spread
-        );
-
         // Получаем предыдущие цены для определения тренда
         let prev_prices_opt = self.prev_prices.lock().unwrap().clone();
 
@@ -319,7 +308,6 @@ impl RealEngine {
         let prev = match prev_prices_opt {
             Some(p) => p,
             None => {
-                info!("⏭️ Первый тик - пропускаем, ждем следующий для определения тренда");
                 return;
             }
         };
@@ -328,7 +316,6 @@ impl RealEngine {
         let trend = self.detect_trend(&prev, &prices);
 
         if trend == Trend::None {
-            info!("⏸️ Нет тренда - не размещаем");
             return;
         }
 
@@ -355,10 +342,6 @@ impl RealEngine {
         };
 
         if !should_trade {
-            info!(
-                "⏸️ Тренд {:?} не соответствует legs_strategy '{}' - не размещаем",
-                trend, legs_strategy
-            );
             return;
         }
 

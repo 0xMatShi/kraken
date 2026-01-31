@@ -71,9 +71,7 @@ impl RealEngine {
                 sizes.len(),
                 target_price
             );
-            for size in sizes {
-                super::streams::place_cumulative_first_leg(self, strong_side, target_price, size);
-            }
+            super::streams::place_cumulative_first_leg(self, strong_side, target_price, sizes);
 
             return;
         }
@@ -132,14 +130,12 @@ impl RealEngine {
                         target_price,
                         remaining
                     );
-                    for size in sizes {
-                        super::streams::place_cumulative_first_leg(
-                            self,
-                            prices.strong_side(),
-                            target_price,
-                            size,
-                        );
-                    }
+                    super::streams::place_cumulative_first_leg(
+                        self,
+                        prices.strong_side(),
+                        target_price,
+                        sizes,
+                    );
                 }
             }
             CumulativePhase::PlacingSecondLeg => {
@@ -193,9 +189,7 @@ impl RealEngine {
                         price,
                         remaining
                     );
-                    for size in sizes {
-                        super::streams::place_cumulative_second_leg(self, weak_side, price, size);
-                    }
+                    super::streams::place_cumulative_second_leg(self, weak_side, price, sizes);
                 } else if trend == Trend::Weak && spread >= 2 && spread < 4 {
                     // Переразмещение второй ноги по лучшей цене
                     let strong_bb = prices.bid_for_side(state.first_leg_side);
@@ -243,11 +237,7 @@ impl RealEngine {
                         weak_side,
                         new_price
                     );
-                    for size in sizes {
-                        super::streams::place_cumulative_second_leg(
-                            self, weak_side, new_price, size,
-                        );
-                    }
+                    super::streams::place_cumulative_second_leg(self, weak_side, new_price, sizes);
                 }
             }
         }
