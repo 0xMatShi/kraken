@@ -89,32 +89,22 @@ impl RealEngine {
                         state.first_leg_filled, self.config.max_size_side, first_remaining
                     );
 
-                    // Отменяем все pending первые ноги
-                    let orders_to_cancel: Vec<String> =
-                        state.first_leg_orders.iter().cloned().collect();
                     state.phase = CumulativePhase::PlacingSecondLeg;
                     state.first_leg_placed_price = None;
 
-                    drop(cum_state);
-
-                    for order_id in orders_to_cancel {
-                        super::streams::cancel_order(self, order_id);
-                    }
-
                     return;
                 }
+
+                let remaining = Self::round_price(first_remaining);
 
                 // Можем разместить ещё, если есть тренд Strong + spread 2-3 + нет размещений
                 if trend == Trend::Strong
                     && spread >= 2
                     && spread < 4
-                    && state.first_leg_placed_price.is_none()
                 {
                     let weak_bb = prices.bid_for_side(prices.weak_side());
                     let target_price = Self::round_price(0.99 - weak_bb);
 
-                    let remaining =
-                        Self::round_price(self.config.max_size_side - state.first_leg_filled);
                     let sizes = Self::calculate_order_sizes(remaining, self.config.size);
 
                     if sizes.is_empty() {
@@ -140,7 +130,7 @@ impl RealEngine {
             }
             CumulativePhase::PlacingSecondLeg => {
                 // Проверяем, закрыли ли мы полностью (остаток < 5 считаем закрытым)
-                let second_remaining = state.first_leg_filled - state.second_leg_filled;
+                let second_remaining = self.config.max_size_side - state.second_leg_filled;
                 if state.second_leg_filled > 0.0 && second_remaining < 5.0 {
                     info!(
                         "🎉 [Cumulative] Цикл завершен! First: {:.2} | Second: {:.2} (остаток {:.2} < 5)",
@@ -151,8 +141,7 @@ impl RealEngine {
                 }
 
                 let weak_side = state.first_leg_side.opposite();
-                let first_leg_filled = state.first_leg_filled;
-                let second_leg_filled = state.second_leg_filled;
+                let remaining = Self::round_price(second_remaining);
 
                 if state.second_leg_placed_price.is_none() {
                     // Начальное размещение второй ноги
@@ -161,7 +150,7 @@ impl RealEngine {
                     let strong_bb = prices.bid_for_side(state.first_leg_side);
 
                     // Выбираем цену
-                    let price = if weak_bb_size <= first_leg_filled {
+                    let price = if weak_bb_size <= self.config.max_size_side {
                         // Небольшая очередь - присоединяемся к best_bid
                         weak_bb
                     } else {
@@ -172,7 +161,6 @@ impl RealEngine {
                         Self::round_price(0.99 - strong_bb)
                     };
 
-                    let remaining = Self::round_price(first_leg_filled - second_leg_filled);
                     let sizes = Self::calculate_order_sizes(remaining, self.config.size);
 
                     if sizes.is_empty() {
@@ -210,14 +198,11 @@ impl RealEngine {
                         state.second_leg_orders.iter().cloned().collect();
                     state.second_leg_placed_price = None;
 
-                    let remaining = Self::round_price(first_leg_filled - second_leg_filled);
                     let sizes = Self::calculate_order_sizes(remaining, self.config.size);
 
                     drop(cum_state);
 
-                    for order_id in orders_to_cancel {
-                        super::streams::cancel_order(self, order_id);
-                    }
+                    super::streams::cancel_orders(self, orders_to_cancel);
 
                     if sizes.is_empty() {
                         return;
