@@ -251,8 +251,11 @@ pub fn place_cumulative_first_leg(
                         engine_clone
                             .register_cumulative_first_leg(response.order_id, rounded_price);
                         success_count += 1;
-                    } else if let Some(err) = &response.error_msg {
-                        warn!("❌ [Cumulative] Ордер первой ноги отклонён: {}", err);
+                    } else {
+                        if let Some(err) = &response.error_msg {
+                            warn!("❌ [Cumulative] Ордер первой ноги отклонён: {}", err);
+                        }
+                        engine_clone.on_cumulative_first_leg_rejected();
                     }
                 }
                 // Если ни один ордер не разместился успешно - сбрасываем состояние
@@ -348,8 +351,11 @@ pub fn place_cumulative_second_leg(
                         engine_clone
                             .register_cumulative_second_leg(response.order_id, rounded_price);
                         success_count += 1;
-                    } else if let Some(err) = &response.error_msg {
-                        warn!("❌ [Cumulative] Ордер второй ноги отклонён: {}", err);
+                    } else {
+                        if let Some(err) = &response.error_msg {
+                            warn!("❌ [Cumulative] Ордер второй ноги отклонён: {}", err);
+                        }
+                        engine_clone.on_cumulative_second_leg_rejected();
                     }
                 }
                 // Если ни один ордер не разместился успешно - возвращаемся в Middle

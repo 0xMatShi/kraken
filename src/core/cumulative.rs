@@ -333,6 +333,52 @@ impl RealEngine {
         super::streams::place_cumulative_second_leg(self, weak_side, target_price, sizes);
     }
 
+    /// Уменьшает pending_first_leg_orders при отклонении ордера биржей
+    /// Проверяет переход в FirstLegPlaced (если есть успешные ордера) или ZeroPoint (если все отклонены)
+    pub fn on_cumulative_first_leg_rejected(&self) {
+        let mut cum_state = self.cumulative_state.lock().unwrap();
+
+        if cum_state.pending_first_leg_orders > 0 {
+            cum_state.pending_first_leg_orders -= 1;
+        }
+
+        // Проверяем переход когда все pending обработаны
+        if cum_state.phase == CumulativePhase::Beginning && cum_state.pending_first_leg_orders == 0
+        {
+            if cum_state.first_leg_orders.is_empty() {
+                // Все ордера отклонены - возврат в ZeroPoint
+                info!("❌ [Cumulative] Beginning → ZeroPoint: все ордера отклонены");
+                *cum_state = CumulativeState::default();
+            } else {
+                // Есть успешные ордера - переход в FirstLegPlaced
+                info!(
+                    "✅ [Cumulative] Beginning → FirstLegPlaced: {} ордеров подтверждено",
+                    cum_state.first_leg_orders.len()
+                );
+                cum_state.phase = CumulativePhase::FirstLegPlaced;
+            }
+        }
+    }
+
+    /// Уменьшает pending_second_leg_orders при отклонении ордера биржей
+    pub fn on_cumulative_second_leg_rejected(&self) {
+        let mut cum_state = self.cumulative_state.lock().unwrap();
+
+        if cum_state.pending_second_leg_orders > 0 {
+            cum_state.pending_second_leg_orders -= 1;
+        }
+
+        // Если все pending обработаны и нет успешных ордеров - возврат в Middle
+        if cum_state.phase == CumulativePhase::SecondLegPlaced
+            && cum_state.pending_second_leg_orders == 0
+            && cum_state.second_leg_orders.is_empty()
+        {
+            info!("❌ [Cumulative] SecondLegPlaced → Middle: все ордера отклонены");
+            cum_state.phase = CumulativePhase::Middle;
+            cum_state.second_leg_placed_price = None;
+        }
+    }
+
     /// Регистрирует order_id cumulative первой ноги с ценой размещения
     /// Уменьшает pending_first_leg_orders и переходит в FirstLegPlaced когда все ордера подтверждены
     pub fn register_cumulative_first_leg(&self, order_id: String, price: f64) {
