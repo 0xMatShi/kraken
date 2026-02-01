@@ -131,6 +131,10 @@ impl RealEngine {
         let (strong_side, sizes) = {
             let mut cum_state = self.cumulative_state.lock().unwrap();
 
+            if cum_state.pending_first_leg_orders > 0 {
+                return;
+            }
+
             let remaining = cum_state.first_leg_target_size - cum_state.first_leg_filled;
             let sizes = Self::calculate_order_sizes(remaining, self.config.size);
 
@@ -267,6 +271,10 @@ impl RealEngine {
 
         let sizes = {
             let mut cum_state = self.cumulative_state.lock().unwrap();
+
+            if cum_state.pending_second_leg_orders > 0 {
+                return;
+            }
 
             let remaining = cum_state.first_leg_filled - cum_state.second_leg_filled;
             let sizes = Self::calculate_order_sizes(remaining, self.config.size);
@@ -462,5 +470,34 @@ impl RealEngine {
     #[allow(dead_code)]
     pub fn cumulative_phase(&self) -> CumulativePhase {
         self.cumulative_state.lock().unwrap().phase
+    }
+
+    /// Обработка ошибки размещения первой ноги
+    /// Сбрасывает состояние в ZeroPoint
+    pub fn on_first_leg_placement_failed(&self, reason: &str) {
+        let mut cum_state = self.cumulative_state.lock().unwrap();
+
+        info!(
+            "❌ [Cumulative] Ошибка размещения первой ноги: {} | Возврат в ZeroPoint",
+            reason
+        );
+
+        *cum_state = CumulativeState::default();
+    }
+
+    /// Обработка ошибки размещения второй ноги
+    /// Сбрасывает состояние в Middle для повторной попытки
+    pub fn on_second_leg_placement_failed(&self, reason: &str) {
+        let mut cum_state = self.cumulative_state.lock().unwrap();
+
+        info!(
+            "❌ [Cumulative] Ошибка размещения второй ноги: {} | Возврат в Middle",
+            reason
+        );
+
+        cum_state.phase = CumulativePhase::Middle;
+        cum_state.second_leg_placed_price = None;
+        cum_state.pending_second_leg_orders = 0;
+        cum_state.second_leg_orders.clear();
     }
 }

@@ -192,7 +192,6 @@ pub fn place_cumulative_first_leg(
     let client = engine.client.clone();
     let signer = engine.signer.clone();
     let engine_clone = Arc::clone(engine);
-    let side_clone = side;
 
     tokio::spawn(async move {
         let rounded_price = RealEngine::round_price(price);
@@ -239,25 +238,30 @@ pub fn place_cumulative_first_leg(
         }
 
         if signed_orders.is_empty() {
-            warn!("⚠️ [Cumulative] Не удалось подготовить ни одного ордера первой ноги");
+            engine_clone.on_first_leg_placement_failed("не удалось подготовить ни одного ордера");
             return;
         }
 
         // Размещаем все ордера батчевым запросом
         match client.post_orders(signed_orders).await {
             Ok(responses) => {
+                let mut success_count = 0;
                 for response in responses {
-                    if !response.order_id.is_empty() {
+                    if response.success && !response.order_id.is_empty() {
                         engine_clone
                             .register_cumulative_first_leg(response.order_id, rounded_price);
+                        success_count += 1;
+                    } else if let Some(err) = &response.error_msg {
+                        warn!("❌ [Cumulative] Ордер первой ноги отклонён: {}", err);
                     }
+                }
+                // Если ни один ордер не разместился успешно - сбрасываем состояние
+                if success_count == 0 {
+                    engine_clone.on_first_leg_placement_failed("все ордера отклонены биржей");
                 }
             }
             Err(e) => {
-                warn!(
-                    "❌ [Cumulative] Ошибка батчевого размещения первой ноги {:?} @ {:.2}: {}",
-                    side_clone, rounded_price, e
-                );
+                engine_clone.on_first_leg_placement_failed(&format!("ошибка API: {}", e));
             }
         }
     });
@@ -285,7 +289,6 @@ pub fn place_cumulative_second_leg(
     let client = engine.client.clone();
     let signer = engine.signer.clone();
     let engine_clone = Arc::clone(engine);
-    let side_clone = side;
 
     tokio::spawn(async move {
         let rounded_price = RealEngine::round_price(price);
@@ -332,25 +335,30 @@ pub fn place_cumulative_second_leg(
         }
 
         if signed_orders.is_empty() {
-            warn!("⚠️ [Cumulative] Не удалось подготовить ни одного ордера второй ноги");
+            engine_clone.on_second_leg_placement_failed("не удалось подготовить ни одного ордера");
             return;
         }
 
         // Размещаем все ордера батчевым запросом
         match client.post_orders(signed_orders).await {
             Ok(responses) => {
+                let mut success_count = 0;
                 for response in responses {
-                    if !response.order_id.is_empty() {
+                    if response.success && !response.order_id.is_empty() {
                         engine_clone
                             .register_cumulative_second_leg(response.order_id, rounded_price);
+                        success_count += 1;
+                    } else if let Some(err) = &response.error_msg {
+                        warn!("❌ [Cumulative] Ордер второй ноги отклонён: {}", err);
                     }
+                }
+                // Если ни один ордер не разместился успешно - возвращаемся в Middle
+                if success_count == 0 {
+                    engine_clone.on_second_leg_placement_failed("все ордера отклонены биржей");
                 }
             }
             Err(e) => {
-                warn!(
-                    "❌ [Cumulative] Ошибка батчевого размещения второй ноги {:?} @ {:.2}: {}",
-                    side_clone, rounded_price, e
-                );
+                engine_clone.on_second_leg_placement_failed(&format!("ошибка API: {}", e));
             }
         }
     });
