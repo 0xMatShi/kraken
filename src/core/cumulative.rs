@@ -37,7 +37,7 @@ impl RealEngine {
             }
             CumulativePhase::FirstLegPlaced => {
                 // Переразмещаем первую ногу только при тренде Strong
-                if trend == Trend::Strong {
+                if trend == Trend::Strong && has_good_spread {
                     self.first_leg_replacement_tick(prices);
                 }
             }
@@ -272,8 +272,6 @@ impl RealEngine {
         let weak_side = first_leg_side.opposite();
         let strong_bb = prices.bid_for_side(first_leg_side);
         let weak_bb = prices.bid_for_side(weak_side);
-        let spread = prices.spread_cents();
-        let has_good_spread = spread >= 2 && spread < 4;
 
         // Определяем цену для переразмещения по условиям
         let target_price = match placed_price {
@@ -291,7 +289,7 @@ impl RealEngine {
             }
             None => {
                 // Все ордера были отменены - размещаем заново при тренде + хорошем спреде
-                if (trend == Trend::Strong || trend == Trend::Weak) && has_good_spread {
+                if trend == Trend::Strong || trend == Trend::Weak {
                     Self::round_price(0.99 - strong_bb)
                 } else {
                     return;
