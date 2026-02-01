@@ -131,10 +131,6 @@ impl RealEngine {
         let (strong_side, sizes) = {
             let mut cum_state = self.cumulative_state.lock().unwrap();
 
-            if cum_state.pending_first_leg_orders > 0 {
-                return;
-            }
-
             let remaining = cum_state.first_leg_target_size - cum_state.first_leg_filled;
             let sizes = Self::calculate_order_sizes(remaining, self.config.size);
 
@@ -271,10 +267,6 @@ impl RealEngine {
 
         let sizes = {
             let mut cum_state = self.cumulative_state.lock().unwrap();
-
-            if cum_state.pending_second_leg_orders > 0 {
-                return;
-            }
 
             let remaining = cum_state.first_leg_filled - cum_state.second_leg_filled;
             let sizes = Self::calculate_order_sizes(remaining, self.config.size);
