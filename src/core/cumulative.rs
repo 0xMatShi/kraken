@@ -293,12 +293,12 @@ impl RealEngine {
         super::streams::place_cumulative_second_leg(self, weak_side, target_price, sizes);
     }
 
-    /// Регистрирует order_id cumulative первой ноги
+    /// Регистрирует order_id cumulative первой ноги с ценой размещения
     /// Уменьшает pending_first_leg_orders и переходит в FirstLegPlaced когда все ордера подтверждены
-    pub fn register_cumulative_first_leg(&self, order_id: String) {
+    pub fn register_cumulative_first_leg(&self, order_id: String, price: f64) {
         let mut cum_state = self.cumulative_state.lock().unwrap();
 
-        cum_state.first_leg_orders.insert(order_id.clone());
+        cum_state.first_leg_orders.insert(order_id.clone(), price);
 
         // Уменьшаем pending counter
         if cum_state.pending_first_leg_orders > 0 {
@@ -316,11 +316,11 @@ impl RealEngine {
         }
     }
 
-    /// Регистрирует order_id cumulative второй ноги
-    pub fn register_cumulative_second_leg(&self, order_id: String) {
+    /// Регистрирует order_id cumulative второй ноги с ценой размещения
+    pub fn register_cumulative_second_leg(&self, order_id: String, price: f64) {
         let mut cum_state = self.cumulative_state.lock().unwrap();
 
-        cum_state.second_leg_orders.insert(order_id.clone());
+        cum_state.second_leg_orders.insert(order_id.clone(), price);
 
         // Уменьшаем pending counter
         if cum_state.pending_second_leg_orders > 0 {
@@ -351,7 +351,7 @@ impl RealEngine {
                 && first_remaining < 5.0
             {
                 // Собираем ордера для отмены ДО смены состояния (защита от race condition)
-                let orders: Vec<String> = cum_state.first_leg_orders.iter().cloned().collect();
+                let orders: Vec<String> = cum_state.first_leg_orders.keys().cloned().collect();
                 if !orders.is_empty() {
                     info!(
                         "🗑️ [Cumulative] Отменяем {} ордеров первой ноги (переход в Middle)",
@@ -401,7 +401,7 @@ impl RealEngine {
                 && second_remaining < 5.0
             {
                 // Собираем ордера для отмены ДО сброса состояния (защита от race condition)
-                let orders: Vec<String> = cum_state.second_leg_orders.iter().cloned().collect();
+                let orders: Vec<String> = cum_state.second_leg_orders.keys().cloned().collect();
                 if !orders.is_empty() {
                     info!(
                         "🗑️ [Cumulative] Отменяем {} ордеров второй ноги (переход в ZeroPoint)",
@@ -431,12 +431,12 @@ impl RealEngine {
     pub fn on_cumulative_order_cancelled(&self, order_id: &str) {
         let mut cum_state = self.cumulative_state.lock().unwrap();
 
-        if cum_state.first_leg_orders.remove(order_id) {
+        if cum_state.first_leg_orders.remove(order_id).is_some() {
             // Если все первые ноги отменены - сбрасываем placed_price для переразмещения
             if cum_state.first_leg_orders.is_empty() {
                 cum_state.first_leg_placed_price = None;
             }
-        } else if cum_state.second_leg_orders.remove(order_id) {
+        } else if cum_state.second_leg_orders.remove(order_id).is_some() {
             // Если все вторые ноги отменены - сбрасываем placed_price для переразмещения
             if cum_state.second_leg_orders.is_empty() {
                 cum_state.second_leg_placed_price = None;
@@ -449,10 +449,10 @@ impl RealEngine {
     pub fn is_cumulative_order(&self, order_id: &str) -> Option<bool> {
         let cum_state = self.cumulative_state.lock().unwrap();
 
-        if cum_state.first_leg_orders.contains(order_id) {
+        if cum_state.first_leg_orders.contains_key(order_id) {
             return Some(true);
         }
-        if cum_state.second_leg_orders.contains(order_id) {
+        if cum_state.second_leg_orders.contains_key(order_id) {
             return Some(false);
         }
 

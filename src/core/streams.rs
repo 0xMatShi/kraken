@@ -248,7 +248,8 @@ pub fn place_cumulative_first_leg(
             Ok(responses) => {
                 for response in responses {
                     if !response.order_id.is_empty() {
-                        engine_clone.register_cumulative_first_leg(response.order_id);
+                        engine_clone
+                            .register_cumulative_first_leg(response.order_id, rounded_price);
                     }
                 }
             }
@@ -340,7 +341,8 @@ pub fn place_cumulative_second_leg(
             Ok(responses) => {
                 for response in responses {
                     if !response.order_id.is_empty() {
-                        engine_clone.register_cumulative_second_leg(response.order_id);
+                        engine_clone
+                            .register_cumulative_second_leg(response.order_id, rounded_price);
                     }
                 }
             }
