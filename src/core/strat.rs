@@ -501,8 +501,20 @@ impl RealEngine {
                     super::streams::cancel_orders(self, orders);
                 }
             }
-            // В ZeroPoint и Beginning не проверяем - ещё нет размещённых ордеров
-            CumulativePhase::ZeroPoint | CumulativePhase::Beginning => {}
+            CumulativePhase::ZeroPoint => {
+                // В ZeroPoint отменяем оставшиеся ордера второй ноги от предыдущего цикла
+                if !cum_state.second_leg_orders.is_empty() {
+                    info!(
+                        "🗑️ [Cumulative] Отменяем {} оставшихся ордеров второй ноги (фаза ZeroPoint)",
+                        cum_state.second_leg_orders.len()
+                    );
+                    let orders: Vec<String> = cum_state.second_leg_orders.iter().cloned().collect();
+                    drop(cum_state);
+                    super::streams::cancel_orders(self, orders);
+                }
+            }
+            // В Beginning не проверяем - ещё нет размещённых ордеров
+            CumulativePhase::Beginning => {}
         }
     }
 

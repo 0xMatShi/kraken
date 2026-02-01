@@ -316,59 +316,101 @@ impl RealEngine {
     }
 
     /// Обработка fill cumulative первой ноги
+    /// При переходе в Middle отменяет оставшиеся ордера первой ноги
     pub fn on_cumulative_first_leg_fill(
-        &self,
+        self: &Arc<Self>,
         order_id: &str,
         fill_size: f64,
         is_fully_filled: bool,
     ) {
-        let mut cum_state = self.cumulative_state.lock().unwrap();
+        let orders_to_cancel = {
+            let mut cum_state = self.cumulative_state.lock().unwrap();
 
-        cum_state.first_leg_filled += fill_size;
-        if is_fully_filled {
-            cum_state.first_leg_orders.remove(order_id);
-        }
+            cum_state.first_leg_filled += fill_size;
+            if is_fully_filled {
+                cum_state.first_leg_orders.remove(order_id);
+            }
 
-        // Проверяем переход FirstLegPlaced → Middle
-        let first_remaining = cum_state.first_leg_target_size - cum_state.first_leg_filled;
-        if cum_state.phase == CumulativePhase::FirstLegPlaced
-            && cum_state.first_leg_filled > 0.0
-            && first_remaining < 5.0
-        {
-            info!(
-                "✅ [Cumulative] FirstLegPlaced → Middle (из fill): {:.2}/{:.2}",
-                cum_state.first_leg_filled, cum_state.first_leg_target_size
-            );
-            cum_state.phase = CumulativePhase::Middle;
-            cum_state.first_leg_placed_price = None;
+            // Проверяем переход FirstLegPlaced → Middle
+            let first_remaining = cum_state.first_leg_target_size - cum_state.first_leg_filled;
+            if cum_state.phase == CumulativePhase::FirstLegPlaced
+                && cum_state.first_leg_filled > 0.0
+                && first_remaining < 5.0
+            {
+                // Собираем ордера для отмены ДО смены состояния (защита от race condition)
+                let orders: Vec<String> = cum_state.first_leg_orders.iter().cloned().collect();
+                if !orders.is_empty() {
+                    info!(
+                        "🗑️ [Cumulative] Отменяем {} ордеров первой ноги (переход в Middle)",
+                        orders.len()
+                    );
+                }
+
+                info!(
+                    "✅ [Cumulative] FirstLegPlaced → Middle (из fill): {:.2}/{:.2}",
+                    cum_state.first_leg_filled, cum_state.first_leg_target_size
+                );
+                cum_state.phase = CumulativePhase::Middle;
+                cum_state.first_leg_placed_price = None;
+
+                orders
+            } else {
+                Vec::new()
+            }
+        };
+
+        // Отменяем ордера после освобождения lock
+        if !orders_to_cancel.is_empty() {
+            super::streams::cancel_orders(self, orders_to_cancel);
         }
     }
 
     /// Обработка fill cumulative второй ноги
+    /// При переходе в ZeroPoint отменяет оставшиеся ордера второй ноги
     pub fn on_cumulative_second_leg_fill(
-        &self,
+        self: &Arc<Self>,
         order_id: &str,
         fill_size: f64,
         is_fully_filled: bool,
     ) {
-        let mut cum_state = self.cumulative_state.lock().unwrap();
+        let orders_to_cancel = {
+            let mut cum_state = self.cumulative_state.lock().unwrap();
 
-        cum_state.second_leg_filled += fill_size;
-        if is_fully_filled {
-            cum_state.second_leg_orders.remove(order_id);
-        }
+            cum_state.second_leg_filled += fill_size;
+            if is_fully_filled {
+                cum_state.second_leg_orders.remove(order_id);
+            }
 
-        // Проверяем переход SecondLegPlaced → ZeroPoint
-        let second_remaining = cum_state.first_leg_target_size - cum_state.second_leg_filled;
-        if cum_state.phase == CumulativePhase::SecondLegPlaced
-            && cum_state.second_leg_filled > 0.0
-            && second_remaining < 5.0
-        {
-            info!(
-                "🎉 [Cumulative] SecondLegPlaced → ZeroPoint (из fill): Цикл завершен! First: {:.2} | Second: {:.2}",
-                cum_state.first_leg_filled, cum_state.second_leg_filled
-            );
-            *cum_state = CumulativeState::default();
+            // Проверяем переход SecondLegPlaced → ZeroPoint
+            let second_remaining = cum_state.first_leg_target_size - cum_state.second_leg_filled;
+            if cum_state.phase == CumulativePhase::SecondLegPlaced
+                && cum_state.second_leg_filled > 0.0
+                && second_remaining < 5.0
+            {
+                // Собираем ордера для отмены ДО сброса состояния (защита от race condition)
+                let orders: Vec<String> = cum_state.second_leg_orders.iter().cloned().collect();
+                if !orders.is_empty() {
+                    info!(
+                        "🗑️ [Cumulative] Отменяем {} ордеров второй ноги (переход в ZeroPoint)",
+                        orders.len()
+                    );
+                }
+
+                info!(
+                    "🎉 [Cumulative] SecondLegPlaced → ZeroPoint (из fill): Цикл завершен! First: {:.2} | Second: {:.2}",
+                    cum_state.first_leg_filled, cum_state.second_leg_filled
+                );
+                *cum_state = CumulativeState::default();
+
+                orders
+            } else {
+                Vec::new()
+            }
+        };
+
+        // Отменяем ордера после освобождения lock
+        if !orders_to_cancel.is_empty() {
+            super::streams::cancel_orders(self, orders_to_cancel);
         }
     }
 
