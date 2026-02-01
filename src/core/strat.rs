@@ -42,8 +42,8 @@ pub struct RealEngine {
     /// Активные первые ноги по цене для отмены при лучшей цене
     /// Ключ: (side_is_up, price_cents) -> order_id
     pub first_legs_by_price: Mutex<HashMap<(bool, u32), String>>,
-    /// Состояние cumulative стратегии
-    pub cumulative_state: Mutex<Option<CumulativeState>>,
+    /// Состояние cumulative стратегии (state machine с ZeroPoint как начальным состоянием)
+    pub cumulative_state: Mutex<CumulativeState>,
 }
 
 impl RealEngine {
@@ -79,7 +79,7 @@ impl RealEngine {
             second_leg_to_first: Mutex::new(HashMap::new()),
             price_lock: Mutex::new(PriceLock::default()),
             first_legs_by_price: Mutex::new(HashMap::new()),
-            cumulative_state: Mutex::new(None),
+            cumulative_state: Mutex::new(CumulativeState::default()),
         }
     }
 
@@ -133,7 +133,7 @@ impl RealEngine {
                 self.trade_pairs.lock().unwrap().clear();
                 self.second_leg_to_first.lock().unwrap().clear();
                 self.first_legs_by_price.lock().unwrap().clear();
-                *self.cumulative_state.lock().unwrap() = None;
+                *self.cumulative_state.lock().unwrap() = CumulativeState::default();
                 // price_lock не очищаем - пусть цены остаются заблокированными
             }
             Err(e) => {
@@ -252,11 +252,6 @@ impl RealEngine {
             }
         }
 
-        // ВАЖНО: Проверяем и отменяем устаревшие ордера ПЕРЕД всеми остальными проверками
-        // Это гарантирует, что старые ордера будут отменены даже если условия для
-        // размещения новых ордеров не выполнены (нет тренда, спред 1 цент, и т.д.)
-        self.check_and_cancel_stale_orders(&prices);
-
         // Проверяем, прошло ли достаточно времени с начала события
         {
             let state = self.ui_state.lock().unwrap();
@@ -314,6 +309,9 @@ impl RealEngine {
 
         // Определяем тренд
         let trend = self.detect_trend(&prev, &prices);
+
+        // Проверяем и отменяем устаревшие ордера (по цене и по тренду)
+        self.check_and_cancel_stale_orders(&prices, trend);
 
         if trend == Trend::None {
             return;
@@ -385,9 +383,13 @@ impl RealEngine {
         super::streams::place_first_leg(self, side, target_price, order_size);
     }
 
-    /// Проверяет и отменяет устаревшие ордера на основе текущих цен
-    /// Вызывается на каждом тике ДО всех остальных проверок
-    fn check_and_cancel_stale_orders(self: &Arc<Self>, prices: &MarketPrices) {
+    /// Проверяет и отменяет устаревшие ордера
+    ///
+    /// Для обычных ордеров: отменяем если цена ниже текущего best_bid
+    /// Для cumulative:
+    /// - Первая нога: отменяем если цена ниже best_bid ИЛИ trend == Strong
+    /// - Вторая нога: отменяем если цена ниже best_bid ИЛИ trend == Weak
+    fn check_and_cancel_stale_orders(self: &Arc<Self>, prices: &MarketPrices, trend: Trend) {
         // Текущие лучшие биды для каждой стороны
         let up_best_bid_cents = (prices.up_bid * 100.0).round() as u32;
         let down_best_bid_cents = (prices.down_bid * 100.0).round() as u32;
@@ -420,52 +422,78 @@ impl RealEngine {
             super::streams::cancel_orders(self, order_ids);
         }
 
-        // Проверяем устаревшие cumulative ордера
+        // Проверяем cumulative ордера
         let mut cum_state = self.cumulative_state.lock().unwrap();
-        if let Some(state) = cum_state.as_mut() {
-            match state.phase {
-                CumulativePhase::AccumulatingFirstLeg => {
-                    // Если цена размещения первой ноги ниже текущего best_bid - отменяем
-                    if let Some(placed_price) = state.first_leg_placed_price {
-                        let best_bid = prices.bid_for_side(state.first_leg_side);
-                        if placed_price < best_bid {
-                            info!(
-                                "🗑️ [Cumulative] Отменяем устаревшие первые ноги @ {:.2} (best_bid {:.2})",
-                                placed_price, best_bid
-                            );
-                            let orders: Vec<String> =
-                                state.first_leg_orders.iter().cloned().collect();
-                            state.first_leg_placed_price = None;
-                            drop(cum_state);
-                            if !orders.is_empty() {
-                                super::streams::cancel_orders(self, orders);
-                            }
-                            return;
-                        }
-                    }
-                }
-                CumulativePhase::PlacingSecondLeg => {
-                    // Если цена размещения второй ноги ниже текущего best_bid слабой стороны - отменяем
-                    if let Some(placed_price) = state.second_leg_placed_price {
-                        let weak_side = state.first_leg_side.opposite();
-                        let best_bid = prices.bid_for_side(weak_side);
-                        if placed_price < best_bid {
-                            info!(
-                                "🗑️ [Cumulative] Отменяем устаревшие вторые ноги @ {:.2} (best_bid {:.2})",
-                                placed_price, best_bid
-                            );
-                            let orders: Vec<String> =
-                                state.second_leg_orders.iter().cloned().collect();
-                            state.second_leg_placed_price = None;
-                            drop(cum_state);
-                            if !orders.is_empty() {
-                                super::streams::cancel_orders(self, orders);
-                            }
-                            return;
-                        }
-                    }
+        let phase = cum_state.phase;
+
+        match phase {
+            CumulativePhase::FirstLegPlaced => {
+                // Отменяем первую ногу если:
+                // 1. Цена ниже текущего best_bid
+                // 2. ИЛИ есть тренд Strong (для переразмещения)
+                let should_cancel = if let Some(placed_price) = cum_state.first_leg_placed_price {
+                    let best_bid = prices.bid_for_side(cum_state.first_leg_side);
+                    let price_stale = placed_price < best_bid;
+                    let trend_strong = trend == Trend::Strong;
+                    price_stale || trend_strong
+                } else {
+                    false
+                };
+
+                if should_cancel && !cum_state.first_leg_orders.is_empty() {
+                    let reason = if trend == Trend::Strong {
+                        "trend Strong"
+                    } else {
+                        "price stale"
+                    };
+                    info!(
+                        "🗑️ [Cumulative] Отменяем первые ноги ({}) | orders: {}",
+                        reason,
+                        cum_state.first_leg_orders.len()
+                    );
+                    let orders: Vec<String> = cum_state.first_leg_orders.iter().cloned().collect();
+                    cum_state.first_leg_placed_price = None;
+                    cum_state.pending_first_leg_orders = 0;
+                    drop(cum_state);
+                    super::streams::cancel_orders(self, orders);
+                    return;
                 }
             }
+            CumulativePhase::SecondLegPlaced => {
+                // Отменяем вторую ногу если:
+                // 1. Цена ниже текущего best_bid слабой стороны
+                // 2. ИЛИ есть тренд Weak (для переразмещения)
+                let should_cancel = if let Some(placed_price) = cum_state.second_leg_placed_price {
+                    let weak_side = cum_state.first_leg_side.opposite();
+                    let best_bid = prices.bid_for_side(weak_side);
+                    let price_stale = placed_price < best_bid;
+                    let trend_weak = trend == Trend::Weak;
+                    price_stale || trend_weak
+                } else {
+                    false
+                };
+
+                if should_cancel && !cum_state.second_leg_orders.is_empty() {
+                    let reason = if trend == Trend::Weak {
+                        "trend Weak"
+                    } else {
+                        "price stale"
+                    };
+                    info!(
+                        "🗑️ [Cumulative] Отменяем вторые ноги ({}) | orders: {}",
+                        reason,
+                        cum_state.second_leg_orders.len()
+                    );
+                    let orders: Vec<String> = cum_state.second_leg_orders.iter().cloned().collect();
+                    cum_state.second_leg_placed_price = None;
+                    cum_state.pending_second_leg_orders = 0;
+                    drop(cum_state);
+                    super::streams::cancel_orders(self, orders);
+                    return;
+                }
+            }
+            // В других фазах не проверяем
+            CumulativePhase::ZeroPoint | CumulativePhase::Beginning | CumulativePhase::Middle => {}
         }
     }
 

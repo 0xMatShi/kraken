@@ -118,10 +118,30 @@ pub enum Trend {
 }
 
 /// Фаза cumulative стратегии
+///
+/// State machine:
+/// ZeroPoint → Beginning → FirstLegPlaced → Middle → SecondLegPlaced → ZeroPoint
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CumulativePhase {
-    AccumulatingFirstLeg,
-    PlacingSecondLeg,
+    /// Начальное состояние - поиск условий для начала цикла
+    /// Тики стучатся в start_cumulative
+    ZeroPoint,
+
+    /// Размещение первой ноги в процессе
+    /// Все тики скипаются до завершения размещения
+    Beginning,
+
+    /// Первая нога размещена, мониторинг тренда strong для переразмещения
+    /// Тики стучатся в first_leg_replacement_cumulative_tick
+    FirstLegPlaced,
+
+    /// Первая нога полностью заполнена, ждём условий для второй ноги
+    /// Тики стучатся в middle_cumulative_tick
+    Middle,
+
+    /// Вторая нога размещена, мониторинг тренда weak для переразмещения
+    /// Тики стучатся в second_leg_replacement_cumulative_tick
+    SecondLegPlaced,
 }
 
 /// Состояние cumulative стратегии
@@ -132,9 +152,33 @@ pub struct CumulativeState {
     pub first_leg_filled: f64,
     pub first_leg_orders: HashSet<String>,
     pub first_leg_placed_price: Option<f64>, // предотвращает дублирование размещения на одной цене
+    pub first_leg_target_size: f64,          // целевой размер первой ноги (max_size_side)
     pub second_leg_filled: f64,
     pub second_leg_orders: HashSet<String>,
     pub second_leg_placed_price: Option<f64>,
+    /// Количество ордеров, ожидающих подтверждения размещения
+    /// Используется для защиты от race condition при переходе Beginning → FirstLegPlaced
+    pub pending_first_leg_orders: u32,
+    /// Количество ордеров второй ноги, ожидающих подтверждения
+    pub pending_second_leg_orders: u32,
+}
+
+impl Default for CumulativeState {
+    fn default() -> Self {
+        Self {
+            phase: CumulativePhase::ZeroPoint,
+            first_leg_side: Side::Up,
+            first_leg_filled: 0.0,
+            first_leg_orders: HashSet::new(),
+            first_leg_placed_price: None,
+            first_leg_target_size: 0.0,
+            second_leg_filled: 0.0,
+            second_leg_orders: HashSet::new(),
+            second_leg_placed_price: None,
+            pending_first_leg_orders: 0,
+            pending_second_leg_orders: 0,
+        }
+    }
 }
 
 /// Состояние первой ноги торговой пары
