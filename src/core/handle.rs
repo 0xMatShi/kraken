@@ -226,7 +226,7 @@ pub fn handle_ws_order(
 
             ui::add_our_bid_price(&engine.ui_state, is_up, price);
 
-            info!("📝 MAKER PLACED: {} {} @ {:.3}", side_str, token_str, price);
+            info!("📝 MAKER PLACED: {} {} @ {:.3} | ID: {}", side_str, token_str, price, order_id);
         }
         Some("UPDATE") => {
             if let Some(size) = size_matched {
@@ -253,8 +253,8 @@ pub fn handle_ws_order(
                         let current_order_price = *order_price;
 
                         info!(
-                            "📊 MAKER PARTIAL FILL: {} {} @ {:.3} | Filled: {:.2}/{:.2}",
-                            side_str, token_str, price, *accumulated_filled, *original_size
+                            "📊 MAKER PARTIAL FILL: {} {} @ {:.3} | Filled: {:.2}/{:.2} | ID: {}",
+                            side_str, token_str, price, *accumulated_filled, *original_size, order_id
                         );
 
                         ui::update_open_order_filled(
@@ -277,8 +277,8 @@ pub fn handle_ws_order(
                             ui::remove_our_bid_price(&engine.ui_state, final_is_up, final_price);
                             ui::remove_open_order(&engine.ui_state, &order_id);
                             info!(
-                                "🔔 ОРДЕР ПОЛНОСТЬЮ ИСПОЛНЕН: {} {} @ {:.3}",
-                                side_str, token_str, price
+                                "🔔 ОРДЕР ПОЛНОСТЬЮ ИСПОЛНЕН: {} {} @ {:.3} | ID: {}",
+                                side_str, token_str, price, order_id
                             );
 
                             // Проверяем, является ли это первой ногой
@@ -362,14 +362,6 @@ pub fn handle_ws_order(
                             }
 
                             info!(
-                                "✅ MAKER FILLED: {} {} @ {:.3} | Size: {:.2} | Cost: ${:.2}",
-                                side_str,
-                                token_str,
-                                price,
-                                size_for_portfolio,
-                                price * size_for_portfolio
-                            );
-                            info!(
                                 "💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
                                 port.up_shares,
                                 port.down_shares,
@@ -424,8 +416,8 @@ pub fn handle_ws_order(
             }
 
             warn!(
-                "❌ MAKER CANCELLED: {} {} @ {:.3}",
-                side_str, token_str, price
+                "❌ MAKER CANCELLED: {} {} @ {:.3} | ID: {}",
+                side_str, token_str, price, order_id
             );
         }
         _ => {}

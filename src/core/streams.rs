@@ -200,7 +200,6 @@ pub fn place_cumulative_first_leg(
 
         // Создаем и подписываем все ордера
         let mut signed_orders = Vec::new();
-        let total_size: f64 = sizes.iter().sum();
 
         for size in &sizes {
             let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
@@ -247,17 +246,11 @@ pub fn place_cumulative_first_leg(
         // Размещаем все ордера батчевым запросом
         match client.post_orders(signed_orders).await {
             Ok(responses) => {
-                let mut success_count = 0;
                 for response in responses {
                     if !response.order_id.is_empty() {
                         engine_clone.register_cumulative_first_leg(response.order_id);
-                        success_count += 1;
                     }
                 }
-                info!(
-                    "📝 [Cumulative] ПЕРВАЯ НОГА размещена батчем: {:?} @ {:.2} | {} ордеров | total_size={:.2}",
-                    side_clone, rounded_price, success_count, total_size
-                );
             }
             Err(e) => {
                 warn!(
@@ -299,7 +292,6 @@ pub fn place_cumulative_second_leg(
 
         // Создаем и подписываем все ордера
         let mut signed_orders = Vec::new();
-        let total_size: f64 = sizes.iter().sum();
 
         for size in &sizes {
             let size_dec: Decimal = format!("{:.2}", size).parse().unwrap();
@@ -346,17 +338,11 @@ pub fn place_cumulative_second_leg(
         // Размещаем все ордера батчевым запросом
         match client.post_orders(signed_orders).await {
             Ok(responses) => {
-                let mut success_count = 0;
                 for response in responses {
                     if !response.order_id.is_empty() {
                         engine_clone.register_cumulative_second_leg(response.order_id);
-                        success_count += 1;
                     }
                 }
-                info!(
-                    "📝 [Cumulative] ВТОРАЯ НОГА размещена батчем: {:?} @ {:.2} | {} ордеров | total_size={:.2}",
-                    side_clone, rounded_price, success_count, total_size
-                );
             }
             Err(e) => {
                 warn!(
@@ -397,9 +383,7 @@ pub fn cancel_orders(engine: &Arc<RealEngine>, order_ids: Vec<String>) {
         let order_ids_refs: Vec<&str> = order_ids.iter().map(|s| s.as_str()).collect();
 
         match client.cancel_orders(&order_ids_refs).await {
-            Ok(_) => {
-                info!("🗑️ Батчевая отмена: {} ордеров отменено", count);
-            }
+            Ok(_) => {}
             Err(e) => {
                 warn!("⚠️ Ошибка батчевой отмены {} ордеров: {}", count, e);
             }

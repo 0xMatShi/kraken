@@ -292,11 +292,6 @@ impl RealEngine {
             cum_state.pending_first_leg_orders -= 1;
         }
 
-        info!(
-            "📝 [Cumulative] Первая нога зарегистрирована: {} (pending: {})",
-            order_id, cum_state.pending_first_leg_orders
-        );
-
         // Переход Beginning → FirstLegPlaced когда все pending ордера подтверждены
         if cum_state.phase == CumulativePhase::Beginning && cum_state.pending_first_leg_orders == 0
         {
@@ -318,11 +313,6 @@ impl RealEngine {
         if cum_state.pending_second_leg_orders > 0 {
             cum_state.pending_second_leg_orders -= 1;
         }
-
-        info!(
-            "📝 [Cumulative] Вторая нога зарегистрирована: {} (pending: {})",
-            order_id, cum_state.pending_second_leg_orders
-        );
     }
 
     /// Обработка fill cumulative первой ноги
@@ -338,14 +328,6 @@ impl RealEngine {
         if is_fully_filled {
             cum_state.first_leg_orders.remove(order_id);
         }
-
-        info!(
-            "📊 [Cumulative] Первая нога fill: +{:.2} = {:.2}/{:.2} (orders: {})",
-            fill_size,
-            cum_state.first_leg_filled,
-            cum_state.first_leg_target_size,
-            cum_state.first_leg_orders.len()
-        );
 
         // Проверяем переход FirstLegPlaced → Middle
         let first_remaining = cum_state.first_leg_target_size - cum_state.first_leg_filled;
@@ -376,14 +358,6 @@ impl RealEngine {
             cum_state.second_leg_orders.remove(order_id);
         }
 
-        info!(
-            "📊 [Cumulative] Вторая нога fill: +{:.2} = {:.2}/{:.2} (orders: {})",
-            fill_size,
-            cum_state.second_leg_filled,
-            cum_state.first_leg_target_size,
-            cum_state.second_leg_orders.len()
-        );
-
         // Проверяем переход SecondLegPlaced → ZeroPoint
         let second_remaining = cum_state.first_leg_target_size - cum_state.second_leg_filled;
         if cum_state.phase == CumulativePhase::SecondLegPlaced
@@ -407,21 +381,11 @@ impl RealEngine {
             if cum_state.first_leg_orders.is_empty() {
                 cum_state.first_leg_placed_price = None;
             }
-            info!(
-                "🗑️ [Cumulative] Первая нога отменена: {} (remaining orders: {})",
-                order_id,
-                cum_state.first_leg_orders.len()
-            );
         } else if cum_state.second_leg_orders.remove(order_id) {
             // Если все вторые ноги отменены - сбрасываем placed_price для переразмещения
             if cum_state.second_leg_orders.is_empty() {
                 cum_state.second_leg_placed_price = None;
             }
-            info!(
-                "🗑️ [Cumulative] Вторая нога отменена: {} (remaining orders: {})",
-                order_id,
-                cum_state.second_leg_orders.len()
-            );
         }
     }
 
