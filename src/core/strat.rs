@@ -385,7 +385,7 @@ impl RealEngine {
     /// Для cumulative:
     /// - Первая нога: отменяем если цена ниже best_bid ИЛИ trend == Strong
     /// - Вторая нога: отменяем если цена ниже best_bid ИЛИ trend == Weak
-    fn check_and_cancel_stale_orders(self: &Arc<Self>, prices: &MarketPrices, _trend: Trend) {
+    fn check_and_cancel_stale_orders(self: &Arc<Self>, prices: &MarketPrices, trend: Trend) {
         // Текущие лучшие биды для каждой стороны
         let up_best_bid_cents = (prices.up_bid * 100.0).round() as u32;
         let down_best_bid_cents = (prices.down_bid * 100.0).round() as u32;
@@ -424,22 +424,30 @@ impl RealEngine {
 
         match phase {
             CumulativePhase::FirstLegPlaced => {
-                // Отменяем ордера первой ноги, цена которых ниже текущего best_bid
+                // Отменяем ордера первой ноги если:
+                // 1. Цена ордера < best_bid (устаревшие)
+                // 2. Trend::Strong (хотим переразместить по лучшей цене)
                 let best_bid = prices.bid_for_side(cum_state.first_leg_side);
+                let should_cancel_all = trend == Trend::Strong;
 
-                // Собираем ордера для отмены (цена ордера < best_bid)
+                // Собираем ордера для отмены
                 let stale_orders: Vec<String> = cum_state
                     .first_leg_orders
                     .iter()
-                    .filter(|(_, order_price)| **order_price < best_bid)
+                    .filter(|(_, order_price)| should_cancel_all || **order_price < best_bid)
                     .map(|(order_id, _)| order_id.clone())
                     .collect();
 
                 if !stale_orders.is_empty() {
+                    let reason = if should_cancel_all {
+                        "trend Strong".to_string()
+                    } else {
+                        format!("price < best_bid {:.2}", best_bid)
+                    };
                     info!(
-                        "🗑️ [Cumulative] Отменяем {} устаревших ордеров первой ноги (price < best_bid {:.2})",
+                        "🗑️ [Cumulative] Отменяем {} ордеров первой ноги ({})",
                         stale_orders.len(),
-                        best_bid
+                        reason
                     );
                     // Удаляем из HashMap
                     for order_id in &stale_orders {
@@ -449,30 +457,38 @@ impl RealEngine {
                     if cum_state.first_leg_orders.is_empty() {
                         cum_state.first_leg_placed_price = None;
                     }
-                    cum_state.pending_first_leg_orders = 0;
+                    // НЕ сбрасываем pending - новые ордера могут уже размещаться асинхронно
                     drop(cum_state);
                     super::streams::cancel_orders(self, stale_orders);
                     return;
                 }
             }
             CumulativePhase::SecondLegPlaced => {
-                // Отменяем ордера второй ноги, цена которых ниже текущего best_bid слабой стороны
+                // Отменяем ордера второй ноги если:
+                // 1. Цена ордера < best_bid (устаревшие)
+                // 2. Trend::Weak (хотим переразместить по лучшей цене)
                 let weak_side = cum_state.first_leg_side.opposite();
                 let best_bid = prices.bid_for_side(weak_side);
+                let should_cancel_all = trend == Trend::Weak;
 
-                // Собираем ордера для отмены (цена ордера < best_bid)
+                // Собираем ордера для отмены
                 let stale_orders: Vec<String> = cum_state
                     .second_leg_orders
                     .iter()
-                    .filter(|(_, order_price)| **order_price < best_bid)
+                    .filter(|(_, order_price)| should_cancel_all || **order_price < best_bid)
                     .map(|(order_id, _)| order_id.clone())
                     .collect();
 
                 if !stale_orders.is_empty() {
+                    let reason = if should_cancel_all {
+                        "trend Weak".to_string()
+                    } else {
+                        format!("price < best_bid {:.2}", best_bid)
+                    };
                     info!(
-                        "🗑️ [Cumulative] Отменяем {} устаревших ордеров второй ноги (price < best_bid {:.2})",
+                        "🗑️ [Cumulative] Отменяем {} ордеров второй ноги ({})",
                         stale_orders.len(),
-                        best_bid
+                        reason
                     );
                     // Удаляем из HashMap
                     for order_id in &stale_orders {
@@ -482,7 +498,7 @@ impl RealEngine {
                     if cum_state.second_leg_orders.is_empty() {
                         cum_state.second_leg_placed_price = None;
                     }
-                    cum_state.pending_second_leg_orders = 0;
+                    // НЕ сбрасываем pending - новые ордера могут уже размещаться асинхронно
                     drop(cum_state);
                     super::streams::cancel_orders(self, stale_orders);
                     return;
