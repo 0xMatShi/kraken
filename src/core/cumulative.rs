@@ -246,20 +246,27 @@ impl RealEngine {
         let has_good_spread = spread >= 2 && spread < 4;
 
         // Определяем цену для переразмещения по условиям
-        let target_price = if let Some(placed) = placed_price {
-            if weak_bb > placed && trend == Trend::Strong && has_good_spread {
-                // Условие 1: weak_bb вырос, Strong тренд, хороший спред
-                Self::round_price(0.99 - strong_bb)
-            } else if trend == Trend::Weak && has_good_spread {
-                // Условие 2: Weak тренд, хороший спред
-                Self::round_price(0.99 - strong_bb)
-            } else {
-                // Нет подходящих условий
-                return;
+        let target_price = match placed_price {
+            Some(placed) => {
+                if weak_bb > placed && trend == Trend::Strong && has_good_spread {
+                    // Условие 1: weak_bb вырос, Strong тренд, хороший спред
+                    Self::round_price(0.99 - strong_bb)
+                } else if trend == Trend::Weak && has_good_spread {
+                    // Условие 2: Weak тренд, хороший спред
+                    Self::round_price(0.99 - strong_bb)
+                } else {
+                    // Нет подходящих условий
+                    return;
+                }
             }
-        } else {
-            // Нет размещенной цены - не переразмещаем
-            return;
+            None => {
+                // Все ордера были отменены - размещаем заново при тренде + хорошем спреде
+                if (trend == Trend::Strong || trend == Trend::Weak) && has_good_spread {
+                    Self::round_price(0.99 - strong_bb)
+                } else {
+                    return;
+                }
+            }
         };
 
         let sizes = {
