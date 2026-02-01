@@ -37,7 +37,7 @@ impl RealEngine {
             }
             CumulativePhase::FirstLegPlaced => {
                 // Переразмещаем первую ногу только при тренде Strong
-                if trend == Trend::Strong {
+                if trend == Trend::Strong && has_good_spread {
                     self.first_leg_replacement_tick(prices);
                 }
             }
@@ -46,10 +46,8 @@ impl RealEngine {
                 self.middle_tick(prices, trend);
             }
             CumulativePhase::SecondLegPlaced => {
-                // Переразмещаем вторую ногу при тренде Weak
-                if trend == Trend::Weak {
-                    self.second_leg_replacement_tick(prices);
-                }
+                // Переразмещаем вторую ногу при любом тренде и спреде
+                self.second_leg_replacement_tick(prices, trend);
             }
         }
     }
@@ -168,24 +166,27 @@ impl RealEngine {
     /// 2. Тренд Weak → размещаем по 0.99 - strong_bb
     /// 3. На best_bid слабой стороны акций < max_size_side → присоединяемся к best_bid
     fn middle_tick(self: &Arc<Self>, prices: MarketPrices, trend: Trend) {
-        let (weak_side, strong_side) = {
+        let (weak_side, strong_side, first_leg_filled) = {
             let cum_state = self.cumulative_state.lock().unwrap();
             (
                 cum_state.first_leg_side.opposite(),
                 cum_state.first_leg_side,
+                cum_state.first_leg_filled,
             )
         };
 
         let weak_bb = prices.bid_for_side(weak_side);
         let weak_bb_size = prices.bid_size_for_side(weak_side);
         let strong_bb = prices.bid_for_side(strong_side);
+        let spread = prices.spread_cents();
+        let has_good_spread = spread >= 2 && spread < 4;
 
         // Определяем цену для второй ноги
-        let target_price = if weak_bb_size <= self.config.max_size_side {
+        let target_price = if weak_bb_size <= first_leg_filled {
             // Случай 2: небольшая очередь - присоединяемся к best_bid
             weak_bb
-        } else if trend == Trend::Strong || trend == Trend::Weak {
-            // Случай 1тренд- размещаем лимитку
+        } else if trend == Trend::Strong || trend == Trend::Weak && has_good_spread {
+            // Случай 1: тренд + спред - размещаем лимитку
             Self::round_price(0.99 - strong_bb)
         } else {
             // Нет подходящих условий
@@ -227,23 +228,39 @@ impl RealEngine {
         }
     }
 
-    /// Фаза SecondLegPlaced: мониторим тренд для переразмещения второй ноги
+    /// Фаза SecondLegPlaced: мониторим условия для переразмещения второй ноги
     ///
-    /// Условия (проверяются в process_cumulative):
-    /// - Trend::Strong или Trend::Weak
-    /// - Spread 2-3 цента
-    ///
-    /// При выполнении условий:
-    /// - Переразмещаем по новой цене (0.99 - strong_bb)
-    fn second_leg_replacement_tick(self: &Arc<Self>, prices: MarketPrices) {
-        let first_leg_side = {
+    /// Два условия для переразмещения:
+    /// 1. weak_bb > placed_price && Trend::Strong && has_good_spread → 0.99 - strong_bb
+    /// 2. Trend::Weak && has_good_spread → 0.99 - strong_bb
+    fn second_leg_replacement_tick(self: &Arc<Self>, prices: MarketPrices, trend: Trend) {
+        let (first_leg_side, placed_price) = {
             let cum_state = self.cumulative_state.lock().unwrap();
-            cum_state.first_leg_side
+            (cum_state.first_leg_side, cum_state.second_leg_placed_price)
         };
 
         let weak_side = first_leg_side.opposite();
         let strong_bb = prices.bid_for_side(first_leg_side);
-        let target_price = Self::round_price(0.99 - strong_bb);
+        let weak_bb = prices.bid_for_side(weak_side);
+        let spread = prices.spread_cents();
+        let has_good_spread = spread >= 2 && spread < 4;
+
+        // Определяем цену для переразмещения по условиям
+        let target_price = if let Some(placed) = placed_price {
+            if weak_bb > placed && trend == Trend::Strong && has_good_spread {
+                // Условие 1: weak_bb вырос, Strong тренд, хороший спред
+                Self::round_price(0.99 - strong_bb)
+            } else if trend == Trend::Weak && has_good_spread {
+                // Условие 2: Weak тренд, хороший спред
+                Self::round_price(0.99 - strong_bb)
+            } else {
+                // Нет подходящих условий
+                return;
+            }
+        } else {
+            // Нет размещенной цены - не переразмещаем
+            return;
+        };
 
         let sizes = {
             let mut cum_state = self.cumulative_state.lock().unwrap();
