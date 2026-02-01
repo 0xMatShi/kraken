@@ -1,5 +1,5 @@
 use super::strat::RealEngine;
-use crate::models::{CumulativePhase, CumulativeState, MarketPrices, Trend};
+use crate::models::{CumulativePhase, CumulativeState, MarketPrices, Side, Trend};
 use std::sync::Arc;
 use tracing::info;
 
@@ -59,9 +59,10 @@ impl RealEngine {
     /// - Spread 2-3 цента
     ///
     /// Здесь проверяем только max_balance
+    /// Также добавляем компенсацию skew к первой ноге если перекос не в её пользу
     fn start_tick(self: &Arc<Self>, prices: MarketPrices) {
-        // Проверяем max_balance
-        {
+        // Получаем skew из portfolio для компенсации
+        let skew_compensation = {
             let port = self.portfolio.lock().unwrap();
             let total_spent = port.up_spent + port.down_spent;
             let potential_cost = 0.99 * self.config.max_size_side;
@@ -72,7 +73,11 @@ impl RealEngine {
                 );
                 return;
             }
-        }
+            // skew = up_shares - down_shares
+            // Если skew < 0 → больше DOWN, нужно компенсировать при UP первой ноге
+            // Если skew > 0 → больше UP, нужно компенсировать при DOWN первой ноге
+            port.up_shares - port.down_shares
+        };
 
         // ВАЖНО: Сначала переходим в Beginning чтобы заблокировать следующие тики
         let (strong_side, target_price, sizes) = {
@@ -86,7 +91,17 @@ impl RealEngine {
             let strong_side = prices.strong_side();
             let weak_bb = prices.bid_for_side(prices.weak_side());
             let target_price = Self::round_price(0.99 - weak_bb);
-            let target_size = self.config.max_size_side;
+
+            // Базовый размер без компенсации (для второй ноги)
+            let base_target_size = self.config.max_size_side;
+
+            // Добавляем компенсацию skew если перекос не в пользу первой ноги
+            let compensation = match strong_side {
+                Side::Up if skew_compensation < 0.0 => -skew_compensation, // больше DOWN, компенсируем UP
+                Side::Down if skew_compensation > 0.0 => skew_compensation, // больше UP, компенсируем DOWN
+                _ => 0.0,
+            };
+            let target_size = base_target_size + compensation;
 
             let sizes = Self::calculate_order_sizes(target_size, self.config.size);
             if sizes.is_empty() {
@@ -97,16 +112,29 @@ impl RealEngine {
             cum_state.phase = CumulativePhase::Beginning;
             cum_state.first_leg_side = strong_side;
             cum_state.first_leg_target_size = target_size;
+            cum_state.base_target_size = base_target_size;
             cum_state.first_leg_placed_price = Some(target_price);
             cum_state.pending_first_leg_orders = sizes.len() as u32;
 
-            info!(
-                "🚀 [Cumulative] ZeroPoint → Beginning: {:?} @ {:.2} | {} ордеров | target_size={:.2}",
-                strong_side,
-                target_price,
-                sizes.len(),
-                target_size
-            );
+            if compensation > 0.0 {
+                info!(
+                    "🚀 [Cumulative] ZeroPoint → Beginning: {:?} @ {:.2} | {} ордеров | target={:.2} (base={:.2} + skew_comp={:.2})",
+                    strong_side,
+                    target_price,
+                    sizes.len(),
+                    target_size,
+                    base_target_size,
+                    compensation
+                );
+            } else {
+                info!(
+                    "🚀 [Cumulative] ZeroPoint → Beginning: {:?} @ {:.2} | {} ордеров | target_size={:.2}",
+                    strong_side,
+                    target_price,
+                    sizes.len(),
+                    target_size
+                );
+            }
 
             (strong_side, target_price, sizes)
         };
@@ -166,12 +194,11 @@ impl RealEngine {
     /// 2. Тренд Weak → размещаем по 0.99 - strong_bb
     /// 3. На best_bid слабой стороны акций < max_size_side → присоединяемся к best_bid
     fn middle_tick(self: &Arc<Self>, prices: MarketPrices, trend: Trend) {
-        let (weak_side, strong_side, first_leg_filled) = {
+        let (weak_side, strong_side) = {
             let cum_state = self.cumulative_state.lock().unwrap();
             (
                 cum_state.first_leg_side.opposite(),
                 cum_state.first_leg_side,
-                cum_state.first_leg_filled,
             )
         };
 
@@ -182,7 +209,7 @@ impl RealEngine {
         let has_good_spread = spread >= 2 && spread < 4;
 
         // Определяем цену для второй ноги
-        let target_price = if weak_bb_size <= first_leg_filled {
+        let target_price = if weak_bb_size <= 100.0 {
             // Случай 2: небольшая очередь - присоединяемся к best_bid
             weak_bb
         } else if trend == Trend::Strong || trend == Trend::Weak && has_good_spread {
@@ -201,7 +228,10 @@ impl RealEngine {
                 return;
             }
 
-            let remaining = cum_state.first_leg_filled - cum_state.second_leg_filled;
+            // Вторая нога = min(first_leg_filled, base_target_size) - second_leg_filled
+            // Используем base_target_size (без компенсации skew) чтобы не накапливать перекос
+            let second_leg_target = cum_state.base_target_size.min(cum_state.first_leg_filled);
+            let remaining = second_leg_target - cum_state.second_leg_filled;
             let sizes = Self::calculate_order_sizes(remaining, self.config.size);
 
             if sizes.is_empty() {
@@ -276,7 +306,10 @@ impl RealEngine {
                 return;
             }
 
-            let remaining = cum_state.first_leg_filled - cum_state.second_leg_filled;
+            // Вторая нога = min(first_leg_filled, base_target_size) - second_leg_filled
+            // Используем base_target_size (без компенсации skew) чтобы не накапливать перекос
+            let second_leg_target = cum_state.base_target_size.min(cum_state.first_leg_filled);
+            let remaining = second_leg_target - cum_state.second_leg_filled;
             let sizes = Self::calculate_order_sizes(remaining, self.config.size);
 
             if sizes.is_empty() {
@@ -402,7 +435,8 @@ impl RealEngine {
             }
 
             // Проверяем переход SecondLegPlaced → ZeroPoint
-            let second_remaining = cum_state.first_leg_target_size - cum_state.second_leg_filled;
+            // Используем base_target_size (без компенсации skew) для проверки завершения
+            let second_remaining = cum_state.base_target_size - cum_state.second_leg_filled;
             if cum_state.phase == CumulativePhase::SecondLegPlaced
                 && cum_state.second_leg_filled > 0.0
                 && second_remaining < 5.0

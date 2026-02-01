@@ -152,7 +152,9 @@ pub struct CumulativeState {
     pub first_leg_filled: f64,
     pub first_leg_orders: HashMap<String, f64>, // order_id → price (цена размещения)
     pub first_leg_placed_price: Option<f64>, // предотвращает дублирование размещения на одной цене
-    pub first_leg_target_size: f64,          // целевой размер первой ноги (max_size_side)
+    pub first_leg_target_size: f64,          // целевой размер первой ноги (с компенсацией skew)
+    /// Базовый размер без компенсации skew (для расчёта второй ноги)
+    pub base_target_size: f64,
     pub second_leg_filled: f64,
     pub second_leg_orders: HashMap<String, f64>, // order_id → price (цена размещения)
     pub second_leg_placed_price: Option<f64>,
@@ -172,6 +174,7 @@ impl Default for CumulativeState {
             first_leg_orders: HashMap::new(),
             first_leg_placed_price: None,
             first_leg_target_size: 0.0,
+            base_target_size: 0.0,
             second_leg_filled: 0.0,
             second_leg_orders: HashMap::new(),
             second_leg_placed_price: None,
