@@ -121,7 +121,6 @@ impl RealEngine {
     ///
     /// Условия (проверяются в process_cumulative):
     /// - Trend::Strong
-    /// - Spread 2-3 цента
     ///
     /// При выполнении условий:
     /// - Переразмещаем по новой цене (0.99 - weak_bb)
@@ -165,12 +164,10 @@ impl RealEngine {
     /// Фаза Middle: ждём условий для размещения второй ноги
     ///
     /// Три случая размещения:
-    /// 1. Тренд Strong + спред 2-3 → размещаем по 0.99 - strong_bb
-    /// 2. Тренд Weak + спред 2-3 → размещаем по 0.99 - strong_bb
+    /// 1. Тренд Strong → размещаем по 0.99 - strong_bb
+    /// 2. Тренд Weak → размещаем по 0.99 - strong_bb
     /// 3. На best_bid слабой стороны акций < max_size_side → присоединяемся к best_bid
     fn middle_tick(self: &Arc<Self>, prices: MarketPrices, trend: Trend) {
-        let spread = prices.spread_cents();
-
         let (weak_side, strong_side, target_size) = {
             let cum_state = self.cumulative_state.lock().unwrap();
             (
@@ -186,10 +183,10 @@ impl RealEngine {
 
         // Определяем цену для второй ноги
         let target_price = if weak_bb_size <= self.config.max_size_side {
-            // Случай 3: небольшая очередь - присоединяемся к best_bid
+            // Случай 2: небольшая очередь - присоединяемся к best_bid
             weak_bb
-        } else if (trend == Trend::Strong || trend == Trend::Weak) && spread >= 2 && spread < 4 {
-            // Случай 1 и 2: тренд + спред - размещаем лимитку
+        } else if trend == Trend::Strong || trend == Trend::Weak {
+            // Случай 1тренд- размещаем лимитку
             Self::round_price(0.99 - strong_bb)
         } else {
             // Нет подходящих условий
