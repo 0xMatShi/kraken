@@ -497,6 +497,7 @@ impl RealEngine {
                         cum_state.first_leg_orders.len()
                     );
                     let orders: Vec<String> = cum_state.first_leg_orders.keys().cloned().collect();
+                    cum_state.first_leg_orders.clear();
                     drop(cum_state);
                     super::streams::cancel_orders(self, orders);
                 }
@@ -509,6 +510,7 @@ impl RealEngine {
                         cum_state.second_leg_orders.len()
                     );
                     let orders: Vec<String> = cum_state.second_leg_orders.keys().cloned().collect();
+                    cum_state.second_leg_orders.clear();
                     drop(cum_state);
                     super::streams::cancel_orders(self, orders);
                 }
