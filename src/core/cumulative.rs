@@ -22,11 +22,11 @@ impl RealEngine {
         };
 
         let spread = prices.spread_cents();
-        let has_good_spread = spread >= 2 && spread < 4;
+        let has_good_spread = spread >= 2 && spread < 5;
 
         match phase {
             CumulativePhase::ZeroPoint => {
-                // Начинаем цикл только при тренде Strong + спред 2-3
+                // Начинаем цикл только при тренде Strong + спред 2-4
                 if trend == Trend::Strong && has_good_spread {
                     self.start_tick(prices);
                 }

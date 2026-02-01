@@ -870,9 +870,9 @@ impl RealEngine {
     /// Вычисляет размеры ордеров для батчевого размещения
     ///
     /// Разбивает remaining на порции по unit_size.
-    /// Остаток <= 5.0 прибавляется к последнему ордеру.
+    /// Остаток < 5.0 прибавляется к последнему ордеру.
     pub fn calculate_order_sizes(remaining: f64, unit_size: f64) -> Vec<f64> {
-        if remaining <= 5.0 {
+        if remaining < 5.0 {
             return vec![];
         }
 
