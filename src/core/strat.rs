@@ -102,12 +102,7 @@ impl RealEngine {
         let total_spent = port.up_spent + port.down_spent;
         let up_profit = port.up_shares - total_spent;
         let down_profit = port.down_shares - total_spent;
-
-        info!(
-            "💰 Profit Check: UP profit: ${:.2} | DOWN profit: ${:.2}",
-            up_profit, down_profit
-        );
-
+        
         // Если обе стороны имеют прибыль > $2
         if up_profit > 2.0 && down_profit > 2.0 {
             info!(
