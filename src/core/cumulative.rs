@@ -168,12 +168,11 @@ impl RealEngine {
     /// 2. Тренд Weak → размещаем по 0.99 - strong_bb
     /// 3. На best_bid слабой стороны акций < max_size_side → присоединяемся к best_bid
     fn middle_tick(self: &Arc<Self>, prices: MarketPrices, trend: Trend) {
-        let (weak_side, strong_side, target_size) = {
+        let (weak_side, strong_side) = {
             let cum_state = self.cumulative_state.lock().unwrap();
             (
                 cum_state.first_leg_side.opposite(),
                 cum_state.first_leg_side,
-                cum_state.first_leg_target_size,
             )
         };
 
@@ -201,7 +200,7 @@ impl RealEngine {
                 return;
             }
 
-            let remaining = target_size - cum_state.second_leg_filled;
+            let remaining = cum_state.first_leg_filled - cum_state.second_leg_filled;
             let sizes = Self::calculate_order_sizes(remaining, self.config.size);
 
             if sizes.is_empty() {
@@ -237,9 +236,9 @@ impl RealEngine {
     /// При выполнении условий:
     /// - Переразмещаем по новой цене (0.99 - strong_bb)
     fn second_leg_replacement_tick(self: &Arc<Self>, prices: MarketPrices) {
-        let (first_leg_side, target_size) = {
+        let first_leg_side = {
             let cum_state = self.cumulative_state.lock().unwrap();
-            (cum_state.first_leg_side, cum_state.first_leg_target_size)
+            cum_state.first_leg_side
         };
 
         let weak_side = first_leg_side.opposite();
@@ -253,7 +252,7 @@ impl RealEngine {
                 return;
             }
 
-            let remaining = target_size - cum_state.second_leg_filled;
+            let remaining = cum_state.first_leg_filled - cum_state.second_leg_filled;
             let sizes = Self::calculate_order_sizes(remaining, self.config.size);
 
             if sizes.is_empty() {

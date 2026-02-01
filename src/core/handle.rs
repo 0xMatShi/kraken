@@ -60,12 +60,13 @@ pub fn handle_ws_trade(
     let token_str = if is_up { "UP" } else { "DOWN" };
 
     info!(
-        "✅ TAKER FILLED: {} {} @ {:.3} | Size: {:.2} | Cost: ${:.2}",
+        "✅ TAKER FILLED: {} {} @ {:.3} | Size: {:.2} | Cost: ${:.2} | ID: {}",
         side_str,
         token_str,
         price,
         size,
-        price * size
+        price * size,
+        taker_order_id.as_deref().unwrap_or("N/A")
     );
     info!(
         "💰 Portfolio: UP {:.1} | DOWN {:.1} | Skew {:.1}",
@@ -106,8 +107,7 @@ pub fn handle_ws_trade(
 /// с данным order_id, и если да - вызываем соответствующий обработчик.
 fn match_and_process_taker_leg(engine: &Arc<RealEngine>, taker_order_id: &str, size: f64) {
     let start = Instant::now();
-    let timeout = Duration::from_secs(10); // 5 секунд таймаут
-    let poll_interval = Duration::from_millis(5);
+    let timeout = Duration::from_secs(10);
 
     info!(
         "🔍 Начинаем поиск ноги для taker order_id: {}",
@@ -168,9 +168,6 @@ fn match_and_process_taker_leg(engine: &Arc<RealEngine>, taker_order_id: &str, s
             }
             return;
         }
-
-        // Ещё не зарегистрирована - ждём
-        std::thread::sleep(poll_interval);
     }
 }
 

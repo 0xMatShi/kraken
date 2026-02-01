@@ -83,148 +83,6 @@ impl RealEngine {
         }
     }
 
-    // Обновить UI с текущим состоянием портфолио
-    pub fn update_ui_portfolio(&self) {
-        let port = self.portfolio.lock().unwrap();
-        ui::update_portfolio(&self.ui_state, port.clone());
-    }
-
-    // Округление до 2 знаков (минимальный тик-размер 0.01)
-    pub fn round_price(price: f64) -> f64 {
-        (price * 100.0).round() / 100.0
-    }
-
-    /// Проверяет условие прибыльности: прибыль с каждой стороны > $5
-    pub fn check_profit_target(&self) -> bool {
-        let port = self.portfolio.lock().unwrap();
-
-        // Прибыль = shares - spent
-        let total_spent = port.up_spent + port.down_spent;
-        let up_profit = port.up_shares - total_spent;
-        let down_profit = port.down_shares - total_spent;
-
-        // Если обе стороны имеют прибыль > $2
-        if up_profit > 2.0 && down_profit > 2.0 {
-            info!(
-                "🎉 PROFIT TARGET REACHED! UP: ${:.2} | DOWN: ${:.2}",
-                up_profit, down_profit
-            );
-            return true;
-        }
-
-        false
-    }
-
-    /// Отменяет все активные ордера
-    pub async fn cancel_all_orders(&self) {
-        info!("🛑 Отменяем все активные ордера...");
-
-        match self.client.cancel_all_orders().await {
-            Ok(_) => {
-                info!("✅ Все ордера успешно отменены");
-
-                // Очищаем внутренние структуры
-                self.active_orders_info.lock().unwrap().clear();
-                self.trade_pairs.lock().unwrap().clear();
-                self.second_leg_to_first.lock().unwrap().clear();
-                self.first_legs_by_price.lock().unwrap().clear();
-                *self.cumulative_state.lock().unwrap() = CumulativeState::default();
-                // price_lock не очищаем - пусть цены остаются заблокированными
-            }
-            Err(e) => {
-                warn!("❌ Ошибка отмены ордеров: {}", e);
-            }
-        }
-    }
-
-    /// Определяет тренд на основе изменения цен
-    ///
-    /// Тренд сильной стороны: bb слабой стороны уменьшился (сильная становится еще дороже)
-    /// Тренд слабой стороны: bb сильной стороны уменьшился (слабая догоняет)
-    pub fn detect_trend(&self, prev: &MarketPrices, current: &MarketPrices) -> Trend {
-        let strong_side = current.strong_side();
-
-        match strong_side {
-            Side::Up => {
-                // UP сильная сторона (up_bid > down_bid)
-                // Тренд сильной стороны: down_bid уменьшился
-                if current.down_bid < prev.down_bid {
-                    return Trend::Strong;
-                }
-                // Тренд слабой стороны: up_bid уменьшился
-                if current.up_bid < prev.up_bid {
-                    return Trend::Weak;
-                }
-            }
-            Side::Down => {
-                // DOWN сильная сторона (down_bid > up_bid)
-                // Тренд сильной стороны: up_bid уменьшился
-                if current.up_bid < prev.up_bid {
-                    return Trend::Strong;
-                }
-                // Тренд слабой стороны: down_bid уменьшился
-                if current.down_bid < prev.down_bid {
-                    return Trend::Weak;
-                }
-            }
-        }
-
-        Trend::None
-    }
-
-    /// Вычисляет цену для размещения первой ноги
-    /// Возвращает (сторона размещения, цена) или None если условия не выполнены
-    ///
-    /// Универсальная логика для обоих типов трендов:
-    /// - Trend::Strong: размещаем на сильной стороне
-    /// - Trend::Weak: размещаем на слабой стороне
-    pub fn calculate_first_leg_placement(
-        &self,
-        prices: &MarketPrices,
-        trend: Trend,
-    ) -> Option<(Side, f64)> {
-        // Только если есть тренд
-        if trend == Trend::None {
-            return None;
-        }
-
-        let spread_cents = prices.spread_cents();
-
-        // Спред 4+ цента - ничего не делаем
-        if spread_cents >= 4 {
-            info!("⏸️ Спред {} центов >= 4 - не размещаем", spread_cents);
-            return None;
-        }
-
-        // Спред 1 цент (нормальный) - ничего не делаем
-        if spread_cents <= 1 {
-            return None;
-        }
-
-        // Обрабатываем спред 2-3 цента
-        let strong_side = prices.strong_side();
-        let weak_side = prices.weak_side();
-
-        // Определяем сторону размещения в зависимости от типа тренда
-        let (placement_side, opposite_side) = match trend {
-            Trend::Strong => (strong_side, weak_side),
-            Trend::Weak => (weak_side, strong_side),
-            Trend::None => return None,
-        };
-
-        let opposite_bb = prices.bid_for_side(opposite_side);
-
-        // Цена = 0.99 - opposite_bb, чтобы сумма была 0.99
-        let target_price = Self::round_price(0.99 - opposite_bb);
-
-        info!(
-            "📈 Тренд {:?} на стороне {:?}: opposite_bb={:.2}, target_price={:.2}",
-            trend, placement_side, opposite_bb, target_price
-        );
-
-        Some((placement_side, target_price))
-    }
-
     /// Основной метод стратегии - точка входа для каждого тика рынка
     pub fn process_tick(self: &Arc<Self>, prices: MarketPrices) {
         // Сохраняем последние актуальные цены
@@ -377,6 +235,148 @@ impl RealEngine {
 
         // Размещаем первую ногу
         super::streams::place_first_leg(self, side, target_price, order_size);
+    }
+
+    // Обновить UI с текущим состоянием портфолио
+    pub fn update_ui_portfolio(&self) {
+        let port = self.portfolio.lock().unwrap();
+        ui::update_portfolio(&self.ui_state, port.clone());
+    }
+
+    // Округление до 2 знаков (минимальный тик-размер 0.01)
+    pub fn round_price(price: f64) -> f64 {
+        (price * 100.0).round() / 100.0
+    }
+
+    /// Проверяет условие прибыльности: прибыль с каждой стороны > $5
+    pub fn check_profit_target(&self) -> bool {
+        let port = self.portfolio.lock().unwrap();
+
+        // Прибыль = shares - spent
+        let total_spent = port.up_spent + port.down_spent;
+        let up_profit = port.up_shares - total_spent;
+        let down_profit = port.down_shares - total_spent;
+
+        // Если обе стороны имеют прибыль > $2
+        if up_profit > 2.0 && down_profit > 2.0 {
+            info!(
+                "🎉 PROFIT TARGET REACHED! UP: ${:.2} | DOWN: ${:.2}",
+                up_profit, down_profit
+            );
+            return true;
+        }
+
+        false
+    }
+
+    /// Отменяет все активные ордера
+    pub async fn cancel_all_orders(&self) {
+        info!("🛑 Отменяем все активные ордера...");
+
+        match self.client.cancel_all_orders().await {
+            Ok(_) => {
+                info!("✅ Все ордера успешно отменены");
+
+                // Очищаем внутренние структуры
+                self.active_orders_info.lock().unwrap().clear();
+                self.trade_pairs.lock().unwrap().clear();
+                self.second_leg_to_first.lock().unwrap().clear();
+                self.first_legs_by_price.lock().unwrap().clear();
+                *self.cumulative_state.lock().unwrap() = CumulativeState::default();
+                // price_lock не очищаем - пусть цены остаются заблокированными
+            }
+            Err(e) => {
+                warn!("❌ Ошибка отмены ордеров: {}", e);
+            }
+        }
+    }
+
+    /// Определяет тренд на основе изменения цен
+    ///
+    /// Тренд сильной стороны: bb слабой стороны уменьшился (сильная становится еще дороже)
+    /// Тренд слабой стороны: bb сильной стороны уменьшился (слабая догоняет)
+    pub fn detect_trend(&self, prev: &MarketPrices, current: &MarketPrices) -> Trend {
+        let strong_side = current.strong_side();
+
+        match strong_side {
+            Side::Up => {
+                // UP сильная сторона (up_bid > down_bid)
+                // Тренд сильной стороны: down_bid уменьшился
+                if current.down_bid < prev.down_bid {
+                    return Trend::Strong;
+                }
+                // Тренд слабой стороны: up_bid уменьшился
+                if current.up_bid < prev.up_bid {
+                    return Trend::Weak;
+                }
+            }
+            Side::Down => {
+                // DOWN сильная сторона (down_bid > up_bid)
+                // Тренд сильной стороны: up_bid уменьшился
+                if current.up_bid < prev.up_bid {
+                    return Trend::Strong;
+                }
+                // Тренд слабой стороны: down_bid уменьшился
+                if current.down_bid < prev.down_bid {
+                    return Trend::Weak;
+                }
+            }
+        }
+
+        Trend::None
+    }
+
+    /// Вычисляет цену для размещения первой ноги
+    /// Возвращает (сторона размещения, цена) или None если условия не выполнены
+    ///
+    /// Универсальная логика для обоих типов трендов:
+    /// - Trend::Strong: размещаем на сильной стороне
+    /// - Trend::Weak: размещаем на слабой стороне
+    pub fn calculate_first_leg_placement(
+        &self,
+        prices: &MarketPrices,
+        trend: Trend,
+    ) -> Option<(Side, f64)> {
+        // Только если есть тренд
+        if trend == Trend::None {
+            return None;
+        }
+
+        let spread_cents = prices.spread_cents();
+
+        // Спред 4+ цента - ничего не делаем
+        if spread_cents >= 4 {
+            info!("⏸️ Спред {} центов >= 4 - не размещаем", spread_cents);
+            return None;
+        }
+
+        // Спред 1 цент (нормальный) - ничего не делаем
+        if spread_cents <= 1 {
+            return None;
+        }
+
+        // Обрабатываем спред 2-3 цента
+        let strong_side = prices.strong_side();
+        let weak_side = prices.weak_side();
+
+        // Определяем сторону размещения в зависимости от типа тренда
+        let (placement_side, opposite_side) = match trend {
+            Trend::Strong => (strong_side, weak_side),
+            Trend::Weak => (weak_side, strong_side),
+            Trend::None => return None,
+        };
+
+        let opposite_bb = prices.bid_for_side(opposite_side);
+
+        // Цена = 0.99 - opposite_bb, чтобы сумма была 0.99
+        let target_price = Self::round_price(0.99 - opposite_bb);
+
+        info!(
+            "📈 Тренд {:?} на стороне {:?}: opposite_bb={:.2}, target_price={:.2}",
+            trend, placement_side, opposite_bb, target_price
+        );
+
+        Some((placement_side, target_price))
     }
 
     /// Проверяет и отменяет устаревшие ордера
@@ -854,7 +854,7 @@ impl RealEngine {
     /// Разбивает remaining на порции по unit_size.
     /// Остаток <= 5.0 прибавляется к последнему ордеру.
     pub fn calculate_order_sizes(remaining: f64, unit_size: f64) -> Vec<f64> {
-        if remaining <= 0.0 {
+        if remaining <= 5.0 {
             return vec![];
         }
 
