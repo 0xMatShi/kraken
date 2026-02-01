@@ -98,10 +98,7 @@ impl RealEngine {
                 let remaining = Self::round_price(first_remaining);
 
                 // Можем разместить ещё, если есть тренд Strong + spread 2-3 + нет размещений
-                if trend == Trend::Strong
-                    && spread >= 2
-                    && spread < 4
-                {
+                if trend == Trend::Strong && spread >= 2 && spread < 4 {
                     let weak_bb = prices.bid_for_side(prices.weak_side());
                     let target_price = Self::round_price(0.99 - weak_bb);
 
@@ -149,16 +146,19 @@ impl RealEngine {
                     let weak_bb_size = prices.bid_size_for_side(weak_side);
                     let strong_bb = prices.bid_for_side(state.first_leg_side);
 
-                    // Выбираем цену
+                    // Выбираем цену: три случая размещения второй ноги
                     let price = if weak_bb_size <= self.config.max_size_side {
-                        // Небольшая очередь - присоединяемся к best_bid
+                        // Случай 3: Небольшая очередь - присоединяемся к best_bid
                         weak_bb
-                    } else {
-                        // Большая очередь - нужен тренд Weak
-                        if trend != Trend::Weak || spread < 2 || spread >= 4 {
-                            return;
-                        }
+                    } else if (trend == Trend::Strong || trend == Trend::Weak)
+                        && spread >= 2
+                        && spread < 4
+                    {
+                        // Случай 1 и 2: Тренд Strong или Weak + есть спред - выставляем лимитку
                         Self::round_price(0.99 - strong_bb)
+                    } else {
+                        // Нет подходящих условий
+                        return;
                     };
 
                     let sizes = Self::calculate_order_sizes(remaining, self.config.size);
@@ -178,13 +178,16 @@ impl RealEngine {
                         remaining
                     );
                     super::streams::place_cumulative_second_leg(self, weak_side, price, sizes);
-                } else if trend == Trend::Weak && spread >= 2 && spread < 4 {
-                    // Переразмещение второй ноги по лучшей цене
+                } else if (trend == Trend::Strong || trend == Trend::Weak)
+                    && spread >= 2
+                    && spread < 4
+                {
+                    // Переразмещение второй ноги по лучшей цене (при тренде Strong или Weak)
                     let strong_bb = prices.bid_for_side(state.first_leg_side);
                     let new_price = Self::round_price(0.99 - strong_bb);
 
                     let current_price = state.second_leg_placed_price.unwrap();
-                    if (new_price - current_price).abs() < 0.001 {
+                    if (new_price - current_price).abs() == 0.0 {
                         return; // Цена не изменилась
                     }
 
@@ -193,16 +196,10 @@ impl RealEngine {
                         current_price, new_price
                     );
 
-                    // Отменяем старые
-                    let orders_to_cancel: Vec<String> =
-                        state.second_leg_orders.iter().cloned().collect();
                     state.second_leg_placed_price = None;
 
                     let sizes = Self::calculate_order_sizes(remaining, self.config.size);
-
                     drop(cum_state);
-
-                    super::streams::cancel_orders(self, orders_to_cancel);
 
                     if sizes.is_empty() {
                         return;
