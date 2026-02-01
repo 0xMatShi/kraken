@@ -46,8 +46,8 @@ impl RealEngine {
                 self.middle_tick(prices, trend);
             }
             CumulativePhase::SecondLegPlaced => {
-                // Переразмещаем вторую ногу при тренде (Strong или Weak)
-                if trend == Trend::Strong || trend == Trend::Weak {
+                // Переразмещаем вторую ногу при тренде Weak
+                if trend == Trend::Weak {
                     self.second_leg_replacement_tick(prices);
                 }
             }
