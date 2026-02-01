@@ -102,7 +102,7 @@ impl RealEngine {
         let total_spent = port.up_spent + port.down_spent;
         let up_profit = port.up_shares - total_spent;
         let down_profit = port.down_shares - total_spent;
-        
+
         // Если обе стороны имеют прибыль > $2
         if up_profit > 2.0 && down_profit > 2.0 {
             info!(
@@ -488,8 +488,21 @@ impl RealEngine {
                     return;
                 }
             }
-            // В других фазах не проверяем
-            CumulativePhase::ZeroPoint | CumulativePhase::Beginning | CumulativePhase::Middle => {}
+            CumulativePhase::Middle => {
+                // В фазе Middle отменяем оставшиеся ордера первой ноги
+                // Это нужно когда при переразмещении первой ноги старые ордера не были отменены
+                if !cum_state.first_leg_orders.is_empty() {
+                    info!(
+                        "🗑️ [Cumulative] Отменяем {} оставшихся ордеров первой ноги (фаза Middle)",
+                        cum_state.first_leg_orders.len()
+                    );
+                    let orders: Vec<String> = cum_state.first_leg_orders.iter().cloned().collect();
+                    drop(cum_state);
+                    super::streams::cancel_orders(self, orders);
+                }
+            }
+            // В ZeroPoint и Beginning не проверяем - ещё нет размещённых ордеров
+            CumulativePhase::ZeroPoint | CumulativePhase::Beginning => {}
         }
     }
 

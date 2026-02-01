@@ -226,7 +226,10 @@ pub fn handle_ws_order(
 
             ui::add_our_bid_price(&engine.ui_state, is_up, price);
 
-            info!("📝 MAKER PLACED: {} {} @ {:.3} | ID: {}", side_str, token_str, price, order_id);
+            info!(
+                "📝 MAKER PLACED: {} {} @ {:.3} | ID: {}",
+                side_str, token_str, price, order_id
+            );
         }
         Some("UPDATE") => {
             if let Some(size) = size_matched {
@@ -254,7 +257,12 @@ pub fn handle_ws_order(
 
                         info!(
                             "📊 MAKER PARTIAL FILL: {} {} @ {:.3} | Filled: {:.2}/{:.2} | ID: {}",
-                            side_str, token_str, price, *accumulated_filled, *original_size, order_id
+                            side_str,
+                            token_str,
+                            price,
+                            *accumulated_filled,
+                            *original_size,
+                            order_id
                         );
 
                         ui::update_open_order_filled(
