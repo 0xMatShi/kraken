@@ -313,16 +313,17 @@ impl RealEngine {
         // Проверяем и отменяем устаревшие ордера (по цене и по тренду)
         self.check_and_cancel_stale_orders(&prices, trend);
 
-        if trend == Trend::None {
-            return;
-        }
-
         // Фильтруем тренды по legs_strategy
         let legs_strategy = &self.config.legs_strategy;
 
-        // Cumulative стратегия: полностью отдельная логика
+        // Cumulative стратегия: вызываем даже при trend == None (для middle_tick)
         if legs_strategy == "cumulative" {
             self.process_cumulative(prices, trend);
+            return;
+        }
+
+        // Для остальных стратегий требуется тренд
+        if trend == Trend::None {
             return;
         }
 

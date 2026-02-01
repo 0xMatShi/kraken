@@ -36,13 +36,13 @@ impl RealEngine {
                 // Переход в FirstLegPlaced произойдёт когда все pending ордера подтвердятся
             }
             CumulativePhase::FirstLegPlaced => {
-                // Переразмещаем первую ногу только при тренде Strong + спред 2-3
+                // Переразмещаем первую ногу только при тренде Strong
                 if trend == Trend::Strong {
                     self.first_leg_replacement_tick(prices);
                 }
             }
             CumulativePhase::Middle => {
-                // Размещаем вторую ногу при любом тренде (Strong или Weak)
+                // Размещаем вторую ногу при любом тренде (Strong, Weak или None)
                 self.middle_tick(prices, trend);
             }
             CumulativePhase::SecondLegPlaced => {
@@ -127,23 +127,6 @@ impl RealEngine {
     /// - Переразмещаем по новой цене (0.99 - weak_bb)
     /// - Старые ордера отменятся на следующем тике через check_and_cancel_stale_orders
     fn first_leg_replacement_tick(self: &Arc<Self>, prices: MarketPrices) {
-        // Проверяем заполненность первой ноги
-        {
-            let mut cum_state = self.cumulative_state.lock().unwrap();
-
-            // Переход в Middle если первая нога заполнена
-            let first_remaining = cum_state.first_leg_target_size - cum_state.first_leg_filled;
-            if cum_state.first_leg_filled > 0.0 && first_remaining < 5.0 {
-                info!(
-                    "✅ [Cumulative] FirstLegPlaced → Middle: {:.2}/{:.2} (остаток {:.2} < 5)",
-                    cum_state.first_leg_filled, cum_state.first_leg_target_size, first_remaining
-                );
-                cum_state.phase = CumulativePhase::Middle;
-                cum_state.first_leg_placed_price = None;
-                return;
-            }
-        }
-
         // Вычисляем целевую цену и размещаем
         let weak_bb = prices.bid_for_side(prices.weak_side());
         let target_price = Self::round_price(0.99 - weak_bb);
@@ -257,22 +240,6 @@ impl RealEngine {
     /// При выполнении условий:
     /// - Переразмещаем по новой цене (0.99 - strong_bb)
     fn second_leg_replacement_tick(self: &Arc<Self>, prices: MarketPrices) {
-        // Проверяем заполненность второй ноги
-        {
-            let mut cum_state = self.cumulative_state.lock().unwrap();
-
-            // Переход в ZeroPoint если вторая нога заполнена
-            let second_remaining = cum_state.first_leg_target_size - cum_state.second_leg_filled;
-            if cum_state.second_leg_filled > 0.0 && second_remaining < 5.0 {
-                info!(
-                    "🎉 [Cumulative] SecondLegPlaced → ZeroPoint: Цикл завершен! First: {:.2} | Second: {:.2}",
-                    cum_state.first_leg_filled, cum_state.second_leg_filled
-                );
-                *cum_state = CumulativeState::default();
-                return;
-            }
-        }
-
         let (first_leg_side, target_size) = {
             let cum_state = self.cumulative_state.lock().unwrap();
             (cum_state.first_leg_side, cum_state.first_leg_target_size)
