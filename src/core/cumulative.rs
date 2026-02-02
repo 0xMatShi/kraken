@@ -205,14 +205,12 @@ impl RealEngine {
         let weak_bb = prices.bid_for_side(weak_side);
         let weak_bb_size = prices.bid_size_for_side(weak_side);
         let strong_bb = prices.bid_for_side(strong_side);
-        let spread = prices.spread_cents();
-        let has_good_spread = spread >= 2 && spread < 4;
 
         // Определяем цену для второй ноги
         let target_price = if weak_bb_size <= 100.0 {
             // Случай 2: небольшая очередь - присоединяемся к best_bid
             weak_bb
-        } else if trend == Trend::Strong || trend == Trend::Weak && has_good_spread {
+        } else if trend == Trend::Strong || trend == Trend::Weak {
             // Случай 1: тренд + спред - размещаем лимитку
             Self::round_price(0.99 - strong_bb)
         } else {
