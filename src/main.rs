@@ -26,13 +26,18 @@ fn edit_config_menu(config: &mut Config) -> anyhow::Result<()> {
         println!("1. max_balance = {}", config.trading.max_balance);
         println!("2. size = {}", config.trading.size);
         println!("3. max_size_side = {}", config.trading.max_size_side);
+        println!("4. chain_links = {}", config.trading.chain_links);
         println!(
-            "4. seconds_before_start = {}",
+            "5. seconds_before_start = {}",
             config.trading.seconds_before_start
         );
-        println!("5. legs_strategy = \"{}\"", config.trading.legs_strategy);
-        println!("6. Save & Exit");
-        println!("7. Cancel (without saving)");
+        println!(
+            "6. seconds_until_end = {}",
+            config.trading.seconds_until_end
+        );
+        println!("7. legs_strategy = \"{}\"", config.trading.legs_strategy);
+        println!("8. Save & Exit");
+        println!("9. Cancel (without saving)");
         print!("> ");
         io::stdout().flush()?;
 
@@ -92,6 +97,23 @@ fn edit_config_menu(config: &mut Config) -> anyhow::Result<()> {
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
             "4" => {
+                // Редактируем chain_links
+                print!("Enter new chain_links: ");
+                io::stdout().flush()?;
+                let mut value = String::new();
+                io::stdin().read_line(&mut value)?;
+                match value.trim().parse::<u32>() {
+                    Ok(v) if v >= 1 => {
+                        config.trading.chain_links = v;
+                        println!("✅ chain_links updated to {}", v);
+                    }
+                    _ => {
+                        println!("❌ Invalid value (must be >= 1)");
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            "5" => {
                 // Редактируем seconds_before_start
                 print!("Enter new seconds_before_start: ");
                 io::stdout().flush()?;
@@ -108,7 +130,24 @@ fn edit_config_menu(config: &mut Config) -> anyhow::Result<()> {
                 }
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
-            "5" => {
+            "6" => {
+                // Редактируем seconds_until_end
+                print!("Enter new seconds_until_end: ");
+                io::stdout().flush()?;
+                let mut value = String::new();
+                io::stdin().read_line(&mut value)?;
+                match value.trim().parse::<i64>() {
+                    Ok(v) if v >= 0 => {
+                        config.trading.seconds_until_end = v;
+                        println!("✅ seconds_until_end updated to {}", v);
+                    }
+                    _ => {
+                        println!("❌ Invalid value");
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            "7" => {
                 // Редактируем legs_strategy
                 print!("\x1B[2J\x1B[1;1H");
                 println!("Select legs_strategy:");
@@ -143,14 +182,14 @@ fn edit_config_menu(config: &mut Config) -> anyhow::Result<()> {
                 }
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
-            "6" => {
+            "8" => {
                 // Сохраняем и выходим
                 config.save()?;
                 println!("✅ Config saved to config.toml");
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 return Ok(());
             }
-            "7" => {
+            "9" => {
                 // Отменяем без сохранения
                 println!("❌ Changes discarded");
                 std::thread::sleep(std::time::Duration::from_secs(1));
