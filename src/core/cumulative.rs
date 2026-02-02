@@ -228,6 +228,12 @@ impl RealEngine {
     /// 2. Тренд Weak → размещаем по 0.99 - strong_bb
     /// 3. На best_bid слабой стороны акций < max_size_side → присоединяемся к best_bid
     fn middle_tick(self: &Arc<Self>, prices: MarketPrices, trend: Trend) {
+        // Получаем skew из portfolio для компенсации второй ноги
+        let skew = {
+            let port = self.portfolio.lock().unwrap();
+            port.up_shares - port.down_shares
+        };
+
         let (weak_side, strong_side) = {
             let cum_state = self.cumulative_state.lock().unwrap();
             (
@@ -252,7 +258,7 @@ impl RealEngine {
             return;
         };
 
-        let (should_place, sizes) = {
+        let (should_place, sizes, _compensation) = {
             let mut cum_state = self.cumulative_state.lock().unwrap();
 
             // Double-check что мы в Middle
@@ -260,9 +266,30 @@ impl RealEngine {
                 return;
             }
 
-            // Вторая нога = min(first_leg_filled, base_target_size) - second_leg_filled
-            // Используем base_target_size (без компенсации skew) чтобы не накапливать перекос
-            let second_leg_target = cum_state.base_target_size.min(cum_state.first_leg_filled);
+            // Компенсация skew для второй ноги
+            // Если skew после первой ноги > max_size_side, добавляем разницу к второй ноге
+            let compensation = match cum_state.first_leg_side {
+                Side::Up => {
+                    // Вторая нога Down, skew > 0 после первой ноги
+                    if skew > self.config.max_size_side {
+                        skew - self.config.max_size_side
+                    } else {
+                        0.0
+                    }
+                }
+                Side::Down => {
+                    // Вторая нога Up, skew < 0 после первой ноги
+                    if -skew > self.config.max_size_side {
+                        -skew - self.config.max_size_side
+                    } else {
+                        0.0
+                    }
+                }
+            };
+
+            // Вторая нога = min(first_leg_filled, base_target_size) + compensation - second_leg_filled
+            let base_second_leg_target = cum_state.base_target_size.min(cum_state.first_leg_filled);
+            let second_leg_target = base_second_leg_target + compensation;
             let remaining = second_leg_target - cum_state.second_leg_filled;
             let sizes = Self::calculate_order_sizes(remaining, self.config.size);
 
@@ -275,14 +302,25 @@ impl RealEngine {
             cum_state.second_leg_placed_price = Some(target_price);
             cum_state.pending_second_leg_orders = sizes.len() as u32;
 
-            info!(
-                "📦 [Cumulative] Middle → SecondLegPlaced: {:?} @ {:.2} | {} ордеров",
-                weak_side,
-                target_price,
-                sizes.len()
-            );
+            if compensation > 0.0 {
+                info!(
+                    "📦 [Cumulative] Middle → SecondLegPlaced: {:?} @ {:.2} | {} ордеров | target={:.2} (base + skew_comp={:.2})",
+                    weak_side,
+                    target_price,
+                    sizes.len(),
+                    second_leg_target,
+                    compensation
+                );
+            } else {
+                info!(
+                    "📦 [Cumulative] Middle → SecondLegPlaced: {:?} @ {:.2} | {} ордеров",
+                    weak_side,
+                    target_price,
+                    sizes.len()
+                );
+            }
 
-            (true, sizes)
+            (true, sizes, compensation)
         };
 
         if should_place {
@@ -296,6 +334,12 @@ impl RealEngine {
     /// 1. weak_bb > placed_price && Trend::Strong && has_good_spread → 0.99 - strong_bb
     /// 2. Trend::Weak && has_good_spread → 0.99 - strong_bb
     fn second_leg_replacement_tick(self: &Arc<Self>, prices: MarketPrices, trend: Trend) {
+        // Получаем skew из portfolio для компенсации второй ноги
+        let skew = {
+            let port = self.portfolio.lock().unwrap();
+            port.up_shares - port.down_shares
+        };
+
         let (first_leg_side, placed_price) = {
             let cum_state = self.cumulative_state.lock().unwrap();
             (cum_state.first_leg_side, cum_state.second_leg_placed_price)
@@ -336,9 +380,30 @@ impl RealEngine {
                 return;
             }
 
-            // Вторая нога = min(first_leg_filled, base_target_size) - second_leg_filled
-            // Используем base_target_size (без компенсации skew) чтобы не накапливать перекос
-            let second_leg_target = cum_state.base_target_size.min(cum_state.first_leg_filled);
+            // Компенсация skew для второй ноги
+            // Если skew после первой ноги > max_size_side, добавляем разницу к второй ноге
+            let compensation = match cum_state.first_leg_side {
+                Side::Up => {
+                    // Вторая нога Down, skew > 0 после первой ноги
+                    if skew > self.config.max_size_side {
+                        skew - self.config.max_size_side
+                    } else {
+                        0.0
+                    }
+                }
+                Side::Down => {
+                    // Вторая нога Up, skew < 0 после первой ноги
+                    if -skew > self.config.max_size_side {
+                        -skew - self.config.max_size_side
+                    } else {
+                        0.0
+                    }
+                }
+            };
+
+            // Вторая нога = min(first_leg_filled, base_target_size) + compensation - second_leg_filled
+            let base_second_leg_target = cum_state.base_target_size.min(cum_state.first_leg_filled);
+            let second_leg_target = base_second_leg_target + compensation;
             let remaining = second_leg_target - cum_state.second_leg_filled;
             let sizes = Self::calculate_order_sizes(remaining, self.config.size);
 
@@ -350,12 +415,22 @@ impl RealEngine {
             cum_state.pending_second_leg_orders = sizes.len() as u32;
             cum_state.second_leg_placed_price = Some(target_price);
 
-            info!(
-                "🔄 [Cumulative] Переразмещаем вторую ногу: → {:.2} | {} ордеров | remaining={:.2}",
-                target_price,
-                sizes.len(),
-                remaining
-            );
+            if compensation > 0.0 {
+                info!(
+                    "🔄 [Cumulative] Переразмещаем вторую ногу: → {:.2} | {} ордеров | remaining={:.2} (+ skew_comp={:.2})",
+                    target_price,
+                    sizes.len(),
+                    remaining,
+                    compensation
+                );
+            } else {
+                info!(
+                    "🔄 [Cumulative] Переразмещаем вторую ногу: → {:.2} | {} ордеров | remaining={:.2}",
+                    target_price,
+                    sizes.len(),
+                    remaining
+                );
+            }
 
             sizes
         };
