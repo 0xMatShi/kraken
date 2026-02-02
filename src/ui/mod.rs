@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 pub use log_capture::UiLogLayer;
 
 // Количество уровней стакана для отображения
-pub const ORDER_BOOK_DEPTH: usize = 19;
+pub const ORDER_BOOK_DEPTH: usize = 17;
 // Максимум записей в истории
 const MAX_HISTORY_ENTRIES: usize = 50;
 
@@ -94,7 +94,9 @@ pub struct UiConfig {
     pub max_balance: f64,
     pub size: f64,
     pub max_size_side: f64,
+    pub chain_links: u32,
     pub seconds_before_start: i64,
+    pub seconds_until_end: i64,
     pub legs_strategy: String,
 }
 
@@ -368,7 +370,9 @@ pub fn set_config(
     max_balance: f64,
     size: f64,
     max_size_side: f64,
+    chain_links: u32,
     seconds_before_start: i64,
+    seconds_until_end: i64,
     legs_strategy: String,
 ) {
     if let Ok(mut s) = state.lock() {
@@ -376,7 +380,9 @@ pub fn set_config(
             max_balance,
             size,
             max_size_side,
+            chain_links,
             seconds_before_start,
+            seconds_until_end,
             legs_strategy,
         };
     }
@@ -430,11 +436,11 @@ pub fn render(frame: &mut Frame, state: &UiState) {
     render_open_orders(frame, open_orders_area, &state.open_orders);
     render_history(frame, history_area, &state.trade_history);
 
-    // Правая часть: Configuration (6 строк) или Hedge (12 строк) + Order Book (остаток)
+    // Правая часть: Configuration (9 строк) или Hedge (12 строк) + Order Book (остаток)
     let config_height = if state.trading_mode == TradingMode::Hedge {
         12
     } else {
-        7
+        9
     };
     let [config_area, order_book_area] =
         Layout::vertical([Constraint::Length(config_height), Constraint::Fill(1)])
@@ -1005,9 +1011,23 @@ fn render_configuration(frame: &mut Frame, area: Rect, config: &UiConfig) {
             ),
         ]),
         Line::from(vec![
+            Span::styled("chain_links = ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{}", config.chain_links),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
             Span::styled("seconds_before_start = ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{}", config.seconds_before_start),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("seconds_until_end = ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{}", config.seconds_until_end),
                 Style::default().fg(Color::White),
             ),
         ]),

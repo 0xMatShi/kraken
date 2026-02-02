@@ -60,6 +60,8 @@ impl RealEngine {
     ///
     /// Здесь проверяем только max_balance
     /// Также добавляем компенсацию skew к первой ноге если перекос не в её пользу
+    ///
+    /// chain_links: делим первую ногу на звенья, размещаем по одному звену за раз
     fn start_tick(self: &Arc<Self>, prices: MarketPrices) {
         // Получаем skew из portfolio для компенсации
         let skew_compensation = {
@@ -101,9 +103,15 @@ impl RealEngine {
                 Side::Down if skew_compensation > 0.0 => skew_compensation, // больше UP, компенсируем DOWN
                 _ => 0.0,
             };
-            let target_size = base_target_size + compensation;
+            let total_first_leg_size = base_target_size + compensation;
 
-            let sizes = Self::calculate_order_sizes(target_size, self.config.size);
+            // Вычисляем размер одного звена цепи
+            let chain_links = self.config.chain_links.max(1);
+            let chain_link_size = Self::round_price(total_first_leg_size / chain_links as f64);
+
+            // Размер первого звена
+            let first_link_size = chain_link_size;
+            let sizes = Self::calculate_order_sizes(first_link_size, self.config.size);
             if sizes.is_empty() {
                 return;
             }
@@ -111,18 +119,32 @@ impl RealEngine {
             // Переходим в Beginning и устанавливаем pending_first_leg_orders
             cum_state.phase = CumulativePhase::Beginning;
             cum_state.first_leg_side = strong_side;
-            cum_state.first_leg_target_size = target_size;
+            cum_state.first_leg_target_size = first_link_size; // target для текущего звена
             cum_state.base_target_size = base_target_size;
             cum_state.first_leg_placed_price = Some(target_price);
             cum_state.pending_first_leg_orders = sizes.len() as u32;
 
-            if compensation > 0.0 {
+            // Устанавливаем параметры звеньев цепи
+            cum_state.total_chain_links = chain_links;
+            cum_state.current_chain_link = 1;
+            cum_state.chain_link_size = chain_link_size;
+
+            if chain_links > 1 {
+                info!(
+                    "🚀 [Cumulative] ZeroPoint → Beginning: {:?} @ {:.2} | звено 1/{} | {:.2} акций | {} ордеров",
+                    strong_side,
+                    target_price,
+                    chain_links,
+                    first_link_size,
+                    sizes.len()
+                );
+            } else if compensation > 0.0 {
                 info!(
                     "🚀 [Cumulative] ZeroPoint → Beginning: {:?} @ {:.2} | {} ордеров | target={:.2} (base={:.2} + skew_comp={:.2})",
                     strong_side,
                     target_price,
                     sizes.len(),
-                    target_size,
+                    total_first_leg_size,
                     base_target_size,
                     compensation
                 );
@@ -132,7 +154,7 @@ impl RealEngine {
                     strong_side,
                     target_price,
                     sizes.len(),
-                    target_size
+                    total_first_leg_size
                 );
             }
 
@@ -143,7 +165,7 @@ impl RealEngine {
         super::streams::place_cumulative_first_leg(self, strong_side, target_price, sizes);
     }
 
-    /// Фаза FirstLegPlaced: мониторим тренд strong для переразмещения первой ноги
+    /// Фаза FirstLegPlaced: мониторим тренд strong для переразмещения/размещения первой ноги
     ///
     /// Условия (проверяются в process_cumulative):
     /// - Trend::Strong
@@ -151,6 +173,7 @@ impl RealEngine {
     /// При выполнении условий:
     /// - Переразмещаем по новой цене (0.99 - weak_bb)
     /// - Старые ордера отменятся на следующем тике через check_and_cancel_stale_orders
+    /// - Также используется для размещения следующего звена цепи
     fn first_leg_replacement_tick(self: &Arc<Self>, prices: MarketPrices) {
         // Вычисляем целевую цену и размещаем
         let weak_bb = prices.bid_for_side(prices.weak_side());
@@ -174,12 +197,23 @@ impl RealEngine {
             cum_state.pending_first_leg_orders = sizes.len() as u32;
             cum_state.first_leg_placed_price = Some(target_price);
 
-            info!(
-                "🔄 [Cumulative] Переразмещаем первую ногу: → {:.2} | {} ордеров | remaining={:.2}",
-                target_price,
-                sizes.len(),
-                remaining
-            );
+            if cum_state.total_chain_links > 1 {
+                info!(
+                    "🔄 [Cumulative] Размещаем звено {}/{}: → {:.2} | {} ордеров | remaining={:.2}",
+                    cum_state.current_chain_link,
+                    cum_state.total_chain_links,
+                    target_price,
+                    sizes.len(),
+                    remaining
+                );
+            } else {
+                info!(
+                    "🔄 [Cumulative] Переразмещаем первую ногу: → {:.2} | {} ордеров | remaining={:.2}",
+                    target_price,
+                    sizes.len(),
+                    remaining
+                );
+            }
 
             (cum_state.first_leg_side, sizes)
         };
@@ -411,7 +445,7 @@ impl RealEngine {
     }
 
     /// Обработка fill cumulative первой ноги
-    /// При переходе в Middle отменяет оставшиеся ордера первой ноги
+    /// При переходе в Middle (после всех звеньев) отменяет оставшиеся ордера первой ноги
     pub fn on_cumulative_first_leg_fill(
         self: &Arc<Self>,
         order_id: &str,
@@ -426,7 +460,7 @@ impl RealEngine {
                 cum_state.first_leg_orders.remove(order_id);
             }
 
-            // Проверяем переход FirstLegPlaced → Middle
+            // Проверяем заполнение текущего звена
             let first_remaining = cum_state.first_leg_target_size - cum_state.first_leg_filled;
             if cum_state.phase == CumulativePhase::FirstLegPlaced
                 && cum_state.first_leg_filled > 0.0
@@ -434,21 +468,61 @@ impl RealEngine {
             {
                 // Собираем ордера для отмены ДО смены состояния (защита от race condition)
                 let orders: Vec<String> = cum_state.first_leg_orders.keys().cloned().collect();
-                if !orders.is_empty() {
+
+                // Проверяем, есть ли ещё звенья
+                if cum_state.current_chain_link < cum_state.total_chain_links {
+                    // Переходим к следующему звену
+                    let prev_link = cum_state.current_chain_link;
+                    cum_state.current_chain_link += 1;
+                    // Обновляем target для нового звена
+                    cum_state.first_leg_target_size += cum_state.chain_link_size;
+                    // Сбрасываем placed_price чтобы first_leg_replacement_tick мог разместить новое звено
+                    cum_state.first_leg_placed_price = None;
+
+                    if !orders.is_empty() {
+                        info!(
+                            "🗑️ [Cumulative] Отменяем {} ордеров первой ноги (звено {} завершено)",
+                            orders.len(),
+                            prev_link
+                        );
+                    }
+
                     info!(
-                        "🗑️ [Cumulative] Отменяем {} ордеров первой ноги (переход в Middle)",
-                        orders.len()
+                        "🔗 [Cumulative] Звено {}/{} завершено | filled={:.2} | Ждём условий для звена {}",
+                        prev_link,
+                        cum_state.total_chain_links,
+                        cum_state.first_leg_filled,
+                        cum_state.current_chain_link
                     );
+
+                    orders
+                } else {
+                    // Все звенья завершены - переходим в Middle
+                    if !orders.is_empty() {
+                        info!(
+                            "🗑️ [Cumulative] Отменяем {} ордеров первой ноги (переход в Middle)",
+                            orders.len()
+                        );
+                    }
+
+                    if cum_state.total_chain_links > 1 {
+                        info!(
+                            "✅ [Cumulative] Все {}/{} звеньев завершены → Middle | filled={:.2}",
+                            cum_state.current_chain_link,
+                            cum_state.total_chain_links,
+                            cum_state.first_leg_filled
+                        );
+                    } else {
+                        info!(
+                            "✅ [Cumulative] FirstLegPlaced → Middle (из fill): {:.2}/{:.2}",
+                            cum_state.first_leg_filled, cum_state.first_leg_target_size
+                        );
+                    }
+                    cum_state.phase = CumulativePhase::Middle;
+                    cum_state.first_leg_placed_price = None;
+
+                    orders
                 }
-
-                info!(
-                    "✅ [Cumulative] FirstLegPlaced → Middle (из fill): {:.2}/{:.2}",
-                    cum_state.first_leg_filled, cum_state.first_leg_target_size
-                );
-                cum_state.phase = CumulativePhase::Middle;
-                cum_state.first_leg_placed_price = None;
-
-                orders
             } else {
                 Vec::new()
             }

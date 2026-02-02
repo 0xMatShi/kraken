@@ -19,9 +19,17 @@ pub struct TradingConfig {
     #[serde(default = "default_max_size_side")]
     pub max_size_side: f64,
 
+    /// Количество звеньев цепи для первой ноги (для cumulative стратегии)
+    #[serde(default = "default_chain_links")]
+    pub chain_links: u32,
+
     /// Через сколько секунд после начала события можно начинать торговать
     #[serde(default = "default_seconds_before_start")]
     pub seconds_before_start: i64,
+
+    /// За сколько секунд до конца события прекратить торговать
+    #[serde(default = "default_seconds_until_end")]
+    pub seconds_until_end: i64,
 
     /// Стратегия размещения первых ног: "strong", "weak", "both"
     #[serde(default = "default_legs_strategy")]
@@ -32,8 +40,16 @@ fn default_seconds_before_start() -> i64 {
     20
 }
 
+fn default_seconds_until_end() -> i64 {
+    60
+}
+
 fn default_max_size_side() -> f64 {
     50.0
+}
+
+fn default_chain_links() -> u32 {
+    1
 }
 
 fn default_legs_strategy() -> String {
@@ -89,8 +105,14 @@ size = {}
 # Максимальный размер позиции на одной стороне (для cumulative стратегии)
 max_size_side = {}
 
+# Количество звеньев цепи для первой ноги (для cumulative стратегии)
+chain_links = {}
+
 # Через сколько секунд после начала события можно начинать торговать
 seconds_before_start = {}
+
+# За сколько секунд до конца события прекратить торговать
+seconds_until_end = {}
 
 # Стратегия размещения первых ног: "strong" (только на сильной), "weak" (только на слабой), "both" (обе), "cumulative"
 legs_strategy = "{}"
@@ -98,7 +120,9 @@ legs_strategy = "{}"
             max_balance_str,
             size_str,
             max_size_side_str,
+            self.trading.chain_links,
             self.trading.seconds_before_start,
+            self.trading.seconds_until_end,
             self.trading.legs_strategy
         );
 

@@ -276,7 +276,9 @@ async fn main() -> anyhow::Result<()> {
                     app_config.trading.max_balance,
                     app_config.trading.size,
                     app_config.trading.max_size_side,
+                    app_config.trading.chain_links,
                     app_config.trading.seconds_before_start,
+                    app_config.trading.seconds_until_end,
                     app_config.trading.legs_strategy.clone(),
                 );
 

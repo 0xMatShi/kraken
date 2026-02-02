@@ -106,14 +106,24 @@ impl RealEngine {
         }
 
         // Проверяем, прошло ли достаточно времени с начала события
+        // и не слишком ли мало осталось до конца
         {
             let state = self.ui_state.lock().unwrap();
             let elapsed = state.event_info.elapsed_seconds();
+            let remaining = state.event_info.remaining_seconds();
             let min_elapsed = self.config.seconds_before_start;
+            let min_remaining = self.config.seconds_until_end;
 
             if elapsed < min_elapsed {
                 // Слишком рано для торговли, обновляем prev_prices и выходим
-                drop(state); // Освобождаем лок перед обновлением prev_prices
+                drop(state);
+                *self.prev_prices.lock().unwrap() = Some(prices);
+                return;
+            }
+
+            if remaining < min_remaining {
+                // Слишком мало времени до конца события, обновляем prev_prices и выходим
+                drop(state);
                 *self.prev_prices.lock().unwrap() = Some(prices);
                 return;
             }

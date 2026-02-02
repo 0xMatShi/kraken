@@ -163,6 +163,12 @@ pub struct CumulativeState {
     pub pending_first_leg_orders: u32,
     /// Количество ордеров второй ноги, ожидающих подтверждения
     pub pending_second_leg_orders: u32,
+    /// Общее количество звеньев цепи для первой ноги
+    pub total_chain_links: u32,
+    /// Текущее звено цепи (начиная с 1)
+    pub current_chain_link: u32,
+    /// Размер одного звена цепи
+    pub chain_link_size: f64,
 }
 
 impl Default for CumulativeState {
@@ -180,6 +186,9 @@ impl Default for CumulativeState {
             second_leg_placed_price: None,
             pending_first_leg_orders: 0,
             pending_second_leg_orders: 0,
+            total_chain_links: 1,
+            current_chain_link: 1,
+            chain_link_size: 0.0,
         }
     }
 }
