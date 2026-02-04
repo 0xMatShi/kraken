@@ -267,8 +267,8 @@ impl RealEngine {
         let up_profit = port.up_shares - total_spent;
         let down_profit = port.down_shares - total_spent;
 
-        // Если обе стороны имеют прибыль > $2
-        if up_profit > 2.0 && down_profit > 2.0 {
+        // Если обе стороны имеют прибыль > $10
+        if up_profit > 10.0 && down_profit > 10.0 {
             info!(
                 "🎉 PROFIT TARGET REACHED! UP: ${:.2} | DOWN: ${:.2}",
                 up_profit, down_profit
