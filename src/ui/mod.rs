@@ -334,6 +334,40 @@ pub fn update_down_book(
     }
 }
 
+/// Получить текущий стакан UP
+pub fn get_up_book(
+    state: &UiState,
+) -> (
+    [OrderLevel; ORDER_BOOK_DEPTH],
+    [OrderLevel; ORDER_BOOK_DEPTH],
+) {
+    if let Ok(s) = state.lock() {
+        (s.up_book.bids, s.up_book.asks)
+    } else {
+        (
+            [OrderLevel::default(); ORDER_BOOK_DEPTH],
+            [OrderLevel::default(); ORDER_BOOK_DEPTH],
+        )
+    }
+}
+
+/// Получить текущий стакан DOWN
+pub fn get_down_book(
+    state: &UiState,
+) -> (
+    [OrderLevel; ORDER_BOOK_DEPTH],
+    [OrderLevel; ORDER_BOOK_DEPTH],
+) {
+    if let Ok(s) = state.lock() {
+        (s.down_book.bids, s.down_book.asks)
+    } else {
+        (
+            [OrderLevel::default(); ORDER_BOOK_DEPTH],
+            [OrderLevel::default(); ORDER_BOOK_DEPTH],
+        )
+    }
+}
+
 /// Остановить UI
 pub fn stop_ui(state: &UiState) {
     if let Ok(mut s) = state.lock() {

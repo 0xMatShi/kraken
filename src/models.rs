@@ -55,6 +55,31 @@ pub struct BookMessage {
     pub asks: Vec<OrderSummary>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct PriceChange {
+    pub asset_id: String,
+    #[serde(deserialize_with = "deserialize_f64_from_string")]
+    pub price: f64,
+    #[serde(deserialize_with = "deserialize_f64_from_string")]
+    pub size: f64,
+    pub side: String, // "BUY" или "SELL"
+    #[allow(dead_code)]
+    pub hash: String,
+    #[serde(deserialize_with = "deserialize_f64_from_string")]
+    pub best_bid: f64,
+    #[serde(deserialize_with = "deserialize_f64_from_string")]
+    pub best_ask: f64,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone)]
+pub struct PriceChangeMessage {
+    pub event_type: String,
+    pub market: String,
+    pub price_changes: Vec<PriceChange>,
+    pub timestamp: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SubscribeMessage {
     pub assets_ids: Vec<String>,

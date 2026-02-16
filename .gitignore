@@ -16,3 +16,4 @@ claim.json
 tmpclaude-*-cwd
 CLAUDE.md
 .ruff_cache/
+polymarket_websocket_market.md
