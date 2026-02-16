@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 pub use log_capture::UiLogLayer;
 
 // Количество уровней стакана для отображения
-pub const ORDER_BOOK_DEPTH: usize = 17;
+pub const ORDER_BOOK_DEPTH: usize = 40;
 // Максимум записей в истории
 const MAX_HISTORY_ENTRIES: usize = 50;
 
@@ -73,10 +73,19 @@ impl OrderLevel {
 }
 
 /// Полный стакан для одной стороны (UP или DOWN)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SideOrderBook {
     pub bids: [OrderLevel; ORDER_BOOK_DEPTH], // Лучшие bid'ы (отсортированы по убыванию цены)
     pub asks: [OrderLevel; ORDER_BOOK_DEPTH], // Лучшие ask'и (отсортированы по возрастанию цены)
+}
+
+impl Default for SideOrderBook {
+    fn default() -> Self {
+        Self {
+            bids: [OrderLevel::default(); ORDER_BOOK_DEPTH],
+            asks: [OrderLevel::default(); ORDER_BOOK_DEPTH],
+        }
+    }
 }
 
 /// Информация о событии
@@ -436,13 +445,13 @@ pub fn render(frame: &mut Frame, state: &UiState) {
     render_open_orders(frame, open_orders_area, &state.open_orders);
     render_history(frame, history_area, &state.trade_history);
 
-    // Правая часть: Configuration (9 строк) или Hedge (12 строк) + Order Book (остаток)
+    // Правая часть: Configuration (9 строк) или Hedge (12 строк) + Order Books (остаток)
     let config_height = if state.trading_mode == TradingMode::Hedge {
         12
     } else {
         9
     };
-    let [config_area, order_book_area] =
+    let [config_area, order_books_area] =
         Layout::vertical([Constraint::Length(config_height), Constraint::Fill(1)])
             .areas(right_area);
 
@@ -452,12 +461,22 @@ pub fn render(frame: &mut Frame, state: &UiState) {
     } else {
         render_configuration(frame, config_area, &state.config);
     }
-    render_combined_order_book(
+
+    // Разделяем Order Books на два окна: UP BIDS слева и DOWN BIDS справа
+    let [up_bids_area, down_bids_area] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .areas(order_books_area);
+
+    render_up_bids(
         frame,
-        order_book_area,
+        up_bids_area,
         &state.up_book,
-        &state.down_book,
         &state.our_up_bid_prices,
+    );
+    render_down_bids(
+        frame,
+        down_bids_area,
+        &state.down_book,
         &state.our_down_bid_prices,
     );
 }
@@ -1044,20 +1063,20 @@ fn render_configuration(frame: &mut Frame, area: Rect, config: &UiConfig) {
     frame.render_widget(paragraph, inner);
 }
 
-/// Рендер объединенного стакана (только bids для UP и DOWN)
-fn render_combined_order_book(
+/// Рендер стакана UP BIDS (левое окно)
+/// Колонки: Total | Shares | Price (приклеены к правой стороне)
+fn render_up_bids(
     frame: &mut Frame,
     area: Rect,
     up_book: &SideOrderBook,
-    down_book: &SideOrderBook,
     our_up_bid_prices: &HashSet<u32>,
-    our_down_bid_prices: &HashSet<u32>,
 ) {
     let block = Block::default()
-        .title(" ORDER BOOK ")
+        .title(" UP BIDS ")
+        .title_alignment(Alignment::Right)
         .title_style(
             Style::default()
-                .fg(Color::Cyan)
+                .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         )
         .borders(Borders::ALL)
@@ -1066,20 +1085,11 @@ fn render_combined_order_book(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Разделяем на UP bids, spread, DOWN bids
-    let [up_bids_area, spread_area, down_bids_area] = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(1),
-        Constraint::Fill(1),
-    ])
-    .areas(inner);
-
     let header_style = Style::default()
         .fg(Color::Gray)
         .add_modifier(Modifier::BOLD);
 
-    // UP Bids (зеленые) - перевернутые, чтобы лучшая цена была внизу у spread
-    // Сначала собираем данные с кумулятивным total
+    // Собираем данные с кумулятивным total
     let up_bid_data: Vec<(f64, f64, f64, bool)> = {
         let mut cumulative_up = 0.0;
         up_book
@@ -1095,10 +1105,9 @@ fn render_combined_order_book(
             .collect()
     };
 
-    // Переворачиваем: худшие цены сверху, лучшие внизу
+    // Строки таблицы: Total | Shares | Price (выровнено по правому краю)
     let up_bid_rows: Vec<Row> = up_bid_data
         .iter()
-        .rev()
         .map(|(price, size, cum_total, has_our_order)| {
             let price_text = if *has_our_order {
                 format!("{:.0}¢⏱", price * 100.0)
@@ -1106,9 +1115,11 @@ fn render_combined_order_book(
                 format!("{:.0}¢", price * 100.0)
             };
             Row::new(vec![
-                Cell::from(price_text).style(Style::default().fg(Color::Green)),
-                Cell::from(format!("{:.2}", size)),
-                Cell::from(format!("${:.2}", cum_total)),
+                Cell::from(Line::from(format!("${:.2}", cum_total)).alignment(Alignment::Right))
+                    .style(Style::default().fg(Color::DarkGray)),
+                Cell::from(Line::from(format!("{:.2}", size)).alignment(Alignment::Right)),
+                Cell::from(Line::from(price_text).alignment(Alignment::Right))
+                    .style(Style::default().fg(Color::Green)),
             ])
         })
         .collect();
@@ -1116,34 +1127,42 @@ fn render_combined_order_book(
     let up_table = Table::new(
         up_bid_rows,
         [
+            Constraint::Percentage(35),
+            Constraint::Percentage(35),
             Constraint::Percentage(30),
-            Constraint::Percentage(35),
-            Constraint::Percentage(35),
         ],
     )
     .header(Row::new(vec![
-        Cell::from("Up Bids").style(
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Cell::from("Shares").style(header_style),
-        Cell::from("Total").style(header_style),
+        Cell::from(Line::from("Total").alignment(Alignment::Right)).style(header_style),
+        Cell::from(Line::from("Shares").alignment(Alignment::Right)).style(header_style),
+        Cell::from(Line::from("Price").alignment(Alignment::Right)).style(header_style),
     ]));
-    frame.render_widget(up_table, up_bids_area);
+    frame.render_widget(up_table, inner);
+}
 
-    // Spread
-    let up_best_bid = up_book.bids.first().map(|l| l.price).unwrap_or(0.0);
-    let down_best_bid = down_book.bids.first().map(|l| l.price).unwrap_or(0.0);
-    let spread = ((1.0 - up_best_bid - down_best_bid) * 100.0).abs();
+/// Рендер стакана DOWN BIDS (правое окно)
+/// Колонки: Price | Shares | Total (приклеены к левой стороне)
+fn render_down_bids(
+    frame: &mut Frame,
+    area: Rect,
+    down_book: &SideOrderBook,
+    our_down_bid_prices: &HashSet<u32>,
+) {
+    let block = Block::default()
+        .title(" DOWN BIDS ")
+        .title_alignment(Alignment::Left)
+        .title_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
 
-    let spread_text = format!("───── Spread: {:.0}¢ ─────", spread);
-    let spread_widget = Paragraph::new(spread_text)
-        .style(Style::default().fg(Color::DarkGray))
-        .alignment(Alignment::Center);
-    frame.render_widget(spread_widget, spread_area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    // DOWN Bids (красные)
+    let header_style = Style::default()
+        .fg(Color::Gray)
+        .add_modifier(Modifier::BOLD);
+
+    // Собираем данные с кумулятивным total
     let mut cumulative_down = 0.0;
     let down_bid_rows: Vec<Row> = down_book
         .bids
@@ -1161,7 +1180,8 @@ fn render_combined_order_book(
             Row::new(vec![
                 Cell::from(price_text).style(Style::default().fg(Color::Red)),
                 Cell::from(format!("{:.2}", level.size)),
-                Cell::from(format!("${:.2}", cumulative_down)),
+                Cell::from(format!("${:.2}", cumulative_down))
+                    .style(Style::default().fg(Color::DarkGray)),
             ])
         })
         .collect();
@@ -1175,11 +1195,11 @@ fn render_combined_order_book(
         ],
     )
     .header(Row::new(vec![
-        Cell::from("Down Bids").style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Cell::from("Price").style(header_style),
         Cell::from("Shares").style(header_style),
         Cell::from("Total").style(header_style),
     ]));
-    frame.render_widget(down_table, down_bids_area);
+    frame.render_widget(down_table, inner);
 }
 
 /// Результат проверки нажатых клавиш
