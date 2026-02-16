@@ -429,7 +429,7 @@ pub fn render(frame: &mut Frame, state: &UiState) {
 
     // Основной layout: левая часть и правая
     let [left_area, right_area] =
-        Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).areas(area);
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
 
     // Левая часть: event info, portfolio, open orders, history
     let [event_area, portfolio_area, open_orders_area, history_area] = Layout::vertical([
