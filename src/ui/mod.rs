@@ -14,7 +14,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table},
 };
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Stdout};
 use std::sync::{Arc, Mutex};
 
@@ -166,9 +166,9 @@ pub struct UiStateInner {
     pub up_book: SideOrderBook,
     pub down_book: SideOrderBook,
     pub is_running: bool,
-    pub trading_mode: TradingMode,         // Текущий режим работы
-    pub our_up_bid_prices: HashSet<u32>,   // Цены в центах, где размещены наши UP ордера
-    pub our_down_bid_prices: HashSet<u32>, // Цены в центах, где размещены наши DOWN ордера
+    pub trading_mode: TradingMode,              // Текущий режим работы
+    pub our_up_bid_prices: HashMap<u32, u32>, // Цена в центах -> количество ордеров на этой цене (UP)
+    pub our_down_bid_prices: HashMap<u32, u32>, // Цена в центах -> количество ордеров на этой цене (DOWN)
     // История торговли
     pub trade_history: VecDeque<TradeHistoryEntry>,
     // Открытые ордера
@@ -375,26 +375,36 @@ pub fn stop_ui(state: &UiState) {
     }
 }
 
-/// Добавить цену нашего bid ордера
+/// Добавить цену нашего bid ордера (увеличить счетчик)
 pub fn add_our_bid_price(state: &UiState, is_up: bool, price: f64) {
     if let Ok(mut s) = state.lock() {
         let price_cents = (price * 100.0).round() as u32;
         if is_up {
-            s.our_up_bid_prices.insert(price_cents);
+            *s.our_up_bid_prices.entry(price_cents).or_insert(0) += 1;
         } else {
-            s.our_down_bid_prices.insert(price_cents);
+            *s.our_down_bid_prices.entry(price_cents).or_insert(0) += 1;
         }
     }
 }
 
-/// Удалить цену нашего bid ордера
+/// Удалить цену нашего bid ордера (уменьшить счетчик, удалить если 0)
 pub fn remove_our_bid_price(state: &UiState, is_up: bool, price: f64) {
     if let Ok(mut s) = state.lock() {
         let price_cents = (price * 100.0).round() as u32;
         if is_up {
-            s.our_up_bid_prices.remove(&price_cents);
+            if let Some(count) = s.our_up_bid_prices.get_mut(&price_cents) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    s.our_up_bid_prices.remove(&price_cents);
+                }
+            }
         } else {
-            s.our_down_bid_prices.remove(&price_cents);
+            if let Some(count) = s.our_down_bid_prices.get_mut(&price_cents) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    s.our_down_bid_prices.remove(&price_cents);
+                }
+            }
         }
     }
 }
@@ -903,7 +913,7 @@ fn render_open_orders(frame: &mut Frame, area: Rect, orders: &[OpenOrder]) {
             Row::new(vec![
                 Cell::from("Buy").style(Style::default().fg(Color::White)),
                 Cell::from(outcome_text).style(Style::default().fg(outcome_color)),
-                Cell::from(format!("{:.0}¢", order.price * 100.0))
+                Cell::from(format!("{:.1}¢", order.price * 100.0))
                     .style(Style::default().fg(Color::White)),
                 Cell::from(format!("{:.0} / {:.0}", order.filled, order.total))
                     .style(Style::default().fg(Color::White)),
@@ -1003,7 +1013,7 @@ fn render_history(frame: &mut Frame, area: Rect, history: &VecDeque<TradeHistory
                 ),
                 Span::styled("at ", Style::default().fg(Color::White)),
                 Span::styled(
-                    format!("{:.0}¢", entry.price * 100.0),
+                    format!("{:.1}¢", entry.price * 100.0),
                     Style::default().fg(Color::White),
                 ),
                 Span::styled(
@@ -1103,7 +1113,7 @@ fn render_up_bids(
     frame: &mut Frame,
     area: Rect,
     up_book: &SideOrderBook,
-    our_up_bid_prices: &HashSet<u32>,
+    our_up_bid_prices: &HashMap<u32, u32>,
 ) {
     let block = Block::default()
         .title(" UP BIDS ")
@@ -1124,7 +1134,7 @@ fn render_up_bids(
         .add_modifier(Modifier::BOLD);
 
     // Собираем данные с кумулятивным total
-    let up_bid_data: Vec<(f64, f64, f64, bool)> = {
+    let up_bid_data: Vec<(f64, f64, f64, Option<u32>)> = {
         let mut cumulative_up = 0.0;
         up_book
             .bids
@@ -1133,8 +1143,8 @@ fn render_up_bids(
             .map(|level| {
                 cumulative_up += level.price * level.size;
                 let price_cents = (level.price * 100.0).round() as u32;
-                let has_our_order = our_up_bid_prices.contains(&price_cents);
-                (level.price, level.size, cumulative_up, has_our_order)
+                let order_count = our_up_bid_prices.get(&price_cents).copied();
+                (level.price, level.size, cumulative_up, order_count)
             })
             .collect()
     };
@@ -1142,11 +1152,11 @@ fn render_up_bids(
     // Строки таблицы: Total | Shares | Price (выровнено по правому краю)
     let up_bid_rows: Vec<Row> = up_bid_data
         .iter()
-        .map(|(price, size, cum_total, has_our_order)| {
-            let price_text = if *has_our_order {
-                format!("{:.0}¢⏱", price * 100.0)
+        .map(|(price, size, cum_total, order_count)| {
+            let price_text = if let Some(count) = order_count {
+                format!("{:.1}¢⏱({})", price * 100.0, count)
             } else {
-                format!("{:.0}¢", price * 100.0)
+                format!("{:.1}¢", price * 100.0)
             };
             Row::new(vec![
                 Cell::from(Line::from(format!("${:.2}", cum_total)).alignment(Alignment::Right))
@@ -1180,7 +1190,7 @@ fn render_down_bids(
     frame: &mut Frame,
     area: Rect,
     down_book: &SideOrderBook,
-    our_down_bid_prices: &HashSet<u32>,
+    our_down_bid_prices: &HashMap<u32, u32>,
 ) {
     let block = Block::default()
         .title(" DOWN BIDS ")
@@ -1205,11 +1215,11 @@ fn render_down_bids(
         .map(|level| {
             cumulative_down += level.price * level.size;
             let price_cents = (level.price * 100.0).round() as u32;
-            let has_our_order = our_down_bid_prices.contains(&price_cents);
-            let price_text = if has_our_order {
-                format!("{:.0}¢⏱", level.price * 100.0)
+            let order_count = our_down_bid_prices.get(&price_cents).copied();
+            let price_text = if let Some(count) = order_count {
+                format!("{:.1}¢⏱({})", level.price * 100.0, count)
             } else {
-                format!("{:.0}¢", level.price * 100.0)
+                format!("{:.1}¢", level.price * 100.0)
             };
             Row::new(vec![
                 Cell::from(price_text).style(Style::default().fg(Color::Red)),
