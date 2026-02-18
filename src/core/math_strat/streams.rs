@@ -38,6 +38,7 @@ pub fn place_math_order(engine: &Arc<RealEngine>, side: Side, price: f64, size: 
             Ok(o) => o,
             Err(e) => {
                 warn!("❌ [Math] Ошибка создания ордера: {}", e);
+                engine_clone.cancel_pending_level(side_clone, level);
                 return;
             }
         };
@@ -46,12 +47,14 @@ pub fn place_math_order(engine: &Arc<RealEngine>, side: Side, price: f64, size: 
             Ok(s) => s,
             Err(e) => {
                 warn!("❌ [Math] Ошибка подписи ордера: {}", e);
+                engine_clone.cancel_pending_level(side_clone, level);
                 return;
             }
         };
 
         match client.post_orders(vec![signed]).await {
             Ok(responses) => {
+                let mut registered = false;
                 for response in responses {
                     if response.success && !response.order_id.is_empty() {
                         info!(
@@ -65,11 +68,15 @@ pub fn place_math_order(engine: &Arc<RealEngine>, side: Side, price: f64, size: 
                             size,
                             level,
                         );
+                        registered = true;
                     } else {
                         if let Some(err) = &response.error_msg {
                             warn!("❌ [Math] Ордер отклонён: {}", err);
                         }
                     }
+                }
+                if !registered {
+                    engine_clone.cancel_pending_level(side_clone, level);
                 }
             }
             Err(e) => {
@@ -77,6 +84,7 @@ pub fn place_math_order(engine: &Arc<RealEngine>, side: Side, price: f64, size: 
                     "❌ [Math] Ошибка размещения ордера {:?} @ {:.2}: {}",
                     side_clone, rounded_price, e
                 );
+                engine_clone.cancel_pending_level(side_clone, level);
             }
         }
     });

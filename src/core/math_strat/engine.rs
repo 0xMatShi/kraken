@@ -104,30 +104,44 @@ impl RealEngine {
 
         // UP ордера
         if !decision.up_levels.is_empty() {
-            let (active, filled_up, filled_down) = {
+            let (active, pending, filled_up, filled_down) = {
                 let s = self.math_state.lock().unwrap();
-                (s.up_orders.len(), s.up_filled, s.down_filled)
+                (
+                    s.up_orders.len(),
+                    s.pending_up_levels.len(),
+                    s.up_filled,
+                    s.down_filled,
+                )
             };
             let balance_ok = filled_up <= filled_down + self.config.max_size_side;
 
-            if active < max_per_side && balance_ok {
+            if active + pending < max_per_side && balance_ok {
                 for &level in &decision.up_levels {
-                    let cur_active = self.math_state.lock().unwrap().up_orders.len();
-                    if cur_active >= max_per_side {
-                        break;
-                    }
-                    let already = self
-                        .math_state
-                        .lock()
-                        .unwrap()
-                        .up_orders
-                        .values()
-                        .any(|o| o.level == level);
-                    if already {
+                    // Атомарная проверка + резервирование уровня в одном lock
+                    let can_place = {
+                        let mut s = self.math_state.lock().unwrap();
+                        let occupied = s.up_orders.values().any(|o| o.level == level)
+                            || s.pending_up_levels.contains(&level);
+                        let slots_ok = s.up_orders.len() + s.pending_up_levels.len() < max_per_side;
+                        if !occupied && slots_ok {
+                            s.pending_up_levels.insert(level);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if !can_place {
                         continue;
                     }
                     if let Some(price) = Self::bid_price_at_level(&up_bids, level) {
                         super::streams::place_math_order(self, Side::Up, price, order_size, level);
+                    } else {
+                        // Нет цены — снимаем резерв
+                        self.math_state
+                            .lock()
+                            .unwrap()
+                            .pending_up_levels
+                            .remove(&level);
                     }
                 }
             }
@@ -135,26 +149,33 @@ impl RealEngine {
 
         // DOWN ордера
         if !decision.down_levels.is_empty() {
-            let (active, filled_up, filled_down) = {
+            let (active, pending, filled_up, filled_down) = {
                 let s = self.math_state.lock().unwrap();
-                (s.down_orders.len(), s.up_filled, s.down_filled)
+                (
+                    s.down_orders.len(),
+                    s.pending_down_levels.len(),
+                    s.up_filled,
+                    s.down_filled,
+                )
             };
             let balance_ok = filled_down <= filled_up + self.config.max_size_side;
 
-            if active < max_per_side && balance_ok {
+            if active + pending < max_per_side && balance_ok {
                 for &level in &decision.down_levels {
-                    let cur_active = self.math_state.lock().unwrap().down_orders.len();
-                    if cur_active >= max_per_side {
-                        break;
-                    }
-                    let already = self
-                        .math_state
-                        .lock()
-                        .unwrap()
-                        .down_orders
-                        .values()
-                        .any(|o| o.level == level);
-                    if already {
+                    let can_place = {
+                        let mut s = self.math_state.lock().unwrap();
+                        let occupied = s.down_orders.values().any(|o| o.level == level)
+                            || s.pending_down_levels.contains(&level);
+                        let slots_ok =
+                            s.down_orders.len() + s.pending_down_levels.len() < max_per_side;
+                        if !occupied && slots_ok {
+                            s.pending_down_levels.insert(level);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if !can_place {
                         continue;
                     }
                     if let Some(price) = Self::bid_price_at_level(&down_bids, level) {
@@ -165,6 +186,12 @@ impl RealEngine {
                             order_size,
                             level,
                         );
+                    } else {
+                        self.math_state
+                            .lock()
+                            .unwrap()
+                            .pending_down_levels
+                            .remove(&level);
                     }
                 }
             }
@@ -237,9 +264,11 @@ impl RealEngine {
         let mut s = self.math_state.lock().unwrap();
         match side {
             Side::Up => {
+                s.pending_up_levels.remove(&level);
                 s.up_orders.insert(order_id.clone(), order);
             }
             Side::Down => {
+                s.pending_down_levels.remove(&level);
                 s.down_orders.insert(order_id.clone(), order);
             }
         }
@@ -283,6 +312,19 @@ impl RealEngine {
             Some(false)
         } else {
             None
+        }
+    }
+
+    /// Снимает резерв pending-уровня при ошибке размещения
+    pub fn cancel_pending_level(&self, side: Side, level: u8) {
+        let mut s = self.math_state.lock().unwrap();
+        match side {
+            Side::Up => {
+                s.pending_up_levels.remove(&level);
+            }
+            Side::Down => {
+                s.pending_down_levels.remove(&level);
+            }
         }
     }
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 /// Один активный math ордер
@@ -23,6 +23,10 @@ pub struct MathState {
     pub gradient_confirm_pos: u32,
     /// Счётчик подтверждения отрицательного градиента
     pub gradient_confirm_neg: u32,
+    /// Уровни UP, для которых ордер уже отправлен но ещё не подтверждён биржей
+    pub pending_up_levels: HashSet<u8>,
+    /// Уровни DOWN, для которых ордер уже отправлен но ещё не подтверждён биржей
+    pub pending_down_levels: HashSet<u8>,
 }
 
 impl Default for MathState {
@@ -34,6 +38,8 @@ impl Default for MathState {
             down_filled: 0.0,
             gradient_confirm_pos: 0,
             gradient_confirm_neg: 0,
+            pending_up_levels: HashSet::new(),
+            pending_down_levels: HashSet::new(),
         }
     }
 }
