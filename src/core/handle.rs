@@ -168,6 +168,13 @@ fn match_and_process_taker_leg(engine: &Arc<RealEngine>, taker_order_id: &str, s
             }
             return;
         }
+
+        // Проверяем math ордера
+        if engine.is_math_order(taker_order_id).is_some() {
+            info!("🎯 Taker fill: найден math ордер {}", taker_order_id);
+            engine.on_math_order_fill(taker_order_id, size, true);
+            return;
+        }
     }
 }
 
@@ -321,6 +328,11 @@ pub fn handle_ws_order(
                                     );
                                 }
                             }
+
+                            // Проверяем math ордера
+                            if engine.is_math_order(&order_id).is_some() {
+                                engine.on_math_order_fill(&order_id, size_for_portfolio, true);
+                            }
                         } else {
                             drop(orders_info);
 
@@ -339,6 +351,11 @@ pub fn handle_ws_order(
                                         false,
                                     );
                                 }
+                            }
+
+                            // Partial fill math ордера
+                            if engine.is_math_order(&order_id).is_some() {
+                                engine.on_math_order_fill(&order_id, size_for_portfolio, false);
                             }
                         }
 
@@ -419,6 +436,9 @@ pub fn handle_ws_order(
             if !is_first_leg {
                 engine.on_cumulative_order_cancelled(&order_id);
             }
+
+            // Проверяем math ордера
+            engine.on_math_order_cancelled(&order_id);
 
             warn!(
                 "❌ MAKER CANCELLED: {} {} @ {:.3} | ID: {}",

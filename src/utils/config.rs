@@ -114,7 +114,7 @@ seconds_before_start = {}
 # За сколько секунд до конца события прекратить торговать
 seconds_until_end = {}
 
-# Стратегия размещения первых ног: "strong" (только на сильной), "weak" (только на слабой), "both" (обе), "cumulative"
+# Стратегия размещения первых ног: "strong" (только на сильной), "weak" (только на слабой), "both" (обе), "cumulative", "math"
 legs_strategy = "{}"
 "#,
             max_balance_str,

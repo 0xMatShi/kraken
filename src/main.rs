@@ -155,6 +155,7 @@ fn edit_config_menu(config: &mut Config) -> anyhow::Result<()> {
                 println!("2. weak");
                 println!("3. both");
                 println!("4. cumulative");
+                println!("5. math");
                 print!("> ");
                 io::stdout().flush()?;
                 let mut strategy_input = String::new();
@@ -175,6 +176,10 @@ fn edit_config_menu(config: &mut Config) -> anyhow::Result<()> {
                     "4" => {
                         config.trading.legs_strategy = "cumulative".to_string();
                         println!("✅ legs_strategy updated to \"cumulative\"");
+                    }
+                    "5" => {
+                        config.trading.legs_strategy = "math".to_string();
+                        println!("✅ legs_strategy updated to \"math\"");
                     }
                     _ => {
                         println!("❌ Invalid choice");
@@ -472,6 +477,10 @@ async fn main() -> anyhow::Result<()> {
                                 let mut state = ui_state_clone.lock().unwrap();
                                 state.hedge_input_state = ui::HedgeInputState::None;
                                 tracing::info!("❌ Ввод hedge отменен");
+                            }
+                            ui::KeyAction::ToggleObiPanel => {
+                                let mut state = ui_state_clone.lock().unwrap();
+                                state.show_obi_panel = !state.show_obi_panel;
                             }
                             ui::KeyAction::None => {}
                         }

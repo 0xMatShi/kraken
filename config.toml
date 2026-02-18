@@ -8,10 +8,10 @@ max_balance = 1000.0
 size = 10.0
 
 # Максимальный размер позиции на одной стороне (для cumulative стратегии)
-max_size_side = 60.0
+max_size_side = 20.0
 
 # Количество звеньев цепи для первой ноги (для cumulative стратегии)
-chain_links = 3
+chain_links = 10
 
 # Через сколько секунд после начала события можно начинать торговать
 seconds_before_start = 15
@@ -19,5 +19,5 @@ seconds_before_start = 15
 # За сколько секунд до конца события прекратить торговать
 seconds_until_end = 60
 
-# Стратегия размещения первых ног: "strong" (только на сильной), "weak" (только на слабой), "both" (обе), "cumulative"
-legs_strategy = "cumulative"
+# Стратегия размещения первых ног: "strong" (только на сильной), "weak" (только на слабой), "both" (обе), "cumulative", "math"
+legs_strategy = "math"

@@ -97,6 +97,29 @@ pub struct EventInfo {
     pub total_seconds: i64,
 }
 
+/// Данные OBI анализа для отображения
+#[derive(Debug, Clone, Default)]
+pub struct ObiDisplayData {
+    /// V_OBI и Sh_OBI по 4 срезам [1, 2-3, 4-5, 6-7]
+    pub slice_v: [f64; 4],
+    pub slice_sh: [f64; 4],
+    /// OBI(1) raw
+    pub obi1_v: f64,
+    pub obi1_sh: f64,
+    /// EMA OBI(1) (alpha=0.3) — сохраняется между тиками
+    pub ema_obi1_v: f64,
+    pub ema_obi1_sh: f64,
+    /// WOBI (взвешенный по срезам 1-3, lambda=0.15)
+    pub wobi_v: f64,
+    pub wobi_sh: f64,
+    /// Consensus (среднее sgn по всем 4 срезам)
+    pub consensus_v: f64,
+    pub consensus_sh: f64,
+    /// Gradient = OBI_near (срез 1) - OBI_far (срез 3)
+    pub gradient_v: f64,
+    pub gradient_sh: f64,
+}
+
 /// Конфигурация для отображения в UI
 #[derive(Debug, Clone, Default)]
 pub struct UiConfig {
@@ -177,6 +200,10 @@ pub struct UiStateInner {
     pub config: UiConfig,
     // Состояние ввода hedge
     pub hedge_input_state: HedgeInputState,
+    // Данные OBI анализа
+    pub obi_display: ObiDisplayData,
+    // Показывать ли OBI панель вместо Configuration
+    pub show_obi_panel: bool,
 }
 
 pub type UiState = Arc<Mutex<UiStateInner>>;
@@ -489,9 +516,11 @@ pub fn render(frame: &mut Frame, state: &UiState) {
     render_open_orders(frame, open_orders_area, &state.open_orders);
     render_history(frame, history_area, &state.trade_history);
 
-    // Правая часть: Configuration (9 строк) или Hedge (12 строк) + Order Books (остаток)
+    // Правая часть: Configuration/OBI (9/14 строк) или Hedge (12 строк) + Order Books (остаток)
     let config_height = if state.trading_mode == TradingMode::Hedge {
         12
+    } else if state.show_obi_panel {
+        14
     } else {
         9
     };
@@ -499,9 +528,11 @@ pub fn render(frame: &mut Frame, state: &UiState) {
         Layout::vertical([Constraint::Length(config_height), Constraint::Fill(1)])
             .areas(right_area);
 
-    // Показываем окно Hedge вместо Configuration в режиме Hedge
+    // Показываем нужное окно в верхней правой части
     if state.trading_mode == TradingMode::Hedge {
         render_hedge(frame, config_area, &state.hedge_input_state);
+    } else if state.show_obi_panel {
+        render_obi_panel(frame, config_area, &state.obi_display);
     } else {
         render_configuration(frame, config_area, &state.config);
     }
@@ -1107,6 +1138,95 @@ fn render_configuration(frame: &mut Frame, area: Rect, config: &UiConfig) {
     frame.render_widget(paragraph, inner);
 }
 
+/// Рендер OBI анализа
+fn render_obi_panel(frame: &mut Frame, area: Rect, obi: &ObiDisplayData) {
+    let block = Block::default()
+        .title(" OBI ANALYSIS ")
+        .title_style(
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Форматирует значение OBI с цветом; всегда 6 символов ("{:+.3}")
+    let fmt = |val: f64| -> (String, Color) {
+        let color = if val > 0.05 {
+            Color::Green
+        } else if val < -0.05 {
+            Color::Red
+        } else {
+            Color::DarkGray
+        };
+        (format!("{:+.3}", val), color)
+    };
+
+    // Все метки ровно 12 символов отображаемой ширины,
+    // чтобы столбцы V_OBI и Sh_OBI строго выравнивались.
+    // Шаблон строки: LABEL(12) + V_OBI(6) + "  " + Sh_OBI(6)
+    let row = |label: &'static str, v: f64, sh: f64, bold: bool| -> Line<'static> {
+        let (v_str, v_color) = fmt(v);
+        let (sh_str, sh_color) = fmt(sh);
+        let v_mod = if bold {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        };
+        Line::from(vec![
+            Span::styled(label, Style::default().fg(Color::Gray)),
+            Span::styled(v_str, Style::default().fg(v_color).add_modifier(v_mod)),
+            Span::raw("  "),
+            Span::styled(sh_str, Style::default().fg(sh_color).add_modifier(v_mod)),
+        ])
+    };
+
+    let lines = vec![
+        // Заголовок: 12 пробелов + "V_OBI" + "  " + "Sh_OBI"
+        Line::from(vec![
+            Span::raw("            "),
+            Span::styled(
+                "V_OBI",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                "Sh_OBI",
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        // Срез  1:    (12 символов: С+р+е+з+ + +1+:+4пробела)
+        row("Срез  1:    ", obi.slice_v[0], obi.slice_sh[0], false),
+        // Срез 2-3:   (12: С+р+е+з+ +2+-+3+:+3пробела)
+        row("Срез 2-3:   ", obi.slice_v[1], obi.slice_sh[1], false),
+        // Срез 4-5:   (12)
+        row("Срез 4-5:   ", obi.slice_v[2], obi.slice_sh[2], false),
+        // Срез 6-7:   (12)
+        row("Срез 6-7:   ", obi.slice_v[3], obi.slice_sh[3], false),
+        Line::from(""),
+        // OBI(1):     (12: O+B+I+(+1+)+:+5пробелов)
+        row("OBI(1):     ", obi.obi1_v, obi.obi1_sh, false),
+        // EMA OBI(1): (12: E+M+A+ +O+B+I+(+1+)+:+1пробел)
+        row("EMA OBI(1): ", obi.ema_obi1_v, obi.ema_obi1_sh, true),
+        // WOBI:       (12: W+O+B+I+:+7пробелов)
+        row("WOBI:       ", obi.wobi_v, obi.wobi_sh, false),
+        // Consensus:  (12: C+o+n+s+e+n+s+u+s+:+2пробела)
+        row("Consensus:  ", obi.consensus_v, obi.consensus_sh, false),
+        // Gradient:   (12: G+r+a+d+i+e+n+t+:+3пробела)
+        row("Gradient:   ", obi.gradient_v, obi.gradient_sh, false),
+    ];
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, inner);
+}
+
 /// Рендер стакана UP BIDS (левое окно)
 /// Колонки: Total | Shares | Price (приклеены к правой стороне)
 fn render_up_bids(
@@ -1154,7 +1274,7 @@ fn render_up_bids(
         .iter()
         .map(|(price, size, cum_total, order_count)| {
             let price_text = if let Some(count) = order_count {
-                format!("{:.1}¢⏱({})", price * 100.0, count)
+                format!("({}){:.1}¢", count, price * 100.0)
             } else {
                 format!("{:.1}¢", price * 100.0)
             };
@@ -1217,7 +1337,7 @@ fn render_down_bids(
             let price_cents = (level.price * 100.0).round() as u32;
             let order_count = our_down_bid_prices.get(&price_cents).copied();
             let price_text = if let Some(count) = order_count {
-                format!("{:.1}¢⏱({})", level.price * 100.0, count)
+                format!("{:.1}¢({})", level.price * 100.0, count)
             } else {
                 format!("{:.1}¢", level.price * 100.0)
             };
@@ -1259,6 +1379,7 @@ pub enum KeyAction {
     RequestDownHedge,   // 'd' - запросить количество DOWN для покупки (только в Hedge)
     ConfirmHedge,       // 'y' - подтвердить покупку
     CancelHedgeInput,   // 'n' - отменить ввод
+    ToggleObiPanel,     // 'o' - переключить OBI панель / Configuration
 }
 
 /// Проверка нажатия клавиш и обработка ввода hedge
@@ -1356,6 +1477,12 @@ pub fn check_key_action(
                         // y подтверждает ввод hedge
                         if !matches!(hedge_input, HedgeInputState::None) {
                             return (KeyAction::ConfirmHedge, None);
+                        }
+                    }
+                    KeyCode::Char('o') => {
+                        // o переключает OBI панель (только вне режима ввода hedge)
+                        if *hedge_input == HedgeInputState::None {
+                            return (KeyAction::ToggleObiPanel, None);
                         }
                     }
                     _ => {}

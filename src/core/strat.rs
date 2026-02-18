@@ -1,3 +1,4 @@
+use crate::core::math_strat::state::MathState;
 use crate::models::{
     CumulativePhase, CumulativeState, FirstLeg, MarketPrices, Portfolio, PriceLock, SecondLeg,
     Side, TradePair, Trend,
@@ -44,6 +45,8 @@ pub struct RealEngine {
     pub first_legs_by_price: Mutex<HashMap<(bool, u32), String>>,
     /// Состояние cumulative стратегии (state machine с ZeroPoint как начальным состоянием)
     pub cumulative_state: Mutex<CumulativeState>,
+    /// Состояние math стратегии (OBI-based)
+    pub math_state: Mutex<MathState>,
 }
 
 impl RealEngine {
@@ -80,6 +83,7 @@ impl RealEngine {
             price_lock: Mutex::new(PriceLock::default()),
             first_legs_by_price: Mutex::new(HashMap::new()),
             cumulative_state: Mutex::new(CumulativeState::default()),
+            math_state: Mutex::new(MathState::default()),
         }
     }
 
@@ -87,6 +91,9 @@ impl RealEngine {
     pub fn process_tick(self: &Arc<Self>, prices: MarketPrices) {
         // Сохраняем последние актуальные цены
         *self.last_prices.lock().unwrap() = Some(prices);
+
+        // Обновляем OBI дисплей при каждом тике (независимо от режима)
+        self.update_obi_display();
 
         // Проверяем режим торговли
         let trading_mode = {
@@ -153,6 +160,12 @@ impl RealEngine {
                 info!("🛑 Бот остановлен. Profit target достигнут.");
             });
 
+            return;
+        }
+
+        // Math стратегия: OBI-based, не зависит от тренда — роутим до трендовой логики
+        if self.config.legs_strategy == "math" {
+            self.process_math(prices);
             return;
         }
 
@@ -293,6 +306,7 @@ impl RealEngine {
                 self.second_leg_to_first.lock().unwrap().clear();
                 self.first_legs_by_price.lock().unwrap().clear();
                 *self.cumulative_state.lock().unwrap() = CumulativeState::default();
+                *self.math_state.lock().unwrap() = MathState::default();
                 // price_lock не очищаем - пусть цены остаются заблокированными
             }
             Err(e) => {
