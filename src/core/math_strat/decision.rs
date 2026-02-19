@@ -45,33 +45,34 @@ fn level_from_gradient(gradient: f64) -> u8 {
 /// 12. Общий случай со слабыми сигналами
 pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> PlacementDecision {
     let obi1 = metrics.ema_obi1_v; // EMA сглаженный OBI(1)
-    let wobi = metrics.wobi_v; // V-weighted WOBI (первичный, шаги 2-12)
-    let wobi_sh = metrics.wobi_sh; // Sh-weighted WOBI (для расхождения в шаге 1)
+    let wobi_v = metrics.wobi_v; // V-weighted WOBI (только для расхождения в шагах 1 и 1а)
+    let wobi_sh = metrics.wobi_sh; // Sh-weighted WOBI (первичный, шаги 0 и 2-12)
     let consensus = metrics.consensus_v;
     let gradient = metrics.gradient_v;
 
     // ─── Шаг 0: Зона молчания ───────────────────────────────────────────────
     // Все метрики слабее порогов → не торговать
-    if consensus.abs() <= 0.15 && wobi.abs() <= 0.2 && gradient.abs() <= 0.1 && obi1.abs() <= 0.2 {
+    if consensus.abs() <= 0.15 && wobi_sh.abs() <= 0.2 && gradient.abs() <= 0.1 && obi1.abs() <= 0.2
+    {
         return PlacementDecision::default();
     }
 
     // ─── Шаг 1: Расхождение V_OBI и Sh_OBI (Category 6) ───────────────────
     // wobi = V-weighted (крупные деньги), wobi_sh = Sh-weighted (количество ордеров)
-    let v_and_sh_both_significant = wobi.abs() > 0.2 && wobi_sh.abs() > 0.2;
+    let v_and_sh_both_significant = wobi_v.abs() > 0.2 && wobi_sh.abs() > 0.2;
     let v_sh_opposite = v_and_sh_both_significant
-        && ((wobi > 0.0 && wobi_sh < 0.0) || (wobi < 0.0 && wobi_sh > 0.0));
-    let v_sh_diverge_strong = v_sh_opposite && (wobi - wobi_sh).abs() > 0.3;
+        && ((wobi_v > 0.0 && wobi_sh < 0.0) || (wobi_v < 0.0 && wobi_sh > 0.0));
+    let v_sh_diverge_strong = v_sh_opposite && (wobi_v - wobi_sh).abs() > 0.3;
 
     if v_sh_diverge_strong {
-        if wobi > 0.2 && wobi_sh < -0.2 {
+        if wobi_v > 0.2 && wobi_sh < -0.2 {
             // 6.2: V бычий, Sh медвежий → доверяем V → UP 2-3
             return PlacementDecision {
                 up_levels: vec![2, 3],
                 down_levels: vec![],
             };
         }
-        if wobi < -0.2 && wobi_sh > 0.2 {
+        if wobi_v < -0.2 && wobi_sh > 0.2 {
             // 6.1: V медвежий, Sh бычий → доверяем V → DOWN 2-3
             return PlacementDecision {
                 up_levels: vec![],
@@ -83,14 +84,14 @@ pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> Placeme
     // Шаг 1а: V/Sh расходятся, но Consensus даёт осторожное направление (строки 42-43)
     // Consensus перевешивает V при расхождении — осторожный вход на 3-4
     if v_sh_opposite {
-        if wobi < 0.0 && wobi_sh > 0.0 && consensus >= 0.5 {
+        if wobi_v < 0.0 && wobi_sh > 0.0 && consensus >= 0.5 {
             // V медвежий, Sh бычий, Consensus бычий → осторожный UP 3-4
             return PlacementDecision {
                 up_levels: vec![3, 4],
                 down_levels: vec![],
             };
         }
-        if wobi > 0.0 && wobi_sh < 0.0 && consensus <= -0.5 {
+        if wobi_v > 0.0 && wobi_sh < 0.0 && consensus <= -0.5 {
             // V бычий, Sh медвежий, Consensus медвежий → осторожный DOWN 3-4
             return PlacementDecision {
                 up_levels: vec![],
@@ -98,6 +99,9 @@ pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> Placeme
             };
         }
     }
+
+    // С шага 2 решения принимаются на основе wobi_sh (количество ордеров, не объём)
+    let wobi = wobi_sh;
 
     // ─── Шаг 2: Шоковый импульс ─────────────────────────────────────────────
     // Gradient > ±0.4, OBI(1) > ±0.4, Consensus ±0.75 → немедленный вход уровень 1

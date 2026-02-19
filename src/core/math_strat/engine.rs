@@ -38,8 +38,13 @@ impl RealEngine {
             (state.obi_display.ema_obi1_v, state.obi_display.ema_obi1_sh)
         };
 
-        let metrics =
-            super::metrics::compute_metrics(&up_bids, &down_bids, delta_ms, prev_ema_v, prev_ema_sh);
+        let metrics = super::metrics::compute_metrics(
+            &up_bids,
+            &down_bids,
+            delta_ms,
+            prev_ema_v,
+            prev_ema_sh,
+        );
 
         let mut state = self.ui_state.lock().unwrap();
         let d = &mut state.obi_display;
@@ -125,7 +130,11 @@ impl RealEngine {
                     + (s.up_orders.len() + s.pending_up_levels.len()) as f64 * order_size;
                 let eff_down = s.down_filled
                     + (s.down_orders.len() + s.pending_down_levels.len()) as f64 * order_size;
-                (s.up_orders.len(), s.pending_up_levels.len(), eff_up <= eff_down)
+                (
+                    s.up_orders.len(),
+                    s.pending_up_levels.len(),
+                    eff_up <= eff_down,
+                )
             };
 
             if active + pending < max_per_side && balance_ok {
@@ -176,7 +185,11 @@ impl RealEngine {
                     + (s.up_orders.len() + s.pending_up_levels.len()) as f64 * order_size;
                 let eff_down = s.down_filled
                     + (s.down_orders.len() + s.pending_down_levels.len()) as f64 * order_size;
-                (s.down_orders.len(), s.pending_down_levels.len(), eff_down <= eff_up)
+                (
+                    s.down_orders.len(),
+                    s.pending_down_levels.len(),
+                    eff_down <= eff_up,
+                )
             };
 
             if active + pending < max_per_side && balance_ok {
@@ -271,7 +284,6 @@ impl RealEngine {
             info!("🗑️ [Math] Отменяем {} устаревших ордеров", stale_ids.len());
             super::super::streams::cancel_orders(self, stale_ids);
         }
-
     }
 
     /// Регистрирует Math ордер после получения order_id от биржи
