@@ -104,27 +104,32 @@ impl RealEngine {
 
         // UP ордера
         if !decision.up_levels.is_empty() {
-            let (active, pending, filled_up, filled_down) = {
+            // Эффективная позиция = исполненные + активные (committed) ордера
+            // UP не должен опережать DOWN по эффективной позиции
+            let (active, pending, balance_ok) = {
                 let s = self.math_state.lock().unwrap();
-                (
-                    s.up_orders.len(),
-                    s.pending_up_levels.len(),
-                    s.up_filled,
-                    s.down_filled,
-                )
+                let eff_up = s.up_filled
+                    + (s.up_orders.len() + s.pending_up_levels.len()) as f64 * order_size;
+                let eff_down = s.down_filled
+                    + (s.down_orders.len() + s.pending_down_levels.len()) as f64 * order_size;
+                (s.up_orders.len(), s.pending_up_levels.len(), eff_up <= eff_down)
             };
-            // UP не должен опережать DOWN: выставляем только если UP не больше DOWN
-            let balance_ok = filled_up <= filled_down;
 
             if active + pending < max_per_side && balance_ok {
                 for &level in &decision.up_levels {
-                    // Атомарная проверка + резервирование уровня в одном lock
+                    // Проверяем баланс внутри lock — уже с учётом pending из предыдущих итераций
                     let can_place = {
                         let mut s = self.math_state.lock().unwrap();
                         let occupied = s.up_orders.values().any(|o| o.level == level)
                             || s.pending_up_levels.contains(&level);
                         let slots_ok = s.up_orders.len() + s.pending_up_levels.len() < max_per_side;
-                        if !occupied && slots_ok {
+                        let eff_up = s.up_filled
+                            + (s.up_orders.len() + s.pending_up_levels.len()) as f64 * order_size;
+                        let eff_down = s.down_filled
+                            + (s.down_orders.len() + s.pending_down_levels.len()) as f64
+                                * order_size;
+                        let balance_ok = eff_up <= eff_down;
+                        if !occupied && slots_ok && balance_ok {
                             s.pending_up_levels.insert(level);
                             true
                         } else {
@@ -150,17 +155,16 @@ impl RealEngine {
 
         // DOWN ордера
         if !decision.down_levels.is_empty() {
-            let (active, pending, filled_up, filled_down) = {
+            // Эффективная позиция = исполненные + активные (committed) ордера
+            // DOWN не должен опережать UP по эффективной позиции
+            let (active, pending, balance_ok) = {
                 let s = self.math_state.lock().unwrap();
-                (
-                    s.down_orders.len(),
-                    s.pending_down_levels.len(),
-                    s.up_filled,
-                    s.down_filled,
-                )
+                let eff_up = s.up_filled
+                    + (s.up_orders.len() + s.pending_up_levels.len()) as f64 * order_size;
+                let eff_down = s.down_filled
+                    + (s.down_orders.len() + s.pending_down_levels.len()) as f64 * order_size;
+                (s.down_orders.len(), s.pending_down_levels.len(), eff_down <= eff_up)
             };
-            // DOWN не должен опережать UP: выставляем только если DOWN не больше UP
-            let balance_ok = filled_down <= filled_up;
 
             if active + pending < max_per_side && balance_ok {
                 for &level in &decision.down_levels {
@@ -170,7 +174,13 @@ impl RealEngine {
                             || s.pending_down_levels.contains(&level);
                         let slots_ok =
                             s.down_orders.len() + s.pending_down_levels.len() < max_per_side;
-                        if !occupied && slots_ok {
+                        let eff_up = s.up_filled
+                            + (s.up_orders.len() + s.pending_up_levels.len()) as f64 * order_size;
+                        let eff_down = s.down_filled
+                            + (s.down_orders.len() + s.pending_down_levels.len()) as f64
+                                * order_size;
+                        let balance_ok = eff_down <= eff_up;
+                        if !occupied && slots_ok && balance_ok {
                             s.pending_down_levels.insert(level);
                             true
                         } else {
@@ -249,34 +259,6 @@ impl RealEngine {
             super::super::streams::cancel_orders(self, stale_ids);
         }
 
-        // Отменяем ордера "опережающей" стороны: ждём пока противоположная сторона догонит
-        let imbalance_cancels: Vec<String> = {
-            let s = self.math_state.lock().unwrap();
-            if s.down_filled > s.up_filled {
-                // DOWN опережает UP — отменяем оставшиеся DOWN ордера
-                s.down_orders.keys().cloned().collect()
-            } else if s.up_filled > s.down_filled {
-                // UP опережает DOWN — отменяем оставшиеся UP ордера
-                s.up_orders.keys().cloned().collect()
-            } else {
-                vec![]
-            }
-        };
-
-        if !imbalance_cancels.is_empty() {
-            {
-                let mut s = self.math_state.lock().unwrap();
-                for id in &imbalance_cancels {
-                    s.up_orders.remove(id);
-                    s.down_orders.remove(id);
-                }
-            }
-            info!(
-                "⚖️ [Math] Отменяем {} ордеров опережающей стороны — ждём выравнивания",
-                imbalance_cancels.len()
-            );
-            super::super::streams::cancel_orders(self, imbalance_cancels);
-        }
     }
 
     /// Регистрирует Math ордер после получения order_id от биржи
