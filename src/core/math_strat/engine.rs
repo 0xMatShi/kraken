@@ -113,7 +113,8 @@ impl RealEngine {
                     s.down_filled,
                 )
             };
-            let balance_ok = filled_up <= filled_down + self.config.max_size_side;
+            // UP не должен опережать DOWN: выставляем только если UP не больше DOWN
+            let balance_ok = filled_up <= filled_down;
 
             if active + pending < max_per_side && balance_ok {
                 for &level in &decision.up_levels {
@@ -158,7 +159,8 @@ impl RealEngine {
                     s.down_filled,
                 )
             };
-            let balance_ok = filled_down <= filled_up + self.config.max_size_side;
+            // DOWN не должен опережать UP: выставляем только если DOWN не больше UP
+            let balance_ok = filled_down <= filled_up;
 
             if active + pending < max_per_side && balance_ok {
                 for &level in &decision.down_levels {
@@ -245,6 +247,35 @@ impl RealEngine {
             }
             info!("🗑️ [Math] Отменяем {} устаревших ордеров", stale_ids.len());
             super::super::streams::cancel_orders(self, stale_ids);
+        }
+
+        // Отменяем ордера "опережающей" стороны: ждём пока противоположная сторона догонит
+        let imbalance_cancels: Vec<String> = {
+            let s = self.math_state.lock().unwrap();
+            if s.down_filled > s.up_filled {
+                // DOWN опережает UP — отменяем оставшиеся DOWN ордера
+                s.down_orders.keys().cloned().collect()
+            } else if s.up_filled > s.down_filled {
+                // UP опережает DOWN — отменяем оставшиеся UP ордера
+                s.up_orders.keys().cloned().collect()
+            } else {
+                vec![]
+            }
+        };
+
+        if !imbalance_cancels.is_empty() {
+            {
+                let mut s = self.math_state.lock().unwrap();
+                for id in &imbalance_cancels {
+                    s.up_orders.remove(id);
+                    s.down_orders.remove(id);
+                }
+            }
+            info!(
+                "⚖️ [Math] Отменяем {} ордеров опережающей стороны — ждём выравнивания",
+                imbalance_cancels.len()
+            );
+            super::super::streams::cancel_orders(self, imbalance_cancels);
         }
     }
 

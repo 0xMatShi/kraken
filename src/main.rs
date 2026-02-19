@@ -291,11 +291,31 @@ async fn main() -> anyhow::Result<()> {
             Err(_) => continue,
         };
 
+        // Меню выбора типа рынка
+        print!("\x1B[2J\x1B[1;1H");
+        println!("Select Market Type:");
+        println!("1. 15min | 2. 1hour");
+        print!("> ");
+        io::stdout().flush().unwrap();
+
+        let mut market_type_input = String::new();
+        io::stdin().read_line(&mut market_type_input).unwrap();
+
+        let market_type = match market_type_input.trim() {
+            "1" => models::MarketType::FifteenMin,
+            "2" => models::MarketType::OneHour,
+            _ => continue,
+        };
+
         // Автоматический цикл торговли для выбранной монеты
         loop {
             // Ищем подходящий рынок
             if let Some(target) = scanner
-                .find_next_target(coin.slug_prefix(), 0.0, 15.0)
+                .find_next_target(
+                    market_type.slug_prefix_for_coin(coin),
+                    0.0,
+                    market_type.max_minutes(),
+                )
                 .await
             {
                 // Парсим дату окончания
@@ -303,7 +323,7 @@ async fn main() -> anyhow::Result<()> {
                     .end_date
                     .parse::<DateTime<Utc>>()
                     .unwrap_or(Utc::now());
-                let total_seconds = 900; // Фиксированная длительность события: 15 минут
+                let total_seconds = market_type.total_seconds();
 
                 // Устанавливаем информацию о событии в UI
                 ui::set_event_info(

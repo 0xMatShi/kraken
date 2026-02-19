@@ -111,12 +111,21 @@ pub enum Coin {
 }
 
 impl Coin {
-    pub fn slug_prefix(&self) -> &'static str {
+    pub fn slug_prefix_15m(&self) -> &'static str {
         match self {
             Coin::BTC => "btc-updown-15m",
             Coin::ETH => "eth-updown-15m",
             Coin::SOL => "sol-updown-15m",
             Coin::XRP => "xrp-updown-15m",
+        }
+    }
+
+    pub fn slug_prefix_1h(&self) -> &'static str {
+        match self {
+            Coin::BTC => "bitcoin-up-or-down-",
+            Coin::ETH => "ethereum-up-or-down-",
+            Coin::SOL => "solana-up-or-down-",
+            Coin::XRP => "xrp-up-or-down-",
         }
     }
 
@@ -127,6 +136,35 @@ impl Coin {
             3 => Some(Coin::SOL),
             4 => Some(Coin::XRP),
             _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MarketType {
+    FifteenMin,
+    OneHour,
+}
+
+impl MarketType {
+    pub fn max_minutes(&self) -> f64 {
+        match self {
+            MarketType::FifteenMin => 15.0,
+            MarketType::OneHour => 60.0,
+        }
+    }
+
+    pub fn total_seconds(&self) -> i64 {
+        match self {
+            MarketType::FifteenMin => 900,
+            MarketType::OneHour => 3600,
+        }
+    }
+
+    pub fn slug_prefix_for_coin(&self, coin: Coin) -> &'static str {
+        match self {
+            MarketType::FifteenMin => coin.slug_prefix_15m(),
+            MarketType::OneHour => coin.slug_prefix_1h(),
         }
     }
 }
