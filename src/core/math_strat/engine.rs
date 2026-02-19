@@ -118,20 +118,23 @@ impl RealEngine {
             return;
         }
 
-        // Гистерезис по реальному портфелю:
-        // пауза начинается при >= max_size_side, снимается при <= max_size_side - size/2
+        // Гистерезис по реальному перекосу портфеля (разность между сторонами):
+        // пауза стороны: когда её перевес над другой стороной >= max_size_side
+        // снятие паузы:  когда перевес снизился до <= max_size_side - size/2
         let resume_threshold = max_size_side - order_size / 2.0;
         let (up_paused, down_paused) = {
             let p = self.portfolio.lock().unwrap();
             let mut s = self.math_state.lock().unwrap();
-            if p.up_shares >= max_size_side {
+            let up_skew = p.up_shares - p.down_shares;   // > 0 → UP перевешивает
+            let down_skew = p.down_shares - p.up_shares; // > 0 → DOWN перевешивает
+            if up_skew >= max_size_side {
                 s.up_paused = true;
-            } else if p.up_shares <= resume_threshold {
+            } else if up_skew <= resume_threshold {
                 s.up_paused = false;
             }
-            if p.down_shares >= max_size_side {
+            if down_skew >= max_size_side {
                 s.down_paused = true;
-            } else if p.down_shares <= resume_threshold {
+            } else if down_skew <= resume_threshold {
                 s.down_paused = false;
             }
             (s.up_paused, s.down_paused)

@@ -507,7 +507,7 @@ pub fn render(frame: &mut Frame, state: &UiState) {
     // Левая часть: event info, portfolio, open orders, history
     let [event_area, portfolio_area, open_orders_area, history_area] = Layout::vertical([
         Constraint::Length(6),  // Event info
-        Constraint::Length(14), // Portfolio
+        Constraint::Length(15), // Portfolio
         Constraint::Length(14), // Open Orders
         Constraint::Fill(1),    // History
     ])
@@ -652,86 +652,76 @@ fn render_portfolio(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let up_avg = portfolio.up_avg();
-    let down_avg = portfolio.down_avg();
-    let total_avg = up_avg + down_avg;
-    let total_spent = portfolio.up_spent + portfolio.down_spent;
+    // WebSocket метрики
+    let ws_up_avg = portfolio.up_avg();
+    let ws_down_avg = portfolio.down_avg();
+    let ws_total_avg = ws_up_avg + ws_down_avg;
+    let ws_total_spent = portfolio.up_spent + portfolio.down_spent;
 
-    // Создаем текст с информацией о позициях
-    let up_line = vec![
-        Span::styled("  UP: ", Style::default().fg(Color::Green)),
-        Span::raw(format!(
-            "{:.1} shares @ avg {:.3}",
-            portfolio.up_shares, up_avg
-        )),
-        Span::styled(
-            format!("  ${:.2}", portfolio.up_spent),
-            Style::default().fg(Color::Gray),
-        ),
-    ];
+    // REST API метрики (spent = shares × avg_price)
+    let rest_up_spent = rest.up_shares * rest.up_avg_price;
+    let rest_down_spent = rest.down_shares * rest.down_avg_price;
+    let rest_total_avg = rest.up_avg_price + rest.down_avg_price;
+    let rest_total_spent = rest_up_spent + rest_down_spent;
 
-    let down_line = vec![
-        Span::styled("DOWN: ", Style::default().fg(Color::Red)),
-        Span::raw(format!(
-            "{:.1} shares @ avg {:.3}",
-            portfolio.down_shares, down_avg
-        )),
-        Span::styled(
-            format!("  ${:.2}", portfolio.down_spent),
-            Style::default().fg(Color::Gray),
-        ),
-    ];
-
-    // REST API строки
-    let rest_up_line = vec![
-        Span::styled("  UP: ", Style::default().fg(Color::Green)),
-        Span::raw(format!(
-            "{:.1} shares @ avg {:.3}",
-            rest.up_shares, rest.up_avg_price
-        )),
-    ];
-    let rest_down_line = vec![
-        Span::styled("DOWN: ", Style::default().fg(Color::Red)),
-        Span::raw(format!(
-            "{:.1} shares @ avg {:.3}",
-            rest.down_shares, rest.down_avg_price
-        )),
-    ];
+    fn total_avg_color(avg: f64) -> Color {
+        if avg < 0.97 {
+            Color::Green
+        } else if avg < 1.0 {
+            Color::Yellow
+        } else {
+            Color::Red
+        }
+    }
 
     let text = vec![
+        // ── WebSocket ──
         Line::from(vec![Span::styled(
             "─ WebSocket ──────────────────",
             Style::default().fg(Color::DarkGray),
         )]),
-        Line::from(up_line),
-        Line::from(down_line),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "─ REST API (2s) ─────────────",
-            Style::default().fg(Color::DarkGray),
-        )]),
-        Line::from(rest_up_line),
-        Line::from(rest_down_line),
-        Line::from(""),
         Line::from(vec![
-            Span::styled("Total Avg: ", Style::default().fg(Color::White)),
-            Span::styled(
-                format!("{:.3}", total_avg),
-                Style::default().fg(if total_avg < 0.97 {
-                    Color::Green
-                } else if total_avg < 1.0 {
-                    Color::Yellow
-                } else {
-                    Color::Red
-                }),
-            ),
+            Span::styled("  UP: ", Style::default().fg(Color::Green)),
+            Span::raw(format!("{:.1} shares @ avg {:.3}", portfolio.up_shares, ws_up_avg)),
+            Span::styled(format!("  ${:.2}", portfolio.up_spent), Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(vec![
+            Span::styled("DOWN: ", Style::default().fg(Color::Red)),
+            Span::raw(format!("{:.1} shares @ avg {:.3}", portfolio.down_shares, ws_down_avg)),
+            Span::styled(format!("  ${:.2}", portfolio.down_spent), Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Total Avg: ", Style::default().fg(Color::White)),
+            Span::styled(format!("{:.3}", ws_total_avg), Style::default().fg(total_avg_color(ws_total_avg))),
             Span::raw("  |  "),
             Span::styled("Spent: ", Style::default().fg(Color::White)),
-            Span::styled(
-                format!("${:.2}", total_spent),
-                Style::default().fg(Color::Cyan),
-            ),
+            Span::styled(format!("${:.2}", ws_total_spent), Style::default().fg(Color::Cyan)),
         ]),
+        Line::from(""),
+        // ── REST API ──
+        Line::from(vec![Span::styled(
+            "─ REST API (2s) ──────────────",
+            Style::default().fg(Color::DarkGray),
+        )]),
+        Line::from(vec![
+            Span::styled("  UP: ", Style::default().fg(Color::Green)),
+            Span::raw(format!("{:.1} shares @ avg {:.3}", rest.up_shares, rest.up_avg_price)),
+            Span::styled(format!("  ${:.2}", rest_up_spent), Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(vec![
+            Span::styled("DOWN: ", Style::default().fg(Color::Red)),
+            Span::raw(format!("{:.1} shares @ avg {:.3}", rest.down_shares, rest.down_avg_price)),
+            Span::styled(format!("  ${:.2}", rest_down_spent), Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Total Avg: ", Style::default().fg(Color::White)),
+            Span::styled(format!("{:.3}", rest_total_avg), Style::default().fg(total_avg_color(rest_total_avg))),
+            Span::raw("  |  "),
+            Span::styled("Spent: ", Style::default().fg(Color::White)),
+            Span::styled(format!("${:.2}", rest_total_spent), Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(""),
+        // ── Общие счётчики ──
         Line::from(vec![
             Span::styled("Maker: ", Style::default().fg(Color::Gray)),
             Span::raw(format!("{}", portfolio.maker_trades)),
@@ -740,7 +730,6 @@ fn render_portfolio(
             Span::raw(format!("{}", portfolio.taker_trades)),
         ]),
         Line::from(""),
-        // Добавляем строку с индикатором режима
         Line::from(vec![
             Span::styled("Mode: ", Style::default().fg(Color::White)),
             Span::styled(
