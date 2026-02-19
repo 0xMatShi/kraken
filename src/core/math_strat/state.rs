@@ -27,6 +27,10 @@ pub struct MathState {
     pub pending_up_levels: HashSet<u8>,
     /// Уровни DOWN, для которых ордер уже отправлен но ещё не подтверждён биржей
     pub pending_down_levels: HashSet<u8>,
+    /// Приостановлено размещение UP ордеров (портфель >= max_size_side)
+    pub up_paused: bool,
+    /// Приостановлено размещение DOWN ордеров (портфель >= max_size_side)
+    pub down_paused: bool,
 }
 
 impl Default for MathState {
@@ -40,6 +44,8 @@ impl Default for MathState {
             gradient_confirm_neg: 0,
             pending_up_levels: HashSet::new(),
             pending_down_levels: HashSet::new(),
+            up_paused: false,
+            down_paused: false,
         }
     }
 }

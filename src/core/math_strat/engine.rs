@@ -112,46 +112,49 @@ impl RealEngine {
         }
 
         let order_size = self.config.size;
-        let max_per_side = (self.config.max_size_side / order_size).floor() as usize;
+        let max_size_side = self.config.max_size_side;
+        let max_per_side = (max_size_side / order_size).floor() as usize;
         if max_per_side == 0 {
             return;
         }
+
+        // Гистерезис по реальному портфелю:
+        // пауза начинается при >= max_size_side, снимается при <= max_size_side - size/2
+        let resume_threshold = max_size_side - order_size / 2.0;
+        let (up_paused, down_paused) = {
+            let p = self.portfolio.lock().unwrap();
+            let mut s = self.math_state.lock().unwrap();
+            if p.up_shares >= max_size_side {
+                s.up_paused = true;
+            } else if p.up_shares <= resume_threshold {
+                s.up_paused = false;
+            }
+            if p.down_shares >= max_size_side {
+                s.down_paused = true;
+            } else if p.down_shares <= resume_threshold {
+                s.down_paused = false;
+            }
+            (s.up_paused, s.down_paused)
+        };
 
         let (up_bids, _) = ui::get_up_book(&self.ui_state);
         let (down_bids, _) = ui::get_down_book(&self.ui_state);
 
         // UP ордера
-        if !decision.up_levels.is_empty() {
-            // Эффективная позиция = исполненные + активные (committed) ордера
-            // UP не должен опережать DOWN по эффективной позиции
-            let (active, pending, balance_ok) = {
+        if !decision.up_levels.is_empty() && !up_paused {
+            let (active, pending) = {
                 let s = self.math_state.lock().unwrap();
-                let eff_up = s.up_filled
-                    + (s.up_orders.len() + s.pending_up_levels.len()) as f64 * order_size;
-                let eff_down = s.down_filled
-                    + (s.down_orders.len() + s.pending_down_levels.len()) as f64 * order_size;
-                (
-                    s.up_orders.len(),
-                    s.pending_up_levels.len(),
-                    eff_up <= eff_down,
-                )
+                (s.up_orders.len(), s.pending_up_levels.len())
             };
 
-            if active + pending < max_per_side && balance_ok {
+            if active + pending < max_per_side {
                 for &level in &decision.up_levels {
-                    // Проверяем баланс внутри lock — уже с учётом pending из предыдущих итераций
                     let can_place = {
                         let mut s = self.math_state.lock().unwrap();
                         let occupied = s.up_orders.values().any(|o| o.level == level)
                             || s.pending_up_levels.contains(&level);
                         let slots_ok = s.up_orders.len() + s.pending_up_levels.len() < max_per_side;
-                        let eff_up = s.up_filled
-                            + (s.up_orders.len() + s.pending_up_levels.len()) as f64 * order_size;
-                        let eff_down = s.down_filled
-                            + (s.down_orders.len() + s.pending_down_levels.len()) as f64
-                                * order_size;
-                        let balance_ok = eff_up <= eff_down;
-                        if !occupied && slots_ok && balance_ok {
+                        if !occupied && slots_ok {
                             s.pending_up_levels.insert(level);
                             true
                         } else {
@@ -176,23 +179,13 @@ impl RealEngine {
         }
 
         // DOWN ордера
-        if !decision.down_levels.is_empty() {
-            // Эффективная позиция = исполненные + активные (committed) ордера
-            // DOWN не должен опережать UP по эффективной позиции
-            let (active, pending, balance_ok) = {
+        if !decision.down_levels.is_empty() && !down_paused {
+            let (active, pending) = {
                 let s = self.math_state.lock().unwrap();
-                let eff_up = s.up_filled
-                    + (s.up_orders.len() + s.pending_up_levels.len()) as f64 * order_size;
-                let eff_down = s.down_filled
-                    + (s.down_orders.len() + s.pending_down_levels.len()) as f64 * order_size;
-                (
-                    s.down_orders.len(),
-                    s.pending_down_levels.len(),
-                    eff_down <= eff_up,
-                )
+                (s.down_orders.len(), s.pending_down_levels.len())
             };
 
-            if active + pending < max_per_side && balance_ok {
+            if active + pending < max_per_side {
                 for &level in &decision.down_levels {
                     let can_place = {
                         let mut s = self.math_state.lock().unwrap();
@@ -200,13 +193,7 @@ impl RealEngine {
                             || s.pending_down_levels.contains(&level);
                         let slots_ok =
                             s.down_orders.len() + s.pending_down_levels.len() < max_per_side;
-                        let eff_up = s.up_filled
-                            + (s.up_orders.len() + s.pending_up_levels.len()) as f64 * order_size;
-                        let eff_down = s.down_filled
-                            + (s.down_orders.len() + s.pending_down_levels.len()) as f64
-                                * order_size;
-                        let balance_ok = eff_down <= eff_up;
-                        if !occupied && slots_ok && balance_ok {
+                        if !occupied && slots_ok {
                             s.pending_down_levels.insert(level);
                             true
                         } else {
