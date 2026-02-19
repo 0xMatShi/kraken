@@ -328,6 +328,15 @@ impl PriceLock {
     }
 }
 
+/// Данные о позициях из REST API (data-api.polymarket.com), обновляются раз в 10 секунд
+#[derive(Debug, Default, Clone)]
+pub struct RestPositions {
+    pub up_shares: f64,
+    pub up_avg_price: f64,
+    pub down_shares: f64,
+    pub down_avg_price: f64,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Portfolio {
     pub up_shares: f64,

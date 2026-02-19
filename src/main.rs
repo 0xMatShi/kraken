@@ -14,6 +14,8 @@ use websocket::user::UserStream;
 
 use polymarket_client_sdk::clob::ws::Client as WsClient;
 use polymarket_client_sdk::clob::{Client, Config as ClobConfig};
+use polymarket_client_sdk::data::Client as DataClient;
+use polymarket_client_sdk::data::types::request::PositionsRequest;
 
 use tokio::time::Duration;
 
@@ -367,6 +369,40 @@ async fn main() -> anyhow::Result<()> {
 
                 let user_stream = UserStream::new(engine.clone(), ws_client.clone());
 
+                // Задача периодического опроса REST API позиций (раз в 10 секунд)
+                let data_client = DataClient::default();
+                let positions_req = PositionsRequest::builder()
+                    .user(env_config.funder_address)
+                    .build();
+                let up_token_rest = target.up_token.clone();
+                let down_token_rest = target.down_token.clone();
+                let ui_state_rest = ui_state.clone();
+                let positions_task = async move {
+                    loop {
+                        match data_client.positions(&positions_req).await {
+                            Ok(positions) => {
+                                let mut rest = crate::models::RestPositions::default();
+                                for pos in &positions {
+                                    if pos.asset == *up_token_rest {
+                                        rest.up_shares =
+                                            pos.size.try_into().unwrap_or(0.0);
+                                        rest.up_avg_price =
+                                            pos.avg_price.try_into().unwrap_or(0.0);
+                                    } else if pos.asset == *down_token_rest {
+                                        rest.down_shares =
+                                            pos.size.try_into().unwrap_or(0.0);
+                                        rest.down_avg_price =
+                                            pos.avg_price.try_into().unwrap_or(0.0);
+                                    }
+                                }
+                                ui_state_rest.lock().unwrap().rest_positions = rest;
+                            }
+                            Err(e) => tracing::warn!("REST positions error: {}", e),
+                        }
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                };
+
                 tracing::info!("Запуск торговой сессии...");
 
                 // Инициализируем терминал для TUI
@@ -524,7 +560,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
 
-                // Запускаем оба в параллель
+                // Запускаем всё в параллель
                 tokio::select! {
                     _ = trading_task => {
                         // Торговля завершилась
@@ -533,6 +569,7 @@ async fn main() -> anyhow::Result<()> {
                     _ = ui_task => {
                         // UI завершился (может быть нажата q или событие закончилось)
                     }
+                    _ = positions_task => {}
                 }
 
                 // Восстанавливаем терминал

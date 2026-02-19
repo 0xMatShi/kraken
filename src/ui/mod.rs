@@ -1,6 +1,6 @@
 pub mod log_capture;
 
-use crate::models::Portfolio;
+use crate::models::{Portfolio, RestPositions};
 use chrono::{DateTime, Utc};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
@@ -204,6 +204,8 @@ pub struct UiStateInner {
     pub obi_display: ObiDisplayData,
     // Показывать ли OBI панель вместо Configuration
     pub show_obi_panel: bool,
+    // Позиции из REST API (data-api), обновляются раз в 10 секунд
+    pub rest_positions: RestPositions,
 }
 
 pub type UiState = Arc<Mutex<UiStateInner>>;
@@ -505,14 +507,14 @@ pub fn render(frame: &mut Frame, state: &UiState) {
     // Левая часть: event info, portfolio, open orders, history
     let [event_area, portfolio_area, open_orders_area, history_area] = Layout::vertical([
         Constraint::Length(6),  // Event info
-        Constraint::Length(9),  // Portfolio
+        Constraint::Length(14), // Portfolio
         Constraint::Length(14), // Open Orders
         Constraint::Fill(1),    // History
     ])
     .areas(left_area);
 
     render_event_info(frame, event_area, &state.event_info, state.trading_mode);
-    render_portfolio(frame, portfolio_area, &state.portfolio, state.trading_mode);
+    render_portfolio(frame, portfolio_area, &state.portfolio, &state.rest_positions, state.trading_mode);
     render_open_orders(frame, open_orders_area, &state.open_orders);
     render_history(frame, history_area, &state.trade_history);
 
@@ -634,6 +636,7 @@ fn render_portfolio(
     frame: &mut Frame,
     area: Rect,
     portfolio: &Portfolio,
+    rest: &RestPositions,
     trading_mode: TradingMode,
 ) {
     let block = Block::default()
@@ -679,9 +682,36 @@ fn render_portfolio(
         ),
     ];
 
+    // REST API строки
+    let rest_up_line = vec![
+        Span::styled("  UP: ", Style::default().fg(Color::Green)),
+        Span::raw(format!(
+            "{:.1} shares @ avg {:.3}",
+            rest.up_shares, rest.up_avg_price
+        )),
+    ];
+    let rest_down_line = vec![
+        Span::styled("DOWN: ", Style::default().fg(Color::Red)),
+        Span::raw(format!(
+            "{:.1} shares @ avg {:.3}",
+            rest.down_shares, rest.down_avg_price
+        )),
+    ];
+
     let text = vec![
+        Line::from(vec![Span::styled(
+            "─ WebSocket ──────────────────",
+            Style::default().fg(Color::DarkGray),
+        )]),
         Line::from(up_line),
         Line::from(down_line),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "─ REST API (2s) ─────────────",
+            Style::default().fg(Color::DarkGray),
+        )]),
+        Line::from(rest_up_line),
+        Line::from(rest_down_line),
         Line::from(""),
         Line::from(vec![
             Span::styled("Total Avg: ", Style::default().fg(Color::White)),
