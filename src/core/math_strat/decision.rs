@@ -39,8 +39,8 @@ fn level_from_gradient(gradient: f64) -> u8 {
 /// 11. Общий случай со слабыми сигналами
 pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> PlacementDecision {
     let obi1 = metrics.ema_obi1_v; // EMA сглаженный OBI(1)
-    let wobi = metrics.wobi_v; // V-weighted WOBI (первичный)
-    let wobi_sh = metrics.wobi_sh; // Sh-weighted WOBI (для расхождения)
+    let wobi_v = metrics.wobi_v; // V-weighted WOBI (только для шага 1: сравнение V vs Sh)
+    let wobi = metrics.wobi_sh; // Sh-weighted WOBI — основной сигнал для шагов 2-10
     let consensus = metrics.consensus_v;
     let gradient = metrics.gradient_v;
 
@@ -51,25 +51,25 @@ pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> Placeme
     }
 
     // ─── Шаг 1: Расхождение V_OBI и Sh_OBI (Category 6) ───────────────────
-    // Правило: V_OBI всегда приоритетнее Sh_OBI (крупные деньги информативнее)
-    let v_and_sh_both_significant = wobi.abs() > 0.2 && wobi_sh.abs() > 0.2;
+    // wobi_v = V-weighted (крупные деньги), wobi = Sh-weighted (количество ордеров)
+    let v_and_sh_both_significant = wobi_v.abs() > 0.2 && wobi.abs() > 0.2;
     let v_sh_opposite = v_and_sh_both_significant
-        && ((wobi > 0.0 && wobi_sh < 0.0) || (wobi < 0.0 && wobi_sh > 0.0));
-    let v_sh_diverge_strong = v_sh_opposite && (wobi - wobi_sh).abs() > 0.3;
+        && ((wobi_v > 0.0 && wobi < 0.0) || (wobi_v < 0.0 && wobi > 0.0));
+    let v_sh_diverge_strong = v_sh_opposite && (wobi_v - wobi).abs() > 0.3;
 
     if v_sh_diverge_strong {
-        if wobi > 0.2 && wobi_sh < -0.2 {
+        if wobi_v > 0.2 && wobi < -0.2 {
             // 6.2: V бычий, Sh медвежий → доверяем V → UP 2-3
             return PlacementDecision {
                 up_levels: vec![2, 3],
                 down_levels: vec![],
             };
         }
-        if wobi < -0.2 && wobi_sh > 0.2 {
-            // 6.1: V медвежий, Sh бычий → неопределённость → обе стороны 3-4
+        if wobi_v < -0.2 && wobi > 0.2 {
+            // 6.1: V медвежий, Sh бычий → доверяем V → DOWN 2-3
             return PlacementDecision {
-                up_levels: vec![3, 4],
-                down_levels: vec![3, 4],
+                up_levels: vec![],
+                down_levels: vec![2, 3],
             };
         }
     }
