@@ -20,13 +20,26 @@ impl RealEngine {
         let (up_bids, _) = ui::get_up_book(&self.ui_state);
         let (down_bids, _) = ui::get_down_book(&self.ui_state);
 
+        // Вычисляем Δt для Time-Weighted EMA
+        let delta_ms = {
+            let mut last = self.last_obi_update.lock().unwrap();
+            let now = Instant::now();
+            let dt = match *last {
+                Some(prev) => prev.elapsed().as_secs_f64() * 1000.0,
+                // Первый вызов: используем τ как Δt → α ≈ 0.632 (холодный старт)
+                None => super::metrics::EMA_TAU_MS,
+            };
+            *last = Some(now);
+            dt
+        };
+
         let (prev_ema_v, prev_ema_sh) = {
             let state = self.ui_state.lock().unwrap();
             (state.obi_display.ema_obi1_v, state.obi_display.ema_obi1_sh)
         };
 
         let metrics =
-            super::metrics::compute_metrics(&up_bids, &down_bids, prev_ema_v, prev_ema_sh);
+            super::metrics::compute_metrics(&up_bids, &down_bids, delta_ms, prev_ema_v, prev_ema_sh);
 
         let mut state = self.ui_state.lock().unwrap();
         let d = &mut state.obi_display;

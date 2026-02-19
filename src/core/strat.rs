@@ -47,6 +47,8 @@ pub struct RealEngine {
     pub cumulative_state: Mutex<CumulativeState>,
     /// Состояние math стратегии (OBI-based)
     pub math_state: Mutex<MathState>,
+    /// Момент последнего пересчёта OBI (для Time-Weighted EMA)
+    pub last_obi_update: Mutex<Option<std::time::Instant>>,
 }
 
 impl RealEngine {
@@ -84,6 +86,7 @@ impl RealEngine {
             first_legs_by_price: Mutex::new(HashMap::new()),
             cumulative_state: Mutex::new(CumulativeState::default()),
             math_state: Mutex::new(MathState::default()),
+            last_obi_update: Mutex::new(None),
         }
     }
 

@@ -13,8 +13,9 @@ const WOBI_DEPTHS: [f64; 3] = [2.0, 4.0, 6.0];
 /// Параметр затухания весов WOBI
 pub const LAMBDA: f64 = 0.15;
 
-/// Параметр сглаживания EMA для OBI(1)
-pub const EMA_ALPHA: f64 = 0.3;
+/// Постоянная времени Time-Weighted EMA (τ в миллисекундах)
+/// α_t = 1 - exp(-Δt / τ), где Δt — реальное время между тиками
+pub const EMA_TAU_MS: f64 = 500.0;
 
 /// Вычисленные OBI метрики
 #[derive(Debug, Clone, Default)]
@@ -102,10 +103,12 @@ fn slice_obi(
 
 /// Вычисляет все OBI метрики по текущему состоянию стакана
 ///
-/// Использует предыдущие EMA значения для сглаживания OBI(1)
+/// `delta_ms` — реальное время в мс с предыдущего вызова (для Time-Weighted EMA)
+/// `prev_ema_v/sh` — предыдущие значения EMA для сглаживания OBI(1)
 pub fn compute_metrics(
     up_bids: &[OrderLevel; ORDER_BOOK_DEPTH],
     down_bids: &[OrderLevel; ORDER_BOOK_DEPTH],
+    delta_ms: f64,
     prev_ema_v: f64,
     prev_ema_sh: f64,
 ) -> ObiMetrics {
@@ -123,9 +126,12 @@ pub fn compute_metrics(
     let obi1_v = slice_v[0];
     let obi1_sh = slice_sh[0];
 
-    // EMA сглаживание OBI(1): alpha=0.3
-    let ema_obi1_v = EMA_ALPHA * obi1_v + (1.0 - EMA_ALPHA) * prev_ema_v;
-    let ema_obi1_sh = EMA_ALPHA * obi1_sh + (1.0 - EMA_ALPHA) * prev_ema_sh;
+    // Time-Weighted EMA: α_t = 1 - exp(-Δt / τ)
+    // Первый тик (delta=0 или очень маленький) → alpha близок к 0, сохраняем предыдущее
+    // Большой Δt (долгая пауза) → alpha близок к 1, берём свежее значение
+    let alpha_t = 1.0 - (-delta_ms / EMA_TAU_MS).exp();
+    let ema_obi1_v = alpha_t * obi1_v + (1.0 - alpha_t) * prev_ema_v;
+    let ema_obi1_sh = alpha_t * obi1_sh + (1.0 - alpha_t) * prev_ema_sh;
 
     // WOBI: взвешенная сумма срезов 1-3 (исключая slice 0 = уровень 1)
     // Веса: экспоненциальное затухание exp(-lambda*d), нормализованные
