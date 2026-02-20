@@ -125,7 +125,7 @@ impl RealEngine {
         let (up_paused, down_paused) = {
             let p = self.portfolio.lock().unwrap();
             let mut s = self.math_state.lock().unwrap();
-            let up_skew = p.up_shares - p.down_shares;   // > 0 → UP перевешивает
+            let up_skew = p.up_shares - p.down_shares; // > 0 → UP перевешивает
             let down_skew = p.down_shares - p.up_shares; // > 0 → DOWN перевешивает
             if up_skew >= max_size_side {
                 s.up_paused = true;

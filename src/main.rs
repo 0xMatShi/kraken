@@ -384,13 +384,10 @@ async fn main() -> anyhow::Result<()> {
                                 let mut rest = crate::models::RestPositions::default();
                                 for pos in &positions {
                                     if pos.asset == *up_token_rest {
-                                        rest.up_shares =
-                                            pos.size.try_into().unwrap_or(0.0);
-                                        rest.up_avg_price =
-                                            pos.avg_price.try_into().unwrap_or(0.0);
+                                        rest.up_shares = pos.size.try_into().unwrap_or(0.0);
+                                        rest.up_avg_price = pos.avg_price.try_into().unwrap_or(0.0);
                                     } else if pos.asset == *down_token_rest {
-                                        rest.down_shares =
-                                            pos.size.try_into().unwrap_or(0.0);
+                                        rest.down_shares = pos.size.try_into().unwrap_or(0.0);
                                         rest.down_avg_price =
                                             pos.avg_price.try_into().unwrap_or(0.0);
                                     }

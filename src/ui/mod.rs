@@ -514,7 +514,13 @@ pub fn render(frame: &mut Frame, state: &UiState) {
     .areas(left_area);
 
     render_event_info(frame, event_area, &state.event_info, state.trading_mode);
-    render_portfolio(frame, portfolio_area, &state.portfolio, &state.rest_positions, state.trading_mode);
+    render_portfolio(
+        frame,
+        portfolio_area,
+        &state.portfolio,
+        &state.rest_positions,
+        state.trading_mode,
+    );
     render_open_orders(frame, open_orders_area, &state.open_orders);
     render_history(frame, history_area, &state.trade_history);
 
@@ -682,20 +688,38 @@ fn render_portfolio(
         )]),
         Line::from(vec![
             Span::styled("  UP: ", Style::default().fg(Color::Green)),
-            Span::raw(format!("{:.1} shares @ avg {:.3}", portfolio.up_shares, ws_up_avg)),
-            Span::styled(format!("  ${:.2}", portfolio.up_spent), Style::default().fg(Color::Gray)),
+            Span::raw(format!(
+                "{:.1} shares @ avg {:.3}",
+                portfolio.up_shares, ws_up_avg
+            )),
+            Span::styled(
+                format!("  ${:.2}", portfolio.up_spent),
+                Style::default().fg(Color::Gray),
+            ),
         ]),
         Line::from(vec![
             Span::styled("DOWN: ", Style::default().fg(Color::Red)),
-            Span::raw(format!("{:.1} shares @ avg {:.3}", portfolio.down_shares, ws_down_avg)),
-            Span::styled(format!("  ${:.2}", portfolio.down_spent), Style::default().fg(Color::Gray)),
+            Span::raw(format!(
+                "{:.1} shares @ avg {:.3}",
+                portfolio.down_shares, ws_down_avg
+            )),
+            Span::styled(
+                format!("  ${:.2}", portfolio.down_spent),
+                Style::default().fg(Color::Gray),
+            ),
         ]),
         Line::from(vec![
             Span::styled("  Total Avg: ", Style::default().fg(Color::White)),
-            Span::styled(format!("{:.3}", ws_total_avg), Style::default().fg(total_avg_color(ws_total_avg))),
+            Span::styled(
+                format!("{:.3}", ws_total_avg),
+                Style::default().fg(total_avg_color(ws_total_avg)),
+            ),
             Span::raw("  |  "),
             Span::styled("Spent: ", Style::default().fg(Color::White)),
-            Span::styled(format!("${:.2}", ws_total_spent), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("${:.2}", ws_total_spent),
+                Style::default().fg(Color::Cyan),
+            ),
         ]),
         Line::from(""),
         // ── REST API ──
@@ -705,20 +729,38 @@ fn render_portfolio(
         )]),
         Line::from(vec![
             Span::styled("  UP: ", Style::default().fg(Color::Green)),
-            Span::raw(format!("{:.1} shares @ avg {:.3}", rest.up_shares, rest.up_avg_price)),
-            Span::styled(format!("  ${:.2}", rest_up_spent), Style::default().fg(Color::Gray)),
+            Span::raw(format!(
+                "{:.1} shares @ avg {:.3}",
+                rest.up_shares, rest.up_avg_price
+            )),
+            Span::styled(
+                format!("  ${:.2}", rest_up_spent),
+                Style::default().fg(Color::Gray),
+            ),
         ]),
         Line::from(vec![
             Span::styled("DOWN: ", Style::default().fg(Color::Red)),
-            Span::raw(format!("{:.1} shares @ avg {:.3}", rest.down_shares, rest.down_avg_price)),
-            Span::styled(format!("  ${:.2}", rest_down_spent), Style::default().fg(Color::Gray)),
+            Span::raw(format!(
+                "{:.1} shares @ avg {:.3}",
+                rest.down_shares, rest.down_avg_price
+            )),
+            Span::styled(
+                format!("  ${:.2}", rest_down_spent),
+                Style::default().fg(Color::Gray),
+            ),
         ]),
         Line::from(vec![
             Span::styled("  Total Avg: ", Style::default().fg(Color::White)),
-            Span::styled(format!("{:.3}", rest_total_avg), Style::default().fg(total_avg_color(rest_total_avg))),
+            Span::styled(
+                format!("{:.3}", rest_total_avg),
+                Style::default().fg(total_avg_color(rest_total_avg)),
+            ),
             Span::raw("  |  "),
             Span::styled("Spent: ", Style::default().fg(Color::White)),
-            Span::styled(format!("${:.2}", rest_total_spent), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("${:.2}", rest_total_spent),
+                Style::default().fg(Color::Cyan),
+            ),
         ]),
         Line::from(""),
         // ── Общие счётчики ──

@@ -47,8 +47,8 @@ pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> Placeme
     let obi1 = metrics.ema_obi1_v; // EMA сглаженный OBI(1)
     let wobi_v = metrics.wobi_v; // V-weighted WOBI (только для расхождения в шагах 1 и 1а)
     let wobi_sh = metrics.wobi_sh; // Sh-weighted WOBI (первичный, шаги 0 и 2-12)
-    let consensus = metrics.consensus_v;
-    let gradient = metrics.gradient_v;
+    let consensus = metrics.consensus_sh;
+    let gradient = metrics.gradient_sh;
 
     // ─── Шаг 0: Зона молчания ───────────────────────────────────────────────
     // Все метрики слабее порогов → не торговать
