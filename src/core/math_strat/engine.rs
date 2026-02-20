@@ -4,15 +4,16 @@ use super::metrics::ObiMetrics;
 use super::state::MathOrder;
 use crate::models::{MarketPrices, Side};
 use crate::ui::{self, ORDER_BOOK_DEPTH, OrderLevel};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::info;
 
-/// Максимальное время жизни Math ордера
-const MAX_ORDER_LIFETIME: Duration = Duration::from_secs(10);
-
-/// Порог разворота EMA OBI(1) для отмены ордеров
+/// Порог разворота EMA OBI(1) для немедленной отмены ордеров
 const EMA_REVERSAL_THRESHOLD: f64 = 0.4;
+
+/// Минимальный интервал между циклами управления позицией
+const POSITION_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 impl RealEngine {
     /// Обновляет OBI метрики в UI (вызывается для ВСЕХ стратегий)
@@ -64,6 +65,16 @@ impl RealEngine {
 
     /// Основная логика Math стратегии — вызывается из process_tick()
     pub fn process_math(self: &Arc<Self>, _prices: MarketPrices) {
+        // Throttle: цикл управления позицией не чаще раза в 500мс
+        {
+            let mut s = self.math_state.lock().unwrap();
+            let elapsed = s.last_position_check.map_or(Duration::MAX, |t| t.elapsed());
+            if elapsed < POSITION_CHECK_INTERVAL {
+                return;
+            }
+            s.last_position_check = Some(Instant::now());
+        }
+
         // Читаем текущие OBI метрики из ui_state (уже обновлены в update_obi_display)
         let metrics = {
             let state = self.ui_state.lock().unwrap();
@@ -100,39 +111,27 @@ impl RealEngine {
             s.gradient_confirm_pos >= 2 || s.gradient_confirm_neg >= 2
         };
 
-        // Отменяем устаревшие ордера
-        self.cancel_stale_math_orders(&metrics);
+        // Правило EMA-разворота: немедленно отменяем ордера при резком развороте
+        self.check_ema_reversal(&metrics);
 
         // Вычисляем решение о размещении
         let decision = compute_decision(&metrics, gradient_confirm);
 
-        // Нет уровней для размещения — выходим
-        if decision.up_levels.is_empty() && decision.down_levels.is_empty() {
-            return;
-        }
-
-        let order_size = self.config.size;
-        let max_size_side = self.config.max_size_side;
-        let max_per_side = (max_size_side / order_size).floor() as usize;
-        if max_per_side == 0 {
-            return;
-        }
-
-        // Гистерезис по реальному перекосу портфеля (разность между сторонами):
-        // пауза стороны: когда её перевес над другой стороной >= max_size_side
-        // снятие паузы:  когда перевес снизился до <= max_size_side - size/2
-        let resume_threshold = max_size_side - order_size / 2.0;
+        // Гистерезис по реальному перекосу портфеля:
+        // пауза стороны: когда её перевес >= max_size_side
+        // снятие паузы:  когда перевес <= max_size_side - size/2
+        let resume_threshold = self.config.max_size_side - self.config.size / 2.0;
         let (up_paused, down_paused) = {
             let p = self.portfolio.lock().unwrap();
             let mut s = self.math_state.lock().unwrap();
-            let up_skew = p.up_shares - p.down_shares; // > 0 → UP перевешивает
-            let down_skew = p.down_shares - p.up_shares; // > 0 → DOWN перевешивает
-            if up_skew >= max_size_side {
+            let up_skew = p.up_shares - p.down_shares;
+            let down_skew = p.down_shares - p.up_shares;
+            if up_skew >= self.config.max_size_side {
                 s.up_paused = true;
             } else if up_skew <= resume_threshold {
                 s.up_paused = false;
             }
-            if down_skew >= max_size_side {
+            if down_skew >= self.config.max_size_side {
                 s.down_paused = true;
             } else if down_skew <= resume_threshold {
                 s.down_paused = false;
@@ -140,89 +139,33 @@ impl RealEngine {
             (s.up_paused, s.down_paused)
         };
 
+        let order_size = self.config.size;
+        let max_per_side = (self.config.max_size_side / order_size).floor() as usize;
+        if max_per_side == 0 {
+            return;
+        }
+
         let (up_bids, _) = ui::get_up_book(&self.ui_state);
         let (down_bids, _) = ui::get_down_book(&self.ui_state);
 
-        // UP ордера
-        if !decision.up_levels.is_empty() && !up_paused {
-            let (active, pending) = {
-                let s = self.math_state.lock().unwrap();
-                (s.up_orders.len(), s.pending_up_levels.len())
-            };
-
-            if active + pending < max_per_side {
-                for &level in &decision.up_levels {
-                    let can_place = {
-                        let mut s = self.math_state.lock().unwrap();
-                        let occupied = s.up_orders.values().any(|o| o.level == level)
-                            || s.pending_up_levels.contains(&level);
-                        let slots_ok = s.up_orders.len() + s.pending_up_levels.len() < max_per_side;
-                        if !occupied && slots_ok {
-                            s.pending_up_levels.insert(level);
-                            true
-                        } else {
-                            false
-                        }
-                    };
-                    if !can_place {
-                        continue;
-                    }
-                    if let Some(price) = Self::bid_price_at_level(&up_bids, level) {
-                        super::streams::place_math_order(self, Side::Up, price, order_size, level);
-                    } else {
-                        // Нет цены — снимаем резерв
-                        self.math_state
-                            .lock()
-                            .unwrap()
-                            .pending_up_levels
-                            .remove(&level);
-                    }
-                }
-            }
+        // Сверяем активные ордера с новым решением и при необходимости переставляем
+        if !up_paused {
+            self.reconcile_math_side(
+                Side::Up,
+                &decision.up_levels,
+                &up_bids,
+                order_size,
+                max_per_side,
+            );
         }
-
-        // DOWN ордера
-        if !decision.down_levels.is_empty() && !down_paused {
-            let (active, pending) = {
-                let s = self.math_state.lock().unwrap();
-                (s.down_orders.len(), s.pending_down_levels.len())
-            };
-
-            if active + pending < max_per_side {
-                for &level in &decision.down_levels {
-                    let can_place = {
-                        let mut s = self.math_state.lock().unwrap();
-                        let occupied = s.down_orders.values().any(|o| o.level == level)
-                            || s.pending_down_levels.contains(&level);
-                        let slots_ok =
-                            s.down_orders.len() + s.pending_down_levels.len() < max_per_side;
-                        if !occupied && slots_ok {
-                            s.pending_down_levels.insert(level);
-                            true
-                        } else {
-                            false
-                        }
-                    };
-                    if !can_place {
-                        continue;
-                    }
-                    if let Some(price) = Self::bid_price_at_level(&down_bids, level) {
-                        super::streams::place_math_order(
-                            self,
-                            Side::Down,
-                            price,
-                            order_size,
-                            level,
-                        );
-                    } else {
-                        self.math_state
-                            .lock()
-                            .unwrap()
-                            .pending_down_levels
-                            .remove(&level);
-                    }
-                }
-            }
+        if !down_paused {
+            self.reconcile_math_side(
+                Side::Down,
+                &decision.down_levels,
+                &down_bids,
+                order_size,
+                max_per_side,
+            );
         }
     }
 
@@ -239,40 +182,144 @@ impl RealEngine {
         }
     }
 
-    /// Отменяет устаревшие Math ордера (>10с или EMA OBI(1) развернулся более чем на 0.4)
-    fn cancel_stale_math_orders(self: &Arc<Self>, metrics: &ObiMetrics) {
-        let ema = metrics.ema_obi1_v;
+    /// Правило EMA-разворота: если EMA OBI(1) sh резко развернулся — отменяем ордера на стороне
+    fn check_ema_reversal(self: &Arc<Self>, metrics: &ObiMetrics) {
+        let ema = metrics.ema_obi1_sh;
 
-        let stale_ids: Vec<String> = {
+        // EMA резко медвежий → отменяем все UP ордера
+        if ema < -EMA_REVERSAL_THRESHOLD {
+            let ids: Vec<String> = {
+                let mut s = self.math_state.lock().unwrap();
+                let ids: Vec<_> = s.up_orders.keys().cloned().collect();
+                for id in &ids {
+                    s.up_orders.remove(id);
+                }
+                ids
+            };
+            if !ids.is_empty() {
+                info!(
+                    "🚨 [Math] EMA разворот вниз ({:.2}): отменяем {} UP ордеров",
+                    ema,
+                    ids.len()
+                );
+                super::super::streams::cancel_orders(self, ids);
+            }
+        }
+
+        // EMA резко бычий → отменяем все DOWN ордера
+        if ema > EMA_REVERSAL_THRESHOLD {
+            let ids: Vec<String> = {
+                let mut s = self.math_state.lock().unwrap();
+                let ids: Vec<_> = s.down_orders.keys().cloned().collect();
+                for id in &ids {
+                    s.down_orders.remove(id);
+                }
+                ids
+            };
+            if !ids.is_empty() {
+                info!(
+                    "🚨 [Math] EMA разворот вверх ({:.2}): отменяем {} DOWN ордеров",
+                    ema,
+                    ids.len()
+                );
+                super::super::streams::cancel_orders(self, ids);
+            }
+        }
+    }
+
+    /// Сверяет активные ордера с новым решением:
+    /// — отменяет ордера, где уровень вышел из решения или цена в стакане изменилась
+    /// — размещает новые ордера для уровней без активного ордера
+    fn reconcile_math_side(
+        self: &Arc<Self>,
+        side: Side,
+        new_levels: &[u8],
+        bids: &[OrderLevel; ORDER_BOOK_DEPTH],
+        order_size: f64,
+        max_per_side: usize,
+    ) {
+        // Желаемое состояние: уровень → текущая цена из стакана
+        let desired: HashMap<u8, f64> = new_levels
+            .iter()
+            .filter_map(|&lvl| Self::bid_price_at_level(bids, lvl).map(|p| (lvl, p)))
+            .collect();
+
+        // Определяем ордера для отмены:
+        // — уровень не входит в новое решение
+        // — ИЛИ цена в стакане изменилась с момента размещения (>= 0.5 цента)
+        let to_cancel: Vec<String> = {
             let s = self.math_state.lock().unwrap();
-            s.up_orders
+            let orders = if matches!(side, Side::Up) {
+                &s.up_orders
+            } else {
+                &s.down_orders
+            };
+            orders
                 .iter()
-                .filter(|(_, o)| {
-                    o.placed_at.elapsed() > MAX_ORDER_LIFETIME || ema < -EMA_REVERSAL_THRESHOLD
+                .filter(|(_, order)| match desired.get(&order.level) {
+                    Some(&desired_price) => (desired_price - order.price).abs() >= 0.005,
+                    None => true,
                 })
                 .map(|(id, _)| id.clone())
-                .chain(
-                    s.down_orders
-                        .iter()
-                        .filter(|(_, o)| {
-                            o.placed_at.elapsed() > MAX_ORDER_LIFETIME
-                                || ema > EMA_REVERSAL_THRESHOLD
-                        })
-                        .map(|(id, _)| id.clone()),
-                )
                 .collect()
         };
 
-        if !stale_ids.is_empty() {
+        if !to_cancel.is_empty() {
+            info!(
+                "[Math] {:?}: переставляем {} ордеров (уровни/цены изменились)",
+                side,
+                to_cancel.len()
+            );
             {
                 let mut s = self.math_state.lock().unwrap();
-                for id in &stale_ids {
-                    s.up_orders.remove(id);
-                    s.down_orders.remove(id);
+                let orders = if matches!(side, Side::Up) {
+                    &mut s.up_orders
+                } else {
+                    &mut s.down_orders
+                };
+                for id in &to_cancel {
+                    orders.remove(id);
                 }
             }
-            info!("🗑️ [Math] Отменяем {} устаревших ордеров", stale_ids.len());
-            super::super::streams::cancel_orders(self, stale_ids);
+            super::super::streams::cancel_orders(self, to_cancel);
+        }
+
+        // Размещаем ордера для желаемых уровней без активного или pending ордера
+        for (&level, &price) in &desired {
+            let can_place = {
+                let mut s = self.math_state.lock().unwrap();
+                let (level_active, level_pending, active_len, pending_len) =
+                    if matches!(side, Side::Up) {
+                        (
+                            s.up_orders.values().any(|o| o.level == level),
+                            s.pending_up_levels.contains(&level),
+                            s.up_orders.len(),
+                            s.pending_up_levels.len(),
+                        )
+                    } else {
+                        (
+                            s.down_orders.values().any(|o| o.level == level),
+                            s.pending_down_levels.contains(&level),
+                            s.down_orders.len(),
+                            s.pending_down_levels.len(),
+                        )
+                    };
+
+                if !level_active && !level_pending && active_len + pending_len < max_per_side {
+                    if matches!(side, Side::Up) {
+                        s.pending_up_levels.insert(level);
+                    } else {
+                        s.pending_down_levels.insert(level);
+                    }
+                    true
+                } else {
+                    false
+                }
+            };
+
+            if can_place {
+                super::streams::place_math_order(self, side, price, order_size, level);
+            }
         }
     }
 
@@ -285,10 +332,7 @@ impl RealEngine {
         _size: f64,
         level: u8,
     ) {
-        let order = MathOrder {
-            level,
-            placed_at: Instant::now(),
-        };
+        let order = MathOrder { level, price };
         let mut s = self.math_state.lock().unwrap();
         match side {
             Side::Up => {

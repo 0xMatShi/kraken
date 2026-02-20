@@ -4,8 +4,8 @@ use std::time::Instant;
 /// Один активный math ордер
 #[derive(Debug)]
 pub struct MathOrder {
-    pub level: u8, // уровень размещения (1-7)
-    pub placed_at: Instant,
+    pub level: u8,  // уровень размещения (1-7)
+    pub price: f64, // цена, по которой ордер был выставлен
 }
 
 /// Состояние math стратегии
@@ -31,6 +31,8 @@ pub struct MathState {
     pub up_paused: bool,
     /// Приостановлено размещение DOWN ордеров (портфель >= max_size_side)
     pub down_paused: bool,
+    /// Момент последнего цикла управления позицией (для throttle 500мс)
+    pub last_position_check: Option<Instant>,
 }
 
 impl Default for MathState {
@@ -46,6 +48,7 @@ impl Default for MathState {
             pending_down_levels: HashSet::new(),
             up_paused: false,
             down_paused: false,
+            last_position_check: None,
         }
     }
 }
