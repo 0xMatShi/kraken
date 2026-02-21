@@ -8,7 +8,7 @@ max_balance = 300.0
 size = 10.0
 
 # Максимальный размер позиции на одной стороне (для cumulative стратегии)
-max_size_side = 20.0
+max_size_side = 10.0
 
 # Количество звеньев цепи для первой ноги (для cumulative стратегии)
 chain_links = 10
