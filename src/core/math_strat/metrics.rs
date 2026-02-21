@@ -15,7 +15,7 @@ pub const LAMBDA: f64 = 0.15;
 
 /// Постоянная времени Time-Weighted EMA (τ в миллисекундах)
 /// α_t = 1 - exp(-Δt / τ), где Δt — реальное время между тиками
-pub const EMA_TAU_MS: f64 = 500.0;
+pub const EMA_TAU_MS: f64 = 250.0;
 
 /// Вычисленные OBI метрики
 #[derive(Debug, Clone, Default)]
