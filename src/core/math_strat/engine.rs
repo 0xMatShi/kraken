@@ -109,10 +109,10 @@ impl RealEngine {
         // Обновляем счётчики подтверждения градиента
         let gradient_confirm = {
             let mut s = self.math_state.lock().unwrap();
-            if metrics.gradient_v > 0.15 {
+            if metrics.gradient_sh > 0.15 {
                 s.gradient_confirm_pos += 1;
                 s.gradient_confirm_neg = 0;
-            } else if metrics.gradient_v < -0.15 {
+            } else if metrics.gradient_sh < -0.15 {
                 s.gradient_confirm_neg += 1;
                 s.gradient_confirm_pos = 0;
             } else {
