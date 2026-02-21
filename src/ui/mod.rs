@@ -109,9 +109,12 @@ pub struct ObiDisplayData {
     /// EMA OBI(1) (alpha=0.3) — сохраняется между тиками
     pub ema_obi1_v: f64,
     pub ema_obi1_sh: f64,
-    /// WOBI (взвешенный по срезам 1-3, lambda=0.15)
+    /// WOBI raw (взвешенный по срезам 1-3, lambda=0.15)
     pub wobi_v: f64,
     pub wobi_sh: f64,
+    /// WOBI EMA сглаженный — сохраняется между тиками
+    pub ema_wobi_v: f64,
+    pub ema_wobi_sh: f64,
     /// Consensus (среднее sgn по всем 4 срезам)
     pub consensus_v: f64,
     pub consensus_sh: f64,

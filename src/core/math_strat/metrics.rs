@@ -32,9 +32,13 @@ pub struct ObiMetrics {
     pub ema_obi1_v: f64,
     pub ema_obi1_sh: f64,
 
-    /// WOBI (взвешенный по срезам 1-3, lambda=0.15)
+    /// WOBI raw (взвешенный по срезам 1-3, lambda=0.15)
     pub wobi_v: f64,
     pub wobi_sh: f64,
+
+    /// WOBI EMA сглаженный (тот же τ, что и для OBI(1))
+    pub ema_wobi_v: f64,
+    pub ema_wobi_sh: f64,
 
     /// Consensus (среднее sgn по всем 4 срезам)
     pub consensus_v: f64,
@@ -105,12 +109,15 @@ fn slice_obi(
 ///
 /// `delta_ms` — реальное время в мс с предыдущего вызова (для Time-Weighted EMA)
 /// `prev_ema_v/sh` — предыдущие значения EMA для сглаживания OBI(1)
+/// `prev_ema_wobi_v/sh` — предыдущие значения EMA для сглаживания WOBI
 pub fn compute_metrics(
     up_bids: &[OrderLevel; ORDER_BOOK_DEPTH],
     down_bids: &[OrderLevel; ORDER_BOOK_DEPTH],
     delta_ms: f64,
     prev_ema_v: f64,
     prev_ema_sh: f64,
+    prev_ema_wobi_v: f64,
+    prev_ema_wobi_sh: f64,
 ) -> ObiMetrics {
     // Вычисляем OBI по каждому срезу
     let mut slice_v = [0.0f64; 4];
@@ -146,6 +153,9 @@ pub fn compute_metrics(
         .map(|(w, &sh)| w * sh)
         .sum();
 
+    let ema_wobi_v = alpha_t * wobi_v + (1.0 - alpha_t) * prev_ema_wobi_v;
+    let ema_wobi_sh = alpha_t * wobi_sh + (1.0 - alpha_t) * prev_ema_wobi_sh;
+
     // Consensus: (1/N) * sum(sgn(OBI)) по всем 4 срезам
     let sgn = |x: f64| -> f64 {
         if x > 0.001 {
@@ -173,6 +183,8 @@ pub fn compute_metrics(
         ema_obi1_sh,
         wobi_v,
         wobi_sh,
+        ema_wobi_v,
+        ema_wobi_sh,
         consensus_v,
         consensus_sh,
         gradient_v,

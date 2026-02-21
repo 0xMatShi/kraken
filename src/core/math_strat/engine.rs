@@ -34,9 +34,14 @@ impl RealEngine {
             dt
         };
 
-        let (prev_ema_v, prev_ema_sh) = {
+        let (prev_ema_v, prev_ema_sh, prev_ema_wobi_v, prev_ema_wobi_sh) = {
             let state = self.ui_state.lock().unwrap();
-            (state.obi_display.ema_obi1_v, state.obi_display.ema_obi1_sh)
+            (
+                state.obi_display.ema_obi1_v,
+                state.obi_display.ema_obi1_sh,
+                state.obi_display.ema_wobi_v,
+                state.obi_display.ema_wobi_sh,
+            )
         };
 
         let metrics = super::metrics::compute_metrics(
@@ -45,6 +50,8 @@ impl RealEngine {
             delta_ms,
             prev_ema_v,
             prev_ema_sh,
+            prev_ema_wobi_v,
+            prev_ema_wobi_sh,
         );
 
         let mut state = self.ui_state.lock().unwrap();
@@ -57,6 +64,8 @@ impl RealEngine {
         d.ema_obi1_sh = metrics.ema_obi1_sh;
         d.wobi_v = metrics.wobi_v;
         d.wobi_sh = metrics.wobi_sh;
+        d.ema_wobi_v = metrics.ema_wobi_v;
+        d.ema_wobi_sh = metrics.ema_wobi_sh;
         d.consensus_v = metrics.consensus_v;
         d.consensus_sh = metrics.consensus_sh;
         d.gradient_v = metrics.gradient_v;
@@ -88,6 +97,8 @@ impl RealEngine {
                 ema_obi1_sh: d.ema_obi1_sh,
                 wobi_v: d.wobi_v,
                 wobi_sh: d.wobi_sh,
+                ema_wobi_v: d.ema_wobi_v,
+                ema_wobi_sh: d.ema_wobi_sh,
                 consensus_v: d.consensus_v,
                 consensus_sh: d.consensus_sh,
                 gradient_v: d.gradient_v,
