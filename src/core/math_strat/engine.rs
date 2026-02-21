@@ -13,7 +13,7 @@ use tracing::info;
 const EMA_REVERSAL_THRESHOLD: f64 = 0.4;
 
 /// Минимальный интервал между циклами управления позицией
-const POSITION_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+const POSITION_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
 impl RealEngine {
     /// Обновляет OBI метрики в UI (вызывается для ВСЕХ стратегий)
