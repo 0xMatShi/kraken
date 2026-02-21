@@ -18,8 +18,8 @@ const POSITION_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 impl RealEngine {
     /// Обновляет OBI метрики в UI (вызывается для ВСЕХ стратегий)
     pub fn update_obi_display(&self) {
-        let (up_bids, _) = ui::get_up_book(&self.ui_state);
-        let (down_bids, _) = ui::get_down_book(&self.ui_state);
+        let (up_bids, up_asks) = ui::get_up_book(&self.ui_state);
+        let (down_bids, down_asks) = ui::get_down_book(&self.ui_state);
 
         // Вычисляем Δt для Time-Weighted EMA
         let delta_ms = {
@@ -46,7 +46,9 @@ impl RealEngine {
 
         let metrics = super::metrics::compute_metrics(
             &up_bids,
+            &up_asks,
             &down_bids,
+            &down_asks,
             delta_ms,
             prev_ema_v,
             prev_ema_sh,
@@ -109,10 +111,10 @@ impl RealEngine {
         // Обновляем счётчики подтверждения градиента
         let gradient_confirm = {
             let mut s = self.math_state.lock().unwrap();
-            if metrics.gradient_sh > 0.15 {
+            if metrics.gradient_v > 0.15 {
                 s.gradient_confirm_pos += 1;
                 s.gradient_confirm_neg = 0;
-            } else if metrics.gradient_sh < -0.15 {
+            } else if metrics.gradient_v < -0.15 {
                 s.gradient_confirm_neg += 1;
                 s.gradient_confirm_pos = 0;
             } else {

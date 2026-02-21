@@ -50,57 +50,40 @@ pub struct ObiMetrics {
 }
 
 /// Вычисляет V_OBI и Sh_OBI для заданного среза уровней стакана
+///
+/// V_OBI = ((v_up_bid + v_up_ask) - (v_dn_bid + v_dn_ask))
+///       / ((v_up_bid + v_up_ask) + (v_dn_bid + v_dn_ask))
+/// Sh_OBI = (up_bid_sh - dn_bid_sh) / (up_bid_sh + dn_bid_sh)  — только биды
 fn slice_obi(
     up_bids: &[OrderLevel; ORDER_BOOK_DEPTH],
+    up_asks: &[OrderLevel; ORDER_BOOK_DEPTH],
     down_bids: &[OrderLevel; ORDER_BOOK_DEPTH],
+    down_asks: &[OrderLevel; ORDER_BOOK_DEPTH],
     start: usize,
     end: usize,
 ) -> (f64, f64) {
     let count = end.saturating_sub(start);
 
-    let up_sh: f64 = up_bids
-        .iter()
-        .skip(start)
-        .take(count)
-        .filter(|l| l.size > 0.0)
-        .map(|l| l.size)
-        .sum();
-    let up_v: f64 = up_bids
-        .iter()
-        .skip(start)
-        .take(count)
-        .filter(|l| l.size > 0.0)
-        .map(|l| l.price * l.size)
-        .sum();
-
-    let dn_sh: f64 = down_bids
-        .iter()
-        .skip(start)
-        .take(count)
-        .filter(|l| l.size > 0.0)
-        .map(|l| l.size)
-        .sum();
-    let dn_v: f64 = down_bids
-        .iter()
-        .skip(start)
-        .take(count)
-        .filter(|l| l.size > 0.0)
-        .map(|l| l.price * l.size)
-        .sum();
-
-    let sh_total = up_sh + dn_sh;
-    let sh_obi = if sh_total > 0.0 {
-        (up_sh - dn_sh) / sh_total
-    } else {
-        0.0
+    let vol = |levels: &[OrderLevel; ORDER_BOOK_DEPTH]| -> (f64, f64) {
+        let sh = levels.iter().skip(start).take(count)
+            .filter(|l| l.size > 0.0).map(|l| l.size).sum();
+        let v  = levels.iter().skip(start).take(count)
+            .filter(|l| l.size > 0.0).map(|l| l.price * l.size).sum();
+        (sh, v)
     };
 
+    let (up_bid_sh, up_bid_v)  = vol(up_bids);
+    let (dn_bid_sh, dn_bid_v)  = vol(down_bids);
+    let (_,         up_ask_v)  = vol(up_asks);
+    let (_,         dn_ask_v)  = vol(down_asks);
+
+    let sh_total = up_bid_sh + dn_bid_sh;
+    let sh_obi = if sh_total > 0.0 { (up_bid_sh - dn_bid_sh) / sh_total } else { 0.0 };
+
+    let up_v = up_bid_v + up_ask_v;
+    let dn_v = dn_bid_v + dn_ask_v;
     let v_total = up_v + dn_v;
-    let v_obi = if v_total > 0.0 {
-        (up_v - dn_v) / v_total
-    } else {
-        0.0
-    };
+    let v_obi = if v_total > 0.0 { (up_v - dn_v) / v_total } else { 0.0 };
 
     (v_obi, sh_obi)
 }
@@ -112,7 +95,9 @@ fn slice_obi(
 /// `prev_ema_wobi_v/sh` — предыдущие значения EMA для сглаживания WOBI
 pub fn compute_metrics(
     up_bids: &[OrderLevel; ORDER_BOOK_DEPTH],
+    up_asks: &[OrderLevel; ORDER_BOOK_DEPTH],
     down_bids: &[OrderLevel; ORDER_BOOK_DEPTH],
+    down_asks: &[OrderLevel; ORDER_BOOK_DEPTH],
     delta_ms: f64,
     prev_ema_v: f64,
     prev_ema_sh: f64,
@@ -124,7 +109,7 @@ pub fn compute_metrics(
     let mut slice_sh = [0.0f64; 4];
 
     for (i, &(start, end)) in SLICES.iter().enumerate() {
-        let (v, sh) = slice_obi(up_bids, down_bids, start, end);
+        let (v, sh) = slice_obi(up_bids, up_asks, down_bids, down_asks, start, end);
         slice_v[i] = v;
         slice_sh[i] = sh;
     }
