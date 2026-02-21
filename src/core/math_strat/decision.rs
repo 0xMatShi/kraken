@@ -43,12 +43,12 @@ fn level_from_gradient(gradient: f64) -> u8 {
 /// 11. Общий случай со слабыми сигналами
 pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> PlacementDecision {
     let obi1 = metrics.ema_obi1_v; // EMA сглаженный OBI(1)
-    let consensus = metrics.consensus_sh;
-    let gradient = metrics.gradient_sh;
+    let consensus = metrics.consensus_v;
+    let gradient = metrics.gradient_v;
 
     // ─── Шаг 0: Зона молчания ───────────────────────────────────────────────
     // Все метрики слабее порогов → встать 2-3 в обе стороны
-    let wobi = metrics.ema_wobi_sh;
+    let wobi = metrics.ema_wobi_v;
     if consensus.abs() <= 0.15 && wobi.abs() <= 0.2 && gradient.abs() <= 0.1 && obi1.abs() <= 0.2
     {
         return PlacementDecision {
