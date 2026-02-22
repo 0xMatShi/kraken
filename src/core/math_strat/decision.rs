@@ -49,7 +49,7 @@ pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> Placeme
     // ─── Шаг 0: Зона молчания ───────────────────────────────────────────────
     // Все метрики слабее порогов → встать 2-3 в обе стороны
     let wobi = metrics.ema_wobi_sh;
-    if consensus.abs() <= 0.15 && wobi.abs() <= 0.2 && gradient.abs() <= 0.1 && obi1.abs() <= 0.2
+    if consensus.abs() <= 0.25 && wobi.abs() <= 0.2 && gradient.abs() <= 0.1 && obi1.abs() <= 0.2
     {
         return PlacementDecision {
                 up_levels: vec![2, 3],
@@ -62,13 +62,13 @@ pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> Placeme
     if obi1.abs() > 0.4 && wobi.abs() > 0.4 && gradient.abs() > 0.4 && consensus.abs() >= 0.75 {
         return if wobi > 0.0 {
             PlacementDecision {
-                up_levels: vec![1],
+                up_levels: vec![2],
                 down_levels: vec![4],
             }
         } else {
             PlacementDecision {
                 up_levels: vec![4],
-                down_levels: vec![1],
+                down_levels: vec![2],
             }
         };
     }
@@ -77,7 +77,7 @@ pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> Placeme
     // OBI бычий но WOBI медвежий + Consensus медвежий + Gradient-шок → ловушка, DOWN поздно
     if obi1 > 0.3 && wobi < -0.3 && consensus <= -0.5 && gradient > 0.5 {
         return PlacementDecision {
-            up_levels: vec![1, 2],
+            up_levels: vec![2, 3],
             down_levels: vec![4, 5],
         };
     }
@@ -85,7 +85,7 @@ pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> Placeme
     if obi1 < -0.3 && wobi > 0.3 && consensus >= 0.5 && gradient < -0.5 {
         return PlacementDecision {
             up_levels: vec![4, 5],
-            down_levels: vec![1, 2],
+            down_levels: vec![2, 3],
         };
     }
 
@@ -97,28 +97,28 @@ pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> Placeme
             // Максимальный (OBI 0.7+, WOBI 0.7+): DOWN страховка зависит от gradient
             if obi1 > 0.7 && wobi > 0.7 {
                 if gradient > 0.2 {
-                    // Импульс + максимальный → UP 1, DOWN нет (строка: OBI 0.9+, grad > +0.2)
+                    // Импульс + максимальный → UP 1, DOWN 5 (строка: OBI 0.9+, grad > +0.2)
                     PlacementDecision {
-                        up_levels: vec![1],
+                        up_levels: vec![2],
                         down_levels: vec![5],
                     }
                 } else if gradient > -0.2 {
-                    // Нейтраль + максимальный → UP 1, DOWN 7 (строка: OBI 0.9+, grad ≈ 0)
+                    // Нейтраль + максимальный → UP 1, DOWN 5 (строка: OBI 0.9+, grad ≈ 0)
                     PlacementDecision {
-                        up_levels: vec![1],
+                        up_levels: vec![2],
                         down_levels: vec![5],
                     }
                 } else {
                     // Накопление + максимальный → UP 1, DOWN 6 (строка: OBI 0.9+, grad < -0.2)
                     PlacementDecision {
-                        up_levels: vec![1],
+                        up_levels: vec![2],
                         down_levels: vec![6],
                     }
                 }
             } else if gradient > 0.1 {
                 // Импульс у рынка → UP 1-2, DOWN страховка 6-7
                 PlacementDecision {
-                    up_levels: vec![1, 2],
+                    up_levels: vec![2, 3],
                     down_levels: vec![6, 7],
                 }
             } else if gradient > -0.1 {
@@ -139,25 +139,25 @@ pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> Placeme
                     // DOWN 1, UP нет
                     PlacementDecision {
                         up_levels: vec![5],
-                        down_levels: vec![1],
+                        down_levels: vec![2],
                     }
                 } else if gradient < 0.2 {
                     // DOWN 1, UP 7
                     PlacementDecision {
                         up_levels: vec![5],
-                        down_levels: vec![1],
+                        down_levels: vec![2],
                     }
                 } else {
                     // DOWN 1, UP 6
                     PlacementDecision {
                         up_levels: vec![6],
-                        down_levels: vec![1],
+                        down_levels: vec![2],
                     }
                 }
             } else if gradient < -0.1 {
                 PlacementDecision {
                     up_levels: vec![6, 7],
-                    down_levels: vec![1, 2],
+                    down_levels: vec![2, 3],
                 }
             } else if gradient < 0.1 {
                 PlacementDecision {
@@ -242,7 +242,7 @@ pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> Placeme
         return if wobi > 0.0 {
             if gradient > 0.2 {
                 PlacementDecision {
-                    up_levels: vec![1, 2],
+                    up_levels: vec![2, 3],
                     down_levels: vec![3, 4],
                 }
             } else if gradient > -0.1 {
@@ -260,7 +260,7 @@ pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> Placeme
             if gradient < -0.2 {
                 PlacementDecision {
                     up_levels: vec![3, 4],
-                    down_levels: vec![1, 2],
+                    down_levels: vec![2, 3],
                 }
             } else if gradient < 0.1 {
                 PlacementDecision {
@@ -343,7 +343,7 @@ pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> Placeme
                 if gradient_confirm {
                     PlacementDecision {
                         up_levels: vec![3, 4],
-                        down_levels: vec![1, 2],
+                        down_levels: vec![2, 3],
                     }
                 } else {
                     PlacementDecision {
@@ -369,7 +369,7 @@ pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> Placeme
                 // 3.2: Медвежье накопление → DOWN 3-4 (требует подтверждения)
                 if gradient_confirm {
                     PlacementDecision {
-                        up_levels: vec![1, 2],
+                        up_levels: vec![2, 3],
                         down_levels: vec![3, 4],
                     }
                 } else {
@@ -416,12 +416,12 @@ pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> Placeme
             // OBI UP силён без импульса → DOWN 2-3 (строка 25)
             if gradient > 0.2 {
                 PlacementDecision {
-                    up_levels: vec![1],
+                    up_levels: vec![2],
                     down_levels: vec![2],
                 }
             } else {
                 PlacementDecision {
-                    up_levels: vec![1],
+                    up_levels: vec![2],
                     down_levels: vec![2, 3],
                 }
             }
@@ -430,12 +430,12 @@ pub fn compute_decision(metrics: &ObiMetrics, gradient_confirm: bool) -> Placeme
             if gradient < -0.2 {
                 PlacementDecision {
                     up_levels: vec![2],
-                    down_levels: vec![1],
+                    down_levels: vec![2],
                 }
             } else {
                 PlacementDecision {
                     up_levels: vec![2, 3],
-                    down_levels: vec![1],
+                    down_levels: vec![2],
                 }
             }
         };
