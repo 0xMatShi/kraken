@@ -296,7 +296,7 @@ async fn main() -> anyhow::Result<()> {
         // Меню выбора типа рынка
         print!("\x1B[2J\x1B[1;1H");
         println!("Select Market Type:");
-        println!("1. 15min | 2. 1hour");
+        println!("1. 5min | 2. 15min | 3. 1hour");
         print!("> ");
         io::stdout().flush().unwrap();
 
@@ -304,8 +304,9 @@ async fn main() -> anyhow::Result<()> {
         io::stdin().read_line(&mut market_type_input).unwrap();
 
         let market_type = match market_type_input.trim() {
-            "1" => models::MarketType::FifteenMin,
-            "2" => models::MarketType::OneHour,
+            "1" => models::MarketType::FiveMin,
+            "2" => models::MarketType::FifteenMin,
+            "3" => models::MarketType::OneHour,
             _ => continue,
         };
 

@@ -111,6 +111,15 @@ pub enum Coin {
 }
 
 impl Coin {
+    pub fn slug_prefix_5m(&self) -> &'static str {
+        match self {
+            Coin::BTC => "btc-updown-5m",
+            Coin::ETH => "eth-updown-5m",
+            Coin::SOL => "sol-updown-5m",
+            Coin::XRP => "xrp-updown-5m",
+        }
+    }
+
     pub fn slug_prefix_15m(&self) -> &'static str {
         match self {
             Coin::BTC => "btc-updown-15m",
@@ -142,6 +151,7 @@ impl Coin {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MarketType {
+    FiveMin,
     FifteenMin,
     OneHour,
 }
@@ -149,6 +159,7 @@ pub enum MarketType {
 impl MarketType {
     pub fn max_minutes(&self) -> f64 {
         match self {
+            MarketType::FiveMin => 5.0,
             MarketType::FifteenMin => 15.0,
             MarketType::OneHour => 60.0,
         }
@@ -156,6 +167,7 @@ impl MarketType {
 
     pub fn total_seconds(&self) -> i64 {
         match self {
+            MarketType::FiveMin => 300,
             MarketType::FifteenMin => 900,
             MarketType::OneHour => 3600,
         }
@@ -163,6 +175,7 @@ impl MarketType {
 
     pub fn slug_prefix_for_coin(&self, coin: Coin) -> &'static str {
         match self {
+            MarketType::FiveMin => coin.slug_prefix_5m(),
             MarketType::FifteenMin => coin.slug_prefix_15m(),
             MarketType::OneHour => coin.slug_prefix_1h(),
         }
